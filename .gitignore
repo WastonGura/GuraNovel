@@ -1,0 +1,47 @@
+# Environment and secrets
+.env
+.env.*
+!.env.example
+
+# Python
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# Node / frontend
+node_modules/
+.next/
+dist/
+build/
+coverage/
+
+# Local runtime workspaces
+workspaces/*
+!workspaces/.gitkeep
+!workspaces/example-project/
+!workspaces/example-project/**
+
+# Private design drafts / internal planning notes
+docs/design/
+
+# Databases and local volumes
+*.db
+*.sqlite
+*.sqlite3
+pgdata/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Logs
+*.log
+logs/
