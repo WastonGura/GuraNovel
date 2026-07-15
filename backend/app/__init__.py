@@ -1,0 +1,1 @@
+"""GuraNovel backend application package."""
