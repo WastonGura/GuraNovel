@@ -4,8 +4,10 @@ version = "0.1.0"
 description = "FastAPI backend for GuraNovel."
 requires-python = ">=3.11"
 dependencies = [
+    "asyncpg>=0.29.0",
     "fastapi>=0.115.0",
     "pydantic-settings>=2.4.0",
+    "sqlalchemy[asyncio]>=2.0.0",
     "uvicorn[standard]>=0.30.0",
 ]
 
