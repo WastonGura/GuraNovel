@@ -18,7 +18,7 @@ def resolve_workspace_path(workspace_root: Path, relative_path: str) -> Path:
     windows_path = PureWindowsPath(relative_path)
     if supplied_path.is_absolute() or windows_path.is_absolute() or windows_path.drive:
         raise UnsafeWorkspacePathError("workspace paths must be relative")
-    if ".." in supplied_path.parts:
+    if ".." in supplied_path.parts or ".." in windows_path.parts:
         raise UnsafeWorkspacePathError("workspace paths must not contain traversal")
 
     root = workspace_root.resolve()

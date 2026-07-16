@@ -1,3 +1,5 @@
+import os
+import stat
 from pathlib import Path
 
 import pytest
@@ -33,6 +35,14 @@ def test_resolve_workspace_path_rejects_absolute_and_traversal_paths(
         resolve_workspace_path(tmp_path, relative_path)
 
 
+@pytest.mark.parametrize("relative_path", [r"..\\document.md", r"draft\\..\\..\\x.md"])
+def test_resolve_workspace_path_rejects_windows_style_traversal_paths(
+    tmp_path: Path, relative_path: str
+) -> None:
+    with pytest.raises(UnsafeWorkspacePathError):
+        resolve_workspace_path(tmp_path, relative_path)
+
+
 def test_write_rejects_path_escaping_workspace_before_creating_a_file(tmp_path: Path) -> None:
     store = MarkdownStore(tmp_path)
     outside_document = tmp_path.parent / "outside.md"
@@ -49,7 +59,7 @@ def test_failed_replacement_preserves_the_current_document(
     store = MarkdownStore(tmp_path)
     store.write("chapter.md", "original")
 
-    def fail_replace(source: str, destination: Path) -> None:
+    def fail_replace(source: str, destination: str, **_kwargs: object) -> None:
         raise OSError("simulated replacement failure")
 
     monkeypatch.setattr("app.workspace.markdown_store.os.replace", fail_replace)
@@ -59,6 +69,80 @@ def test_failed_replacement_preserves_the_current_document(
 
     assert store.read("chapter.md") == "original"
     assert list(tmp_path.glob(".tmp-*")) == []
+
+
+def test_write_replaces_using_open_parent_directory_descriptor(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = MarkdownStore(tmp_path)
+    original_replace = os.replace
+    replace_calls: list[tuple[int | None, int | None]] = []
+
+    def track_replace(
+        source: str,
+        destination: str,
+        *,
+        src_dir_fd: int | None = None,
+        dst_dir_fd: int | None = None,
+    ) -> None:
+        replace_calls.append((src_dir_fd, dst_dir_fd))
+        original_replace(
+            source, destination, src_dir_fd=src_dir_fd, dst_dir_fd=dst_dir_fd
+        )
+
+    monkeypatch.setattr("app.workspace.markdown_store.os.replace", track_replace)
+
+    store.write("drafts/chapter.md", "safe")
+
+    assert replace_calls
+    assert all(source_fd is not None and destination_fd is not None for source_fd, destination_fd in replace_calls)
+    assert (tmp_path / "drafts" / "chapter.md").read_text() == "safe"
+
+
+def test_write_closes_temporary_descriptor_when_fdopen_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = MarkdownStore(tmp_path)
+    temporary_descriptor: int | None = None
+    closed_descriptors: list[int] = []
+    original_close = os.close
+
+    def fail_fdopen(descriptor: int, *_args: object, **_kwargs: object) -> object:
+        nonlocal temporary_descriptor
+        temporary_descriptor = descriptor
+        raise OSError("simulated fdopen failure")
+
+    def track_close(descriptor: int) -> None:
+        closed_descriptors.append(descriptor)
+        original_close(descriptor)
+
+    monkeypatch.setattr("app.workspace.markdown_store.os.fdopen", fail_fdopen)
+    monkeypatch.setattr("app.workspace.markdown_store.os.close", track_close)
+
+    with pytest.raises(OSError, match="simulated fdopen failure"):
+        store.write("chapter.md", "replacement")
+
+    assert temporary_descriptor is not None
+    assert temporary_descriptor in closed_descriptors
+
+
+def test_write_fsyncs_containing_directory_after_replace(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = MarkdownStore(tmp_path)
+    directory_fsyncs: list[int] = []
+    original_fsync = os.fsync
+
+    def track_fsync(descriptor: int) -> None:
+        if stat.S_ISDIR(os.fstat(descriptor).st_mode):
+            directory_fsyncs.append(descriptor)
+        original_fsync(descriptor)
+
+    monkeypatch.setattr("app.workspace.markdown_store.os.fsync", track_fsync)
+
+    store.write("drafts/chapter.md", "durable")
+
+    assert directory_fsyncs
 
 
 def test_sha256_content_hash_is_deterministic() -> None:
