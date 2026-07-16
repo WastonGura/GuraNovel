@@ -198,7 +198,7 @@ async def test_write_and_restore_append_versions_and_read_historical_content(
 
     assert second_version.version_number == 2
     assert second_version.parent_version_id == first_version.id
-    assert await service.read_current_content(document.id) == "second draft now"
+    assert (await service.read_current_content(document.id)).content == "second draft now"
     assert await service.read_version_content(document.id, first_version.id) == "first draft"
 
     restored_version = await service.restore_document(
@@ -211,7 +211,7 @@ async def test_write_and_restore_append_versions_and_read_historical_content(
 
     assert restored_version.version_number == 3
     assert restored_version.parent_version_id == second_version.id
-    assert await service.read_current_content(document.id) == "first draft"
+    assert (await service.read_current_content(document.id)).content == "first draft"
     versions = (
         await async_session.scalars(
             select(DocumentVersion)
@@ -260,7 +260,7 @@ async def test_stale_expected_version_raises_conflict_without_database_or_worksp
         )
 
     assert error.value.code == "document_version_conflict"
-    assert await service.read_current_content(document.id) == "second draft"
+    assert (await service.read_current_content(document.id)).content == "second draft"
     versions = (
         await async_session.scalars(
             select(DocumentVersion).where(DocumentVersion.document_id == document.id)

@@ -1,14 +1,17 @@
+import asyncio
 from collections.abc import AsyncIterator
 from pathlib import Path
+from uuid import UUID
 
 import httpx
 import pytest
 from fastapi import FastAPI
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from app.api.deps import get_db_session
 from app.main import create_app
-from app.models import Project
+from app.models import Document, DocumentSource, Project
+from app.services import DocumentService
 
 
 @pytest.fixture
@@ -132,6 +135,59 @@ async def test_reads_current_content_and_version_history(
 
 @pytest.mark.integration
 @pytest.mark.anyio
+async def test_current_content_never_labels_a_concurrent_version_as_the_previous_one(
+    client: httpx.AsyncClient,
+    async_session: AsyncSession,
+    integration_database_url: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project = await create_project(async_session, tmp_path)
+    created = await create_document(client, project, content="first draft")
+    document_id = str(created["id"])
+    first_version_id = str(created["current_version"]["id"])  # type: ignore[index]
+    current_version_captured = asyncio.Event()
+    resume_read = asyncio.Event()
+    original_document = DocumentService._document
+
+    async def pause_after_capturing_current_version(
+        service: DocumentService, requested_document_id: UUID
+    ) -> Document:
+        document = await original_document(service, requested_document_id)
+        if str(requested_document_id) == document_id:
+            current_version_captured.set()
+            await resume_read.wait()
+        return document
+
+    monkeypatch.setattr(DocumentService, "_document", pause_after_capturing_current_version)
+    engine = create_async_engine(integration_database_url, pool_pre_ping=True)
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    try:
+        reading = asyncio.create_task(client.get(f"/api/v1/documents/{document_id}/content"))
+        await asyncio.wait_for(current_version_captured.wait(), timeout=2)
+        async with session_factory() as writer_session:
+            written = await DocumentService(writer_session).write_document(
+                document_id=UUID(document_id),
+                content="second draft",
+                source=DocumentSource.USER,
+                expected_current_version_id=UUID(first_version_id),
+            )
+        resume_read.set()
+        response = await reading
+    finally:
+        await engine.dispose()
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "document_id": document_id,
+        "version_id": first_version_id,
+        "content": "first draft",
+    }
+    assert str(written.id) != first_version_id
+
+
+@pytest.mark.integration
+@pytest.mark.anyio
 async def test_write_creates_a_version_and_rejects_stale_current_version(
     client: httpx.AsyncClient, async_session: AsyncSession, tmp_path: Path
 ) -> None:
@@ -204,3 +260,47 @@ async def test_restore_creates_a_new_version_from_historical_content(
     assert current.json()["content"] == "first draft"
     assert missing_expected.status_code == 422
     assert missing_expected.json()["error"]["code"] == "validation_error"
+
+
+@pytest.mark.integration
+@pytest.mark.anyio
+async def test_cross_document_version_content_and_restore_return_not_found_envelope(
+    client: httpx.AsyncClient, async_session: AsyncSession, tmp_path: Path
+) -> None:
+    project = await create_project(async_session, tmp_path)
+    first = await create_document(client, project)
+    second_response = await client.post(
+        "/api/v1/documents",
+        json={
+            "project_id": str(project.id),
+            "type": "chapter_draft",
+            "title": "Chapter two",
+            "path": "drafts/chapter-02.md",
+            "content": "second document",
+        },
+    )
+    assert second_response.status_code == 201
+    second = second_response.json()
+    document_id = str(first["id"])
+    first_version_id = str(first["current_version"]["id"])
+    other_version_id = str(second["current_version"]["id"])
+
+    historical = await client.get(
+        f"/api/v1/documents/{document_id}/versions/{other_version_id}/content"
+    )
+    restored = await client.post(
+        f"/api/v1/documents/{document_id}/versions/{other_version_id}/restore",
+        json={"expected_current_version_id": first_version_id},
+    )
+
+    expected_error = {
+        "error": {
+            "code": "not_found",
+            "message": "Document version not found.",
+            "details": None,
+        }
+    }
+    assert historical.status_code == 404
+    assert historical.json() == expected_error
+    assert restored.status_code == 404
+    assert restored.json() == expected_error

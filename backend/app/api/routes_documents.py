@@ -61,16 +61,11 @@ async def get_document(document_id: UUID, session: AsyncSession = Depends(get_db
 async def read_current_content(
     document_id: UUID, session: AsyncSession = Depends(get_db_session)
 ) -> DocumentContentResponse:
-    document = await session.scalar(
-        select(Document).where(Document.id == document_id)
-    )
-    if document is None or document.current_version_id is None:
-        raise NotFoundError("Document not found.")
-    content = await DocumentService(session).read_current_content(document_id)
+    current_content = await DocumentService(session).read_current_content(document_id)
     return DocumentContentResponse(
-        document_id=document.id,
-        version_id=document.current_version_id,
-        content=content,
+        document_id=document_id,
+        version_id=current_content.version_id,
+        content=current_content.content,
     )
 
 
