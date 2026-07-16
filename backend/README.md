@@ -20,9 +20,10 @@ These are development-only defaults.
 ## Project workspaces
 
 Project workspaces are created only beneath `WORKSPACE_BASE_DIR`. The local-development
-default is the backend's `workspaces` directory, independent of the process working directory;
-set it in `.env` to use another POSIX/Linux/WSL directory. Windows-native filesystems are not
-supported.
+default is `~/.local/share/guranovel/workspaces`, resolved from the service user's home
+directory and independent of the process working directory or source checkout. Set
+`WORKSPACE_BASE_DIR` in `.env` to use another POSIX/Linux/WSL directory. Windows-native
+filesystems are not supported.
 
 `ProjectWorkspace.create()` returns a pathname, not a durable file-descriptor capability. The
 service establishes its pathname-security boundary by requiring the workspace base, project root,

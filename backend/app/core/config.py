@@ -12,7 +12,7 @@ class Settings(BaseSettings):
     app_debug: bool = True
     app_version: str = "0.1.0"
     database_url: str = "postgresql+asyncpg://postgres:postgres@localhost:5432/guranovel"
-    workspace_base_dir: Path = Path(__file__).resolve().parents[2] / "workspaces"
+    workspace_base_dir: Path = Path.home() / ".local" / "share" / "guranovel" / "workspaces"
 
 
 @lru_cache
