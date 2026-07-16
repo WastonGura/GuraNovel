@@ -26,6 +26,8 @@ def workspace_path_parts(relative_path: str) -> tuple[str, ...]:
         raise UnsafeWorkspacePathError("workspace paths must use POSIX '/' separators")
     if not relative_path or relative_path.endswith("/"):
         raise UnsafeWorkspacePathError("workspace paths must name a file")
+    if "." in relative_path.split("/"):
+        raise UnsafeWorkspacePathError("workspace paths must not contain dot components")
 
     parts = PurePosixPath(relative_path).parts
     if not parts or all(part == "." for part in parts):

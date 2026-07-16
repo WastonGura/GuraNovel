@@ -73,7 +73,17 @@ def test_resolve_workspace_path_rejects_windows_style_traversal_paths(
 
 @pytest.mark.parametrize(
     "relative_path",
-    ["", ".", "./", "draft/", r"draft\\chapter.md", r"C:\\document.md", r"\\\\server\\share\\document.md"],
+    [
+        "",
+        ".",
+        "./",
+        "./chapter.md",
+        "draft/./chapter.md",
+        "draft/",
+        r"draft\\chapter.md",
+        r"C:\\document.md",
+        r"\\\\server\\share\\document.md",
+    ],
 )
 def test_resolve_workspace_path_rejects_ambiguous_or_empty_paths(
     tmp_path: Path, relative_path: str
