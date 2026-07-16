@@ -42,6 +42,74 @@ class ProjectWorkspace:
             os.close(base_descriptor)
         return root
 
+    def remove_new_empty(self, slug: str) -> bool:
+        """Remove an empty standard workspace created during a failed transaction.
+
+        This is deliberately limited to the standard directories and only removes the
+        root if nothing else remains. All path operations stay beneath validated
+        directory descriptors, preserving the lifecycle's pathname boundary.
+        """
+        self.root_for(slug)
+        try:
+            base_descriptor = self._open_existing_base_directory()
+        except FileNotFoundError:
+            return False
+        try:
+            try:
+                root_descriptor = os.open(
+                    slug, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=base_descriptor
+                )
+            except FileNotFoundError:
+                return False
+            try:
+                self._validate_managed_directory(root_descriptor)
+                for directory in self._STANDARD_DIRECTORIES:
+                    try:
+                        descriptor = os.open(
+                            directory,
+                            os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                            dir_fd=root_descriptor,
+                        )
+                    except FileNotFoundError:
+                        continue
+                    try:
+                        self._validate_managed_directory(descriptor)
+                    finally:
+                        os.close(descriptor)
+                    try:
+                        os.rmdir(directory, dir_fd=root_descriptor)
+                    except OSError:
+                        pass
+            finally:
+                os.close(root_descriptor)
+            try:
+                os.rmdir(slug, dir_fd=base_descriptor)
+            except OSError:
+                return False
+            return True
+        finally:
+            os.close(base_descriptor)
+
+    def _open_existing_base_directory(self) -> int:
+        descriptor = os.open("/", os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            path_parts = self.workspace_base_dir.parts[1:]
+            self._validate_ancestor_directory(descriptor)
+            for index, part in enumerate(path_parts):
+                child_descriptor = os.open(
+                    part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=descriptor
+                )
+                os.close(descriptor)
+                descriptor = child_descriptor
+                if index == len(path_parts) - 1:
+                    self._validate_managed_directory(descriptor)
+                else:
+                    self._validate_ancestor_directory(descriptor)
+        except BaseException:
+            self._close_quietly(descriptor)
+            raise
+        return descriptor
+
     def _open_or_create_base_directory(self) -> int:
         descriptor = os.open("/", os.O_RDONLY | os.O_DIRECTORY)
         try:
