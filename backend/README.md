@@ -1,5 +1,22 @@
 # GuraNovel backend
 
+## Local PostgreSQL
+
+From the repository root, start the local PostgreSQL 16 database:
+
+```bash
+docker compose up -d db
+```
+
+Check that it is healthy:
+
+```bash
+docker compose ps
+```
+
+The local database uses `postgresql+asyncpg://postgres:postgres@127.0.0.1:5432/guranovel`.
+These are development-only defaults.
+
 ## Development checks
 
 ```bash
@@ -19,6 +36,15 @@ cp .env.example .env
 # Edit DATABASE_URL if needed.
 uv run alembic upgrade head
 ```
+
+To tear down the local database while keeping its data:
+
+```bash
+cd ..
+docker compose down
+```
+
+To remove the database data as well, use `docker compose down -v`.
 
 Useful commands:
 
