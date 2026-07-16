@@ -10,6 +10,7 @@ class Settings(BaseSettings):
     app_env: str = "development"
     app_debug: bool = True
     app_version: str = "0.1.0"
+    database_url: str = "postgresql+asyncpg://postgres:postgres@localhost:5432/guranovel"
 
 
 @lru_cache
