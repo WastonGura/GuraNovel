@@ -17,6 +17,35 @@ docker compose ps
 The local database uses `postgresql+asyncpg://postgres:postgres@127.0.0.1:5432/guranovel`.
 These are development-only defaults.
 
+## PostgreSQL integration tests
+
+Integration tests are marked separately and never use the development database. Create the
+dedicated test database once, then run them with an explicit URL:
+
+```bash
+# From the repository root
+docker compose up -d db
+docker compose exec -T db createdb -U postgres guranovel_test
+
+cd backend
+TEST_DATABASE_URL=postgresql+asyncpg://postgres:postgres@127.0.0.1:5432/guranovel_test \
+  uv run pytest -m integration
+```
+
+`TEST_DATABASE_URL` is required and its database name must end in `_test`. The harness applies
+Alembic `head` and truncates mapped application tables between tests.
+
+If Docker Desktop does not forward Compose ports into WSL, run the same command from a temporary
+container on the Compose network instead:
+
+```bash
+docker run --rm --network guranovel_default -v "$PWD/backend:/app" -w /app \
+  -e TEST_DATABASE_URL=postgresql+asyncpg://postgres:postgres@db:5432/guranovel_test \
+  -e UV_PROJECT_ENVIRONMENT=/tmp/guranovel-venv \
+  ghcr.io/astral-sh/uv:python3.11-bookworm-slim \
+  sh -c 'uv sync --frozen --all-groups && uv run pytest -m integration'
+```
+
 ## Development checks
 
 ```bash
@@ -24,6 +53,7 @@ cd backend
 uv sync --all-groups
 uv run ruff check .
 uv run pytest
+uv run pytest -m integration  # requires TEST_DATABASE_URL
 ```
 
 ## Database migrations
