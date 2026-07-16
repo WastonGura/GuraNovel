@@ -1,11 +1,13 @@
 import asyncio
 
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import configure_mappers
 
 from app.api.deps import get_db_session
 from app.core.config import Settings
 from app.db.base import Base
 from app.db.session import AsyncSessionLocal, engine
+from app.models import ActionRequest, Document, Project, ReviewReport, User, WorkflowRun
 
 
 def test_database_url_can_be_loaded_from_environment(monkeypatch) -> None:
@@ -17,7 +19,6 @@ def test_database_url_can_be_loaded_from_environment(monkeypatch) -> None:
 
 
 def test_async_session_infrastructure_is_constructed_without_connecting() -> None:
-    assert Base.metadata.tables == {}
     assert engine.url.drivername == "postgresql+asyncpg"
 
     async def get_session_type() -> type[AsyncSession]:
@@ -30,3 +31,18 @@ def test_async_session_infrastructure_is_constructed_without_connecting() -> Non
 
     assert issubclass(asyncio.run(get_session_type()), AsyncSession)
     assert AsyncSessionLocal.kw["expire_on_commit"] is False
+
+
+def test_mvp_models_are_imported_and_registered() -> None:
+    assert set(Base.metadata.tables) == {
+        "users", "projects", "chapters", "workflow_runs", "workflow_checkpoints", "workflow_events",
+        "documents", "document_versions", "action_requests", "agent_conversations", "agent_messages", "review_reports",
+    }
+    assert Project.__table__.c.metadata.name == "metadata"
+    assert "metadata" not in Project.__dict__
+    assert Document.__table__.c.current_version_id.foreign_keys
+    assert ActionRequest.__table__.c.options.default.is_callable
+    assert ReviewReport.__table__.c.blocking_issues.default.is_callable
+    assert User.__table__.c.id.type.as_uuid is True
+    assert WorkflowRun.__table__.c.started_at.type.timezone is True
+    configure_mappers()
