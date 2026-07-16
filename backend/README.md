@@ -17,6 +17,12 @@ docker compose ps
 The local database uses `postgresql+asyncpg://postgres:postgres@127.0.0.1:5432/guranovel`.
 These are development-only defaults.
 
+## Project workspaces
+
+Project workspaces are created only beneath `WORKSPACE_BASE_DIR`. The local-development
+default is `./workspaces` (relative to the backend working directory); set it in `.env`
+to use another POSIX/Linux/WSL directory. Windows-native filesystems are not supported.
+
 ## PostgreSQL integration tests
 
 Integration tests are marked separately and never use the development database. Create the
