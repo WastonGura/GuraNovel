@@ -1,6 +1,7 @@
 import asyncio
 from pathlib import Path
 
+import app.core.config as config
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import configure_mappers
 
@@ -27,10 +28,16 @@ def test_workspace_base_dir_can_be_loaded_from_environment(monkeypatch) -> None:
     assert configured_settings.workspace_base_dir == Path("/srv/guranovel-workspaces")
 
 
-def test_workspace_base_dir_has_a_local_development_default() -> None:
+def test_workspace_base_dir_default_is_anchored_to_the_backend(
+    monkeypatch, tmp_path: Path
+) -> None:
+    monkeypatch.chdir(tmp_path)
+
     configured_settings = Settings(_env_file=None)
 
-    assert configured_settings.workspace_base_dir == Path("./workspaces")
+    assert configured_settings.workspace_base_dir == (
+        Path(config.__file__).resolve().parents[2] / "workspaces"
+    )
 
 
 def test_async_session_infrastructure_is_constructed_without_connecting() -> None:
