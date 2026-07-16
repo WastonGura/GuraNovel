@@ -46,6 +46,14 @@ class _FileBackup:
     content: str | None
 
 
+@dataclass(frozen=True)
+class CurrentDocumentContent:
+    """An immutable current-version identifier and its snapshot content."""
+
+    version_id: UUID
+    content: str
+
+
 class DocumentService:
     """The application boundary for creating, writing, and restoring documents."""
 
@@ -175,9 +183,15 @@ class DocumentService:
             change_summary=change_summary,
         )
 
-    async def read_current_content(self, document_id: UUID) -> str:
+    async def read_current_content(self, document_id: UUID) -> CurrentDocumentContent:
         document = await self._document(document_id)
-        return self._store_for(document).read(document.path)
+        version = document.current_version
+        if version is None:
+            raise NotFoundError("Document not found.")
+        return CurrentDocumentContent(
+            version_id=version.id,
+            content=self._store_for(document).read(self._snapshot_path(version)),
+        )
 
     async def read_version_content(self, document_id: UUID, version_id: UUID) -> str:
         document = await self._document(document_id)
