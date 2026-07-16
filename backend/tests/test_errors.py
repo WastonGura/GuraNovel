@@ -1,7 +1,7 @@
 from typing import Any
 
 import pytest
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
 from pydantic import BaseModel
 
@@ -42,6 +42,13 @@ def client() -> TestClient:
     @app.post("/payload")
     async def payload(_: Payload) -> None:
         return None
+
+    @app.get("/forbidden")
+    async def forbidden() -> None:
+        raise HTTPException(
+            status_code=403,
+            detail="You do not have access to this novel.",
+        )
 
     @app.get("/unexpected")
     async def unexpected() -> None:
@@ -85,6 +92,32 @@ def test_validation_errors_use_standard_envelope(client: TestClient) -> None:
     assert body["error"]["code"] == "validation_error"
     assert body["error"]["message"] == "The request validation failed."
     assert isinstance(body["error"]["details"], list)
+
+
+def test_unmatched_routes_use_standard_envelope(client: TestClient) -> None:
+    response = client.get("/missing")
+
+    assert response.status_code == 404
+    assert response.json() == {
+        "error": {
+            "code": "not_found",
+            "message": "The requested resource was not found.",
+            "details": "Not Found",
+        }
+    }
+
+
+def test_http_exceptions_use_standard_envelope(client: TestClient) -> None:
+    response = client.get("/forbidden")
+
+    assert response.status_code == 403
+    assert response.json() == {
+        "error": {
+            "code": "forbidden",
+            "message": "You do not have permission to access this resource.",
+            "details": "You do not have access to this novel.",
+        }
+    }
 
 
 def test_unexpected_errors_do_not_leak_details(client: TestClient) -> None:

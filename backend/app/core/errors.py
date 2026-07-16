@@ -6,6 +6,31 @@ from typing import Any
 from fastapi import FastAPI, Request, status
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
+from starlette.exceptions import HTTPException as StarletteHTTPException
+
+
+HTTP_ERROR_CODES: dict[int, tuple[str, str]] = {
+    status.HTTP_400_BAD_REQUEST: ("bad_request", "The request is invalid."),
+    status.HTTP_401_UNAUTHORIZED: ("unauthorized", "Authentication is required."),
+    status.HTTP_403_FORBIDDEN: ("forbidden", "You do not have permission to access this resource."),
+    status.HTTP_404_NOT_FOUND: ("not_found", "The requested resource was not found."),
+    status.HTTP_405_METHOD_NOT_ALLOWED: (
+        "method_not_allowed",
+        "The request method is not allowed.",
+    ),
+    status.HTTP_409_CONFLICT: (
+        "conflict",
+        "The request conflicts with the current resource state.",
+    ),
+    status.HTTP_422_UNPROCESSABLE_CONTENT: (
+        "unprocessable_entity",
+        "The request could not be processed.",
+    ),
+    status.HTTP_429_TOO_MANY_REQUESTS: (
+        "rate_limited",
+        "Too many requests were made. Please try again later.",
+    ),
+}
 
 
 class AppError(Exception):
@@ -79,6 +104,28 @@ async def request_validation_error_handler(
     )
 
 
+async def http_exception_handler(
+    _: Request, exc: StarletteHTTPException
+) -> JSONResponse:
+    """Normalize framework and explicitly raised HTTP exceptions."""
+    if exc.status_code >= status.HTTP_500_INTERNAL_SERVER_ERROR:
+        return error_response(
+            status_code=exc.status_code,
+            code="internal_server_error",
+            message="An unexpected error occurred.",
+        )
+
+    code, message = HTTP_ERROR_CODES.get(
+        exc.status_code, ("http_error", "The request could not be completed.")
+    )
+    return error_response(
+        status_code=exc.status_code,
+        code=code,
+        message=message,
+        details=exc.detail,
+    )
+
+
 async def unexpected_error_handler(_: Request, __: Exception) -> JSONResponse:
     """Avoid exposing implementation details for unhandled server errors."""
     return error_response(
@@ -92,4 +139,5 @@ def register_exception_handlers(app: FastAPI) -> None:
     """Register the API-wide exception handlers on an application instance."""
     app.add_exception_handler(AppError, app_error_handler)
     app.add_exception_handler(RequestValidationError, request_validation_error_handler)
+    app.add_exception_handler(StarletteHTTPException, http_exception_handler)
     app.add_exception_handler(Exception, unexpected_error_handler)
