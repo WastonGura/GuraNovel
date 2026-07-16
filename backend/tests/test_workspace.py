@@ -27,6 +27,34 @@ def test_write_read_and_exists_for_nested_markdown_path(tmp_path: Path) -> None:
     assert list(document.parent.glob(".tmp-*")) == []
 
 
+def test_read_and_exists_do_not_use_pathname_helpers(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = MarkdownStore(tmp_path)
+    store.write("drafts/chapter.md", "safe")
+
+    def fail_pathname_access(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("pathname helper must not be used")
+
+    monkeypatch.setattr(Path, "read_text", fail_pathname_access)
+    monkeypatch.setattr(Path, "is_file", fail_pathname_access)
+
+    assert store.read("drafts/chapter.md") == "safe"
+    assert store.exists("drafts/chapter.md") is True
+
+
+def test_read_and_exists_do_not_follow_final_symlinks(tmp_path: Path) -> None:
+    store = MarkdownStore(tmp_path)
+    outside = tmp_path.parent / f"{tmp_path.name}-outside.md"
+    outside.write_text("outside")
+    (tmp_path / "chapter.md").symlink_to(outside)
+
+    with pytest.raises(OSError):
+        store.read("chapter.md")
+
+    assert store.exists("chapter.md") is False
+
+
 @pytest.mark.parametrize("relative_path", ["/tmp/document.md", "../document.md", "draft/../../x.md"])
 def test_resolve_workspace_path_rejects_absolute_and_traversal_paths(
     tmp_path: Path, relative_path: str
@@ -37,6 +65,17 @@ def test_resolve_workspace_path_rejects_absolute_and_traversal_paths(
 
 @pytest.mark.parametrize("relative_path", [r"..\\document.md", r"draft\\..\\..\\x.md"])
 def test_resolve_workspace_path_rejects_windows_style_traversal_paths(
+    tmp_path: Path, relative_path: str
+) -> None:
+    with pytest.raises(UnsafeWorkspacePathError):
+        resolve_workspace_path(tmp_path, relative_path)
+
+
+@pytest.mark.parametrize(
+    "relative_path",
+    ["", ".", "./", "draft/", r"draft\\chapter.md", r"C:\\document.md", r"\\\\server\\share\\document.md"],
+)
+def test_resolve_workspace_path_rejects_ambiguous_or_empty_paths(
     tmp_path: Path, relative_path: str
 ) -> None:
     with pytest.raises(UnsafeWorkspacePathError):
@@ -124,6 +163,46 @@ def test_write_closes_temporary_descriptor_when_fdopen_fails(
 
     assert temporary_descriptor is not None
     assert temporary_descriptor in closed_descriptors
+
+
+def test_write_closes_child_descriptor_when_closing_parent_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = MarkdownStore(tmp_path)
+    opened_descriptors: list[int] = []
+    closed_descriptors: list[int] = []
+    original_open = os.open
+    original_close = os.close
+    failed_parent_close = False
+
+    def track_open(*args: object, **kwargs: object) -> int:
+        descriptor = original_open(*args, **kwargs)  # type: ignore[arg-type]
+        opened_descriptors.append(descriptor)
+        return descriptor
+
+    def fail_first_parent_close(descriptor: int) -> None:
+        nonlocal failed_parent_close
+        closed_descriptors.append(descriptor)
+        if descriptor == opened_descriptors[0] and not failed_parent_close:
+            failed_parent_close = True
+            raise OSError("simulated parent close failure")
+        original_close(descriptor)
+
+    monkeypatch.setattr("app.workspace.markdown_store.os.open", track_open)
+    monkeypatch.setattr("app.workspace.markdown_store.os.close", fail_first_parent_close)
+
+    try:
+        with pytest.raises(OSError, match="simulated parent close failure"):
+            store.write("drafts/chapter.md", "safe")
+
+        assert len(opened_descriptors) >= 2
+        assert opened_descriptors[1] in closed_descriptors
+    finally:
+        for descriptor in opened_descriptors:
+            try:
+                original_close(descriptor)
+            except OSError:
+                pass
 
 
 def test_write_fsyncs_containing_directory_after_replace(

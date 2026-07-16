@@ -1,7 +1,7 @@
 """Safe path handling for workspace documents and version snapshots."""
 
 import re
-from pathlib import Path, PureWindowsPath
+from pathlib import Path, PurePosixPath, PureWindowsPath
 
 
 class UnsafeWorkspacePathError(ValueError):
@@ -12,17 +12,36 @@ _DOCUMENT_ID_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]*")
 _VERSION_SUFFIX_PATTERN = re.compile(r"v[0-9]{4,}")
 
 
-def resolve_workspace_path(workspace_root: Path, relative_path: str) -> Path:
-    """Resolve a user path only when it remains below ``workspace_root``."""
-    supplied_path = Path(relative_path)
+def workspace_path_parts(relative_path: str) -> tuple[str, ...]:
+    """Validate a workspace path and return its POSIX path components.
+
+    Workspace APIs accept ``/`` as their sole path separator. Backslashes are
+    rejected so paths have the same meaning on Linux and WSL, while Windows
+    absolute and traversal forms are rejected explicitly as well.
+    """
     windows_path = PureWindowsPath(relative_path)
-    if supplied_path.is_absolute() or windows_path.is_absolute() or windows_path.drive:
+    if PurePosixPath(relative_path).is_absolute() or windows_path.is_absolute() or windows_path.drive:
         raise UnsafeWorkspacePathError("workspace paths must be relative")
-    if ".." in supplied_path.parts or ".." in windows_path.parts:
+    if "\\" in relative_path:
+        raise UnsafeWorkspacePathError("workspace paths must use POSIX '/' separators")
+    if not relative_path or relative_path.endswith("/"):
+        raise UnsafeWorkspacePathError("workspace paths must name a file")
+
+    parts = PurePosixPath(relative_path).parts
+    if not parts or all(part == "." for part in parts):
+        raise UnsafeWorkspacePathError("workspace paths must name a file")
+    if ".." in parts or ".." in windows_path.parts:
         raise UnsafeWorkspacePathError("workspace paths must not contain traversal")
 
+    return tuple(part for part in parts if part != ".")
+
+
+def resolve_workspace_path(workspace_root: Path, relative_path: str) -> Path:
+    """Resolve a validated user path only when it remains below ``workspace_root``."""
+    parts = workspace_path_parts(relative_path)
+
     root = workspace_root.resolve()
-    candidate = (root / supplied_path).resolve()
+    candidate = root.joinpath(*parts).resolve()
     if not candidate.is_relative_to(root):
         raise UnsafeWorkspacePathError("workspace path escapes its root")
     return candidate

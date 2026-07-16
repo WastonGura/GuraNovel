@@ -1,26 +1,42 @@
-"""UTF-8 Markdown document storage."""
+"""POSIX descriptor-relative UTF-8 Markdown document storage.
+
+This module requires Linux/WSL-style ``dir_fd`` and ``O_NOFOLLOW`` support.
+"""
 
 import errno
 import os
+import stat
 import uuid
 from pathlib import Path
 
-from app.workspace.paths import resolve_workspace_path
+from app.workspace.paths import workspace_path_parts
 
 
 class MarkdownStore:
-    """Read and atomically write Markdown documents beneath a workspace root."""
+    """Read and atomically write Markdown documents beneath a POSIX workspace root."""
 
     def __init__(self, root: Path) -> None:
+        if os.name != "posix" or not hasattr(os, "O_NOFOLLOW"):
+            raise OSError("MarkdownStore requires POSIX dir_fd and O_NOFOLLOW support")
         self.root = root.resolve()
 
     def read(self, relative_path: str) -> str:
-        return self._path(relative_path).read_text(encoding="utf-8")
+        parent_parts, filename = self._parent_and_filename(relative_path)
+        parent_descriptor = self._open_existing_workspace_directory(parent_parts)
+        try:
+            descriptor = os.open(filename, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=parent_descriptor)
+            try:
+                document = os.fdopen(descriptor, "r", encoding="utf-8")
+            except BaseException:
+                os.close(descriptor)
+                raise
+            with document:
+                return document.read()
+        finally:
+            os.close(parent_descriptor)
 
     def write(self, relative_path: str, content: str) -> None:
-        self._path(relative_path)
-        path_parts = Path(relative_path).parts
-        parent_parts, filename = path_parts[:-1], path_parts[-1]
+        parent_parts, filename = self._parent_and_filename(relative_path)
         normalized_content = content.replace("\r\n", "\n").replace("\r", "\n")
         parent_descriptor = self._open_workspace_directory(parent_parts)
         temporary_name: str | None = None
@@ -53,10 +69,26 @@ class MarkdownStore:
             os.close(parent_descriptor)
 
     def exists(self, relative_path: str) -> bool:
-        return self._path(relative_path).is_file()
+        parent_parts, filename = self._parent_and_filename(relative_path)
+        try:
+            parent_descriptor = self._open_existing_workspace_directory(parent_parts)
+        except (FileNotFoundError, NotADirectoryError):
+            return False
+        try:
+            try:
+                document_status = os.stat(
+                    filename, dir_fd=parent_descriptor, follow_symlinks=False
+                )
+            except (FileNotFoundError, NotADirectoryError):
+                return False
+            return stat.S_ISREG(document_status.st_mode)
+        finally:
+            os.close(parent_descriptor)
 
-    def _path(self, relative_path: str) -> Path:
-        return resolve_workspace_path(self.root, relative_path)
+    @staticmethod
+    def _parent_and_filename(relative_path: str) -> tuple[tuple[str, ...], str]:
+        path_parts = workspace_path_parts(relative_path)
+        return path_parts[:-1], path_parts[-1]
 
     def _open_workspace_directory(self, parent_parts: tuple[str, ...]) -> int:
         directory_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
@@ -68,7 +100,34 @@ class MarkdownStore:
                 except FileExistsError:
                     pass
                 child_descriptor = os.open(part, directory_flags, dir_fd=descriptor)
-                os.close(descriptor)
+                try:
+                    os.close(descriptor)
+                except BaseException:
+                    try:
+                        os.close(child_descriptor)
+                    except BaseException:
+                        pass
+                    raise
+                descriptor = child_descriptor
+        except BaseException:
+            os.close(descriptor)
+            raise
+        return descriptor
+
+    def _open_existing_workspace_directory(self, parent_parts: tuple[str, ...]) -> int:
+        directory_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+        descriptor = os.open(self.root, directory_flags)
+        try:
+            for part in parent_parts:
+                child_descriptor = os.open(part, directory_flags, dir_fd=descriptor)
+                try:
+                    os.close(descriptor)
+                except BaseException:
+                    try:
+                        os.close(child_descriptor)
+                    except BaseException:
+                        pass
+                    raise
                 descriptor = child_descriptor
         except BaseException:
             os.close(descriptor)
