@@ -1,14 +1,16 @@
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 import pytest
 from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from app.core.errors import ConflictError
 from app.models import Document, DocumentSource, DocumentType, DocumentVersion, Project
-from app.services.document_service import DocumentService
+from app.services.document_service import DocumentCommitIndeterminateError, DocumentService
 from app.workspace.hashing import sha256_content
+from app.workspace.markdown_store import MarkdownStore
 
 
 async def create_project(async_session: AsyncSession, workspace_root: Path) -> Project:
@@ -55,6 +57,116 @@ async def test_create_document_persists_initial_version_and_workspace_files(
     persisted = await async_session.get(Document, document.id)
     assert persisted is not None
     assert persisted.current_version_id == version.id
+
+
+@pytest.mark.integration
+@pytest.mark.anyio
+async def test_create_document_rejects_reserved_version_path_before_overwriting_snapshot(
+    async_session: AsyncSession, tmp_path: Path
+) -> None:
+    project = await create_project(async_session, tmp_path)
+    service = DocumentService(async_session)
+    document = await service.create_document(
+        project_id=project.id,
+        document_type=DocumentType.CHAPTER_DRAFT,
+        title="Chapter one",
+        path="drafts/chapter-01.md",
+        content="original snapshot",
+        source=DocumentSource.USER,
+    )
+    version = document.current_version
+    assert version is not None
+
+    with pytest.raises(ConflictError) as error:
+        await service.create_document(
+            project_id=project.id,
+            document_type=DocumentType.CHAPTER_DRAFT,
+            title="Malicious document",
+            path=version.snapshot_path,
+            content="malicious overwrite",
+            source=DocumentSource.USER,
+        )
+
+    assert error.value.code == "reserved_document_path"
+    assert (tmp_path / version.snapshot_path).read_text() == "original snapshot"
+    assert (
+        await async_session.scalars(select(Document).where(Document.project_id == project.id))
+    ).all() == [document]
+
+
+@pytest.mark.integration
+@pytest.mark.anyio
+async def test_same_path_creates_are_serialized_before_loser_can_write_files(
+    async_session: AsyncSession,
+    integration_database_url: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project = await create_project(async_session, tmp_path)
+    engine = create_async_engine(integration_database_url, pool_pre_ping=True)
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    winner_commit_entered = asyncio.Event()
+    release_winner_commit = asyncio.Event()
+    loser_write_started = asyncio.Event()
+    original_write = MarkdownStore.write
+
+    def observe_loser_write(self: MarkdownStore, path: str, content: str) -> None:
+        if content == "loser content":
+            loser_write_started.set()
+        original_write(self, path, content)
+
+    monkeypatch.setattr(MarkdownStore, "write", observe_loser_write)
+    try:
+        async with session_factory() as winner_session, session_factory() as loser_session:
+            original_commit = winner_session.commit
+
+            async def delayed_winner_commit() -> None:
+                winner_commit_entered.set()
+                await release_winner_commit.wait()
+                await original_commit()
+
+            monkeypatch.setattr(winner_session, "commit", delayed_winner_commit)
+            winner = asyncio.create_task(
+                DocumentService(winner_session).create_document(
+                    project_id=project.id,
+                    document_type=DocumentType.CHAPTER_DRAFT,
+                    title="Winner",
+                    path="drafts/chapter-01.md",
+                    content="winner content",
+                    source=DocumentSource.USER,
+                )
+            )
+            await asyncio.wait_for(winner_commit_entered.wait(), timeout=2)
+            loser = asyncio.create_task(
+                DocumentService(loser_session).create_document(
+                    project_id=project.id,
+                    document_type=DocumentType.CHAPTER_DRAFT,
+                    title="Loser",
+                    path="drafts/chapter-01.md",
+                    content="loser content",
+                    source=DocumentSource.USER,
+                )
+            )
+
+            await asyncio.sleep(0.1)
+            assert not loser_write_started.is_set()
+            assert (tmp_path / "drafts/chapter-01.md").read_text() == "winner content"
+
+            release_winner_commit.set()
+            winning_document = await winner
+            with pytest.raises(ConflictError):
+                await loser
+
+        version = winning_document.current_version
+        assert version is not None
+        assert (tmp_path / "drafts/chapter-01.md").read_text() == "winner content"
+        assert (tmp_path / version.snapshot_path).read_text() == "winner content"
+        documents = (
+            await async_session.scalars(select(Document).where(Document.project_id == project.id))
+        ).all()
+        assert [persisted.id for persisted in documents] == [winning_document.id]
+    finally:
+        await engine.dispose()
 
 
 @pytest.mark.integration
@@ -108,7 +220,9 @@ async def test_write_and_restore_append_versions_and_read_historical_content(
         )
     ).all()
     assert [version.version_number for version in versions] == [1, 2, 3]
-    assert (tmp_path / ".versions" / str(document.id) / "v0002.md").read_text() == "second draft now"
+    assert (
+        tmp_path / ".versions" / str(document.id) / "v0002.md"
+    ).read_text() == "second draft now"
     assert (tmp_path / ".versions" / str(document.id) / "v0003.md").read_text() == "first draft"
 
 
@@ -158,7 +272,7 @@ async def test_stale_expected_version_raises_conflict_without_database_or_worksp
 
 @pytest.mark.integration
 @pytest.mark.anyio
-async def test_failed_commit_compensates_new_workspace_files(
+async def test_failed_commit_preserves_workspace_files_and_surfaces_indeterminate_outcome(
     async_session: AsyncSession, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     project = await create_project(async_session, tmp_path)
@@ -169,7 +283,7 @@ async def test_failed_commit_compensates_new_workspace_files(
 
     monkeypatch.setattr(async_session, "commit", fail_commit)
 
-    with pytest.raises(RuntimeError, match="commit failed"):
+    with pytest.raises(DocumentCommitIndeterminateError) as error:
         await service.create_document(
             project_id=project.id,
             document_type=DocumentType.CHAPTER_DRAFT,
@@ -179,9 +293,11 @@ async def test_failed_commit_compensates_new_workspace_files(
             source=DocumentSource.USER,
         )
 
-    assert not (tmp_path / "drafts/chapter-01.md").exists()
-    assert list(tmp_path.rglob("*.md")) == []
-    assert await async_session.scalar(select(Document.id)) is None
+    assert error.value.code == "document_commit_indeterminate"
+    assert (tmp_path / "drafts/chapter-01.md").read_text() == "first draft"
+    snapshots = list((tmp_path / ".versions").rglob("*.md"))
+    assert len(snapshots) == 1
+    assert snapshots[0].read_text() == "first draft"
 
 
 @pytest.mark.integration

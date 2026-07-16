@@ -7,15 +7,15 @@ from dataclasses import dataclass
 from pathlib import Path
 from uuid import UUID
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from app.core.errors import ConflictError, NotFoundError
+from app.core.errors import AppError, ConflictError, NotFoundError
 from app.models import Document, DocumentSource, DocumentType, DocumentVersion, Project
 from app.workspace.hashing import sha256_content
 from app.workspace.markdown_store import MarkdownStore
-from app.workspace.paths import version_snapshot_path
+from app.workspace.paths import version_snapshot_path, workspace_path_parts
 from app.workspace.word_count import count_words
 
 
@@ -23,6 +23,21 @@ class DocumentVersionConflictError(ConflictError):
     """Raised when a write is based on a no-longer-current document version."""
 
     code = "document_version_conflict"
+
+
+class ReservedDocumentPathError(ConflictError):
+    """Raised when a document path would target version snapshots."""
+
+    code = "reserved_document_path"
+    default_message = "Document paths cannot use the reserved .versions namespace."
+
+
+class DocumentCommitIndeterminateError(AppError):
+    """Raised when a database commit may have succeeded but cannot be confirmed."""
+
+    status_code = 500
+    code = "document_commit_indeterminate"
+    default_message = "The document save outcome could not be confirmed. Reconciliation is required before retrying."
 
 
 @dataclass(frozen=True)
@@ -52,9 +67,16 @@ class DocumentService:
         workflow_run_id: UUID | None = None,
         change_summary: str | None = None,
     ) -> Document:
+        self._ensure_document_path_is_not_reserved(path)
         project = await self.session.get(Project, project_id)
         if project is None:
             raise NotFoundError("Project not found.")
+        await self._lock_create_path(project_id, path)
+        existing = await self.session.scalar(
+            select(Document.id).where(Document.project_id == project_id, Document.path == path)
+        )
+        if existing is not None:
+            raise ConflictError("A document already exists at this path.")
 
         document = Document(
             project_id=project_id,
@@ -226,12 +248,24 @@ class DocumentService:
         )
         return (latest or 0) + 1
 
+    async def _lock_create_path(self, project_id: UUID, path: str) -> None:
+        """Serialize creates for a project/path pair until this transaction ends."""
+        await self.session.execute(
+            text("SELECT pg_advisory_xact_lock(hashtextextended(:lock_key, 0))"),
+            {"lock_key": f"{project_id}:{path}"},
+        )
+
     @staticmethod
     def _ensure_expected_current_version(
         document: Document, expected_current_version_id: UUID | None
     ) -> None:
         if document.current_version_id != expected_current_version_id:
             raise DocumentVersionConflictError("The document has a newer version.")
+
+    @staticmethod
+    def _ensure_document_path_is_not_reserved(path: str) -> None:
+        if workspace_path_parts(path)[0] == ".versions":
+            raise ReservedDocumentPathError()
 
     @staticmethod
     def _new_version(
@@ -283,7 +317,6 @@ class DocumentService:
                 backups.append(_FileBackup(path, store.read(path) if store.exists(path) else None))
                 store.write(path, content)
             await self.session.flush()
-            await self.session.commit()
         except BaseException:
             await self.session.rollback()
             for backup in reversed(backups):
@@ -295,6 +328,16 @@ class DocumentService:
                 except FileNotFoundError:
                     pass
             raise
+        try:
+            await self.session.commit()
+        except BaseException as error:
+            try:
+                await self.session.rollback()
+            except BaseException:
+                pass
+            # A commit error has an unknown outcome.  Do not undo workspace files:
+            # an outbox/reconciler is required for cross-resource reconciliation later.
+            raise DocumentCommitIndeterminateError() from error
 
 
 def _normalize_content(content: str) -> str:
