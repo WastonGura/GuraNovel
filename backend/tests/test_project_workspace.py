@@ -74,6 +74,20 @@ def test_create_is_idempotent_and_preserves_existing_workspace_contents(tmp_path
     assert chapter.read_text(encoding="utf-8") == "A chapter"
 
 
+def test_remove_new_empty_removes_only_an_empty_standard_workspace(tmp_path: Path) -> None:
+    workspace = ProjectWorkspace(tmp_path / "configured-workspaces")
+    root = workspace.create("failed-project")
+
+    assert workspace.remove_new_empty("failed-project") is True
+    assert not root.exists()
+
+    root = workspace.create("preserved-project")
+    (root / "chapters" / "chapter.md").write_text("Keep me", encoding="utf-8")
+
+    assert workspace.remove_new_empty("preserved-project") is False
+    assert (root / "chapters" / "chapter.md").read_text(encoding="utf-8") == "Keep me"
+
+
 @pytest.mark.parametrize("attack_target", ["base", "workspace"])
 def test_create_rejects_symlinked_base_or_workspace_path(
     tmp_path: Path, attack_target: str
