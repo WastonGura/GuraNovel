@@ -85,6 +85,16 @@ class MarkdownStore:
         finally:
             os.close(parent_descriptor)
 
+    def delete(self, relative_path: str) -> None:
+        """Remove one Markdown file without resolving a path outside the workspace."""
+        parent_parts, filename = self._parent_and_filename(relative_path)
+        parent_descriptor = self._open_existing_workspace_directory(parent_parts)
+        try:
+            os.unlink(filename, dir_fd=parent_descriptor)
+            self._fsync_directory(parent_descriptor)
+        finally:
+            os.close(parent_descriptor)
+
     @staticmethod
     def _parent_and_filename(relative_path: str) -> tuple[tuple[str, ...], str]:
         path_parts = workspace_path_parts(relative_path)
