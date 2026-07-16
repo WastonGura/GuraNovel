@@ -50,6 +50,14 @@ def client() -> TestClient:
             detail="You do not have access to this novel.",
         )
 
+    @app.get("/unauthorized")
+    async def unauthorized() -> None:
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid credentials.",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
     @app.get("/unexpected")
     async def unexpected() -> None:
         raise RuntimeError("database credentials: secret")
@@ -116,6 +124,20 @@ def test_http_exceptions_use_standard_envelope(client: TestClient) -> None:
             "code": "forbidden",
             "message": "You do not have permission to access this resource.",
             "details": "You do not have access to this novel.",
+        }
+    }
+
+
+def test_http_exceptions_preserve_headers(client: TestClient) -> None:
+    response = client.get("/unauthorized")
+
+    assert response.status_code == 401
+    assert response.headers["www-authenticate"] == "Bearer"
+    assert response.json() == {
+        "error": {
+            "code": "unauthorized",
+            "message": "Authentication is required.",
+            "details": "Invalid credentials.",
         }
     }
 

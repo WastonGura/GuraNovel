@@ -75,12 +75,18 @@ class AgentOutputInvalidError(AppError):
 
 
 def error_response(
-    *, status_code: int, code: str, message: str, details: Any = None
+    *,
+    status_code: int,
+    code: str,
+    message: str,
+    details: Any = None,
+    headers: Mapping[str, str] | None = None,
 ) -> JSONResponse:
     """Build the shared API error envelope."""
     return JSONResponse(
         status_code=status_code,
         content={"error": {"code": code, "message": message, "details": details}},
+        headers=headers,
     )
 
 
@@ -113,6 +119,7 @@ async def http_exception_handler(
             status_code=exc.status_code,
             code="internal_server_error",
             message="An unexpected error occurred.",
+            headers=exc.headers,
         )
 
     code, message = HTTP_ERROR_CODES.get(
@@ -123,6 +130,7 @@ async def http_exception_handler(
         code=code,
         message=message,
         details=exc.detail,
+        headers=exc.headers,
     )
 
 
