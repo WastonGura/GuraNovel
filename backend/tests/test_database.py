@@ -1,4 +1,5 @@
 import asyncio
+from pathlib import Path
 
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import configure_mappers
@@ -16,6 +17,31 @@ def test_database_url_can_be_loaded_from_environment(monkeypatch) -> None:
     configured_settings = Settings(_env_file=None)
 
     assert configured_settings.database_url == "postgresql+asyncpg://user:password@db:5432/novels"
+
+
+def test_workspace_base_dir_can_be_loaded_from_environment(monkeypatch) -> None:
+    monkeypatch.setenv("WORKSPACE_BASE_DIR", "/srv/guranovel-workspaces")
+
+    configured_settings = Settings(_env_file=None)
+
+    assert configured_settings.workspace_base_dir == Path("/srv/guranovel-workspaces")
+
+
+def test_workspace_base_dir_default_is_cwd_independent_and_under_user_local_data(
+    monkeypatch, tmp_path: Path
+) -> None:
+    monkeypatch.delenv("WORKSPACE_BASE_DIR", raising=False)
+    monkeypatch.chdir(tmp_path)
+
+    first_settings = Settings(_env_file=None)
+    monkeypatch.chdir(tmp_path.parent)
+    second_settings = Settings(_env_file=None)
+
+    expected = Path.home() / ".local" / "share" / "guranovel" / "workspaces"
+    assert first_settings.workspace_base_dir == expected
+    assert second_settings.workspace_base_dir == expected
+    assert expected.is_relative_to(Path.home())
+    assert not expected.is_relative_to(Path(__file__).resolve().parents[2])
 
 
 def test_async_session_infrastructure_is_constructed_without_connecting() -> None:

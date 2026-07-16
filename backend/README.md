@@ -17,6 +17,24 @@ docker compose ps
 The local database uses `postgresql+asyncpg://postgres:postgres@127.0.0.1:5432/guranovel`.
 These are development-only defaults.
 
+## Project workspaces
+
+Project workspaces are created only beneath `WORKSPACE_BASE_DIR`. The local-development
+default is `~/.local/share/guranovel/workspaces`, resolved from the service user's home
+directory and independent of the process working directory or source checkout. Set
+`WORKSPACE_BASE_DIR` in `.env` to use another POSIX/Linux/WSL directory. Windows-native
+filesystems are not supported.
+
+`ProjectWorkspace.create()` returns a pathname, not a durable file-descriptor capability. The
+service establishes its pathname-security boundary by requiring the workspace base, project root,
+and standard project directories to be owned by the service EUID and non-group/non-world-writable;
+new directories are created as `0700`, and insecure existing directories are rejected. Every base
+ancestor must prevent an untrusted UID from renaming or replacing the base. Sticky ancestors such
+as root-owned `/tmp` are allowed because their POSIX sticky-bit semantics protect an EUID-owned
+base after it is created.
+
+Same-EUID processes remain trusted deployment principals: they can rename a workspace root and therefore can defeat pathname security. Persistent FD capability/reconciler work is out of scope for this lifecycle; deploy the service so untrusted UIDs cannot bypass the directory boundary.
+
 ## PostgreSQL integration tests
 
 Integration tests are marked separately and never use the development database. Create the

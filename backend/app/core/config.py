@@ -1,4 +1,5 @@
 from functools import lru_cache
+from pathlib import Path
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -11,6 +12,7 @@ class Settings(BaseSettings):
     app_debug: bool = True
     app_version: str = "0.1.0"
     database_url: str = "postgresql+asyncpg://postgres:postgres@localhost:5432/guranovel"
+    workspace_base_dir: Path = Path.home() / ".local" / "share" / "guranovel" / "workspaces"
 
 
 @lru_cache
