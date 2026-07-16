@@ -20,6 +20,10 @@ class ProjectCommitIndeterminateError(AppError):
     default_message = "The project creation outcome could not be confirmed. Reconciliation is required before retrying."
 
 
+class ProjectWorkspaceCleanupError(RuntimeError):
+    """Raised when a failed pre-commit operation leaves a workspace unsafe to ignore."""
+
+
 class ProjectService:
     """Application boundary for projects and their service-owned workspaces."""
 
@@ -56,10 +60,29 @@ class ProjectService:
             )
             self.session.add(project)
             await self.session.flush()
-        except BaseException:
-            await self.session.rollback()
+        except BaseException as precommit_error:
+            rollback_error: BaseException | None = None
+            try:
+                await self.session.rollback()
+            except BaseException as error:
+                rollback_error = error
+
             if allocated_here:
-                self.workspace.remove_new_empty(slug)
+                try:
+                    removed = self.workspace.remove_new_empty(slug)
+                    if not removed and (root.exists() or root.is_symlink()):
+                        raise ProjectWorkspaceCleanupError(
+                            "Failed to remove a workspace allocated for an uncommitted project."
+                        )
+                except BaseException as cleanup_error:
+                    if rollback_error is not None:
+                        cleanup_error.add_note(f"Database rollback also failed: {rollback_error!r}")
+                    raise ProjectWorkspaceCleanupError(
+                        "Workspace compensation failed after a pre-commit error."
+                    ) from cleanup_error
+
+            if rollback_error is not None:
+                raise precommit_error from rollback_error
             raise
 
         try:

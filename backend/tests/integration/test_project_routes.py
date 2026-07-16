@@ -152,6 +152,70 @@ async def test_precommit_failure_rolls_back_project_and_removes_new_workspace(
 
 @pytest.mark.integration
 @pytest.mark.anyio
+async def test_precommit_failure_compensates_workspace_when_rollback_also_fails(
+    async_session: AsyncSession, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workspace = ProjectWorkspace(tmp_path / "workspaces")
+    service = ProjectService(async_session, workspace)
+
+    async def fail_flush() -> None:
+        raise RuntimeError("database write failed")
+
+    async def fail_rollback() -> None:
+        raise RuntimeError("database rollback failed")
+
+    monkeypatch.setattr(async_session, "flush", fail_flush)
+    monkeypatch.setattr(async_session, "rollback", fail_rollback)
+
+    with pytest.raises(RuntimeError, match="database write failed") as error_info:
+        await service.create_project(slug="rollback-failure", title="Rollback failure")
+
+    assert error_info.value.__cause__ is not None
+    assert str(error_info.value.__cause__) == "database rollback failed"
+    assert not workspace.root_for("rollback-failure").exists()
+
+
+@pytest.mark.integration
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "slug",
+    [
+        "",
+        "../escape",
+        "draft/novel",
+        r"draft\novel",
+        "C:novel",
+        r"C:\\novel",
+        r"\\\\server\\share\\novel",
+    ],
+)
+async def test_unsafe_slug_is_rejected_before_database_or_workspace_work(
+    project_client: tuple[httpx.AsyncClient, ProjectWorkspace],
+    async_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+    slug: str,
+) -> None:
+    client, workspace = project_client
+    execute_calls: list[object] = []
+    original_execute = async_session.execute
+
+    async def record_execute(*args: object, **kwargs: object) -> object:
+        execute_calls.append(args[0])
+        return await original_execute(*args, **kwargs)
+
+    with monkeypatch.context() as request_monkeypatch:
+        request_monkeypatch.setattr(async_session, "execute", record_execute)
+        response = await client.post("/api/v1/projects", json={"slug": slug, "title": "Unsafe"})
+
+    assert response.status_code == 422
+    assert response.json()["error"]["code"] == "validation_error"
+    assert execute_calls == []
+    assert await async_session.scalar(select(Project.id).where(Project.slug == slug)) is None
+    assert not workspace.workspace_base_dir.exists()
+
+
+@pytest.mark.integration
+@pytest.mark.anyio
 async def test_workspace_failure_after_allocation_is_compensated(
     async_session: AsyncSession, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

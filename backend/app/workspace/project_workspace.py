@@ -20,7 +20,7 @@ class ProjectWorkspace:
         self.workspace_base_dir = Path(os.path.abspath(workspace_base_dir))
 
     def root_for(self, slug: str) -> Path:
-        self._validate_slug(slug)
+        self.validate_slug(slug)
         root = self.workspace_base_dir / slug
         if not root.is_relative_to(self.workspace_base_dir):
             raise UnsafeProjectWorkspaceError("project workspace root escapes its base")
@@ -188,7 +188,8 @@ class ProjectWorkspace:
             pass
 
     @staticmethod
-    def _validate_slug(slug: str) -> None:
+    def validate_slug(slug: str) -> None:
+        """Raise when ``slug`` cannot safely name one workspace component."""
         if not isinstance(slug, str) or "\x00" in slug:
             raise UnsafeProjectWorkspaceError("project slug must be one safe path component")
         windows_path = PureWindowsPath(slug)

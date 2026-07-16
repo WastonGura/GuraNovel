@@ -3,7 +3,10 @@
 from datetime import datetime
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic_core import PydanticCustomError
+
+from app.workspace import ProjectWorkspace, UnsafeProjectWorkspaceError
 
 
 class CreateProjectRequest(BaseModel):
@@ -14,6 +17,15 @@ class CreateProjectRequest(BaseModel):
     genre: str | None = None
     target_platform: str | None = None
     metadata_: dict = Field(default_factory=dict, validation_alias="metadata")
+
+    @field_validator("slug")
+    @classmethod
+    def validate_workspace_slug(cls, slug: str) -> str:
+        try:
+            ProjectWorkspace.validate_slug(slug)
+        except UnsafeProjectWorkspaceError as error:
+            raise PydanticCustomError("unsafe_project_slug", "{message}", {"message": str(error)}) from error
+        return slug
 
 
 class ProjectResponse(BaseModel):
