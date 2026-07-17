@@ -1,0 +1,276 @@
+"""Persist the deterministic chapter-production approval gate."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from datetime import UTC, datetime
+from uuid import UUID
+
+from sqlalchemy import or_, select, text
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
+
+from app.core.errors import AppError, ConflictError, NotFoundError, WorkflowStateError
+from app.models import (
+    ActionRequest,
+    ActionRequestStatus,
+    Chapter,
+    DocumentSource,
+    DocumentType,
+    WorkflowEvent,
+    WorkflowRun,
+    WorkflowType,
+)
+from app.production.fake_generator import FakeChapterGenerator
+from app.services.document_service import DocumentService
+
+
+class ChapterProductionCommitIndeterminateError(AppError):
+    """Raised when workflow persistence fails after documents have committed."""
+
+    status_code = 500
+    code = "chapter_production_commit_indeterminate"
+    default_message = (
+        "Chapter production artifacts were saved, but the workflow outcome could not be confirmed. "
+        "Reconciliation is required before retrying."
+    )
+
+
+@dataclass(frozen=True)
+class ChapterProductionStarted:
+    workflow_run_id: UUID
+    action_id: UUID
+    outline_document_id: UUID
+    draft_document_id: UUID
+
+
+@dataclass(frozen=True)
+class ChapterProductionResolved:
+    workflow_run_id: UUID
+    action_id: UUID
+    decision: str
+
+
+class ChapterProductionService:
+    """Create and resolve the deterministic chapter-production approval gate.
+
+    ``DocumentService`` commits each artifact and its filesystem write internally.
+    Consequently this service deliberately does not claim atomic workflow-plus-filesystem
+    behavior; after an artifact commit, a later persistence failure is indeterminate and
+    never triggers document or workspace deletion.
+    """
+
+    _WORKFLOW_TYPE = WorkflowType.CHAPTER_PRODUCTION.value
+    _AWAITING_APPROVAL = "awaiting_approval"
+    _COMPLETED = "completed"
+    _REJECTED = "rejected"
+    _APPROVAL_NODE = "approval"
+    _ACTION_TYPE = "chapter_production_approval"
+
+    def __init__(self, session: AsyncSession) -> None:
+        self.session = session
+        self.documents = DocumentService(session)
+        self.generator = FakeChapterGenerator()
+
+    async def start_production(
+        self, project_id: UUID, chapter_id: UUID
+    ) -> ChapterProductionStarted:
+        chapter = await self._scoped_chapter(project_id, chapter_id)
+        await self._lock_chapter(chapter_id)
+        active_run = await self.session.scalar(
+            select(WorkflowRun.id).where(
+                WorkflowRun.project_id == project_id,
+                WorkflowRun.chapter_id == chapter_id,
+                WorkflowRun.workflow_type == self._WORKFLOW_TYPE,
+                or_(
+                    WorkflowRun.awaiting_user.is_(True),
+                    WorkflowRun.status.not_in((self._COMPLETED, self._REJECTED)),
+                ),
+            )
+        )
+        if active_run is not None:
+            raise ConflictError("Chapter production is already awaiting approval.")
+
+        generated = self.generator.generate(chapter.project.title, chapter.chapter_number, chapter.title)
+        run = WorkflowRun(
+            project_id=project_id,
+            chapter_id=chapter_id,
+            workflow_type=self._WORKFLOW_TYPE,
+            status=self._AWAITING_APPROVAL,
+            current_node=self._APPROVAL_NODE,
+            next_node=None,
+            awaiting_user=True,
+        )
+        self.session.add(run)
+        await self.session.flush()
+        self.session.add(
+            WorkflowEvent(
+                workflow_run_id=run.id,
+                event_type="production_started",
+                node_name="start",
+                message="Started deterministic chapter production.",
+            )
+        )
+
+        artifacts_committed = False
+        try:
+            outline = await self.documents.create_document(
+                project_id=project_id,
+                chapter_id=chapter_id,
+                document_type=DocumentType.CHAPTER_OUTLINE_OPTIONS,
+                title=f"Chapter {chapter.chapter_number} outline",
+                path=self._outline_path(chapter.chapter_number),
+                content=generated.outline,
+                source=DocumentSource.OUTLINE_AGENT,
+                agent_role="outline_agent",
+                workflow_run_id=run.id,
+                change_summary="Generated deterministic chapter outline.",
+            )
+            artifacts_committed = True
+            self.session.add(
+                WorkflowEvent(
+                    workflow_run_id=run.id,
+                    event_type="fake_output_stored",
+                    node_name="generate",
+                    message="Stored deterministic fake chapter output.",
+                    payload={"outline_document_id": str(outline.id)},
+                )
+            )
+            draft = await self.documents.create_document(
+                project_id=project_id,
+                chapter_id=chapter_id,
+                document_type=DocumentType.CHAPTER_DRAFT,
+                title=f"Chapter {chapter.chapter_number} draft",
+                path=self._draft_path(chapter.chapter_number),
+                content=generated.draft,
+                source=DocumentSource.WRITER_AGENT,
+                agent_role="writer_agent",
+                workflow_run_id=run.id,
+                change_summary="Generated deterministic chapter draft.",
+            )
+            chapter.current_outline_document_id = outline.id
+            chapter.current_draft_document_id = draft.id
+            action = ActionRequest(
+                workflow_run_id=run.id,
+                project_id=project_id,
+                chapter_id=chapter_id,
+                request_type=self._ACTION_TYPE,
+                status=ActionRequestStatus.PENDING.value,
+                prompt="Approve the generated chapter outline and draft?",
+                options=["approved", "rejected"],
+                default_option="approved",
+            )
+            self.session.add_all(
+                [
+                    action,
+                    WorkflowEvent(
+                        workflow_run_id=run.id,
+                        event_type="awaiting_approval",
+                        node_name=self._APPROVAL_NODE,
+                        message="Awaiting approval of generated chapter artifacts.",
+                    ),
+                ]
+            )
+            await self.session.flush()
+            await self.session.commit()
+        except BaseException as error:
+            try:
+                await self.session.rollback()
+            except BaseException:
+                pass
+            if artifacts_committed:
+                raise ChapterProductionCommitIndeterminateError() from error
+            raise
+        return ChapterProductionStarted(run.id, action.id, outline.id, draft.id)
+
+    async def resolve_action(
+        self,
+        project_id: UUID,
+        chapter_id: UUID,
+        workflow_run_id: UUID,
+        action_id: UUID,
+        decision: str,
+    ) -> ChapterProductionResolved:
+        chapter = await self._scoped_chapter(project_id, chapter_id)
+        run = await self.session.scalar(
+            select(WorkflowRun)
+            .where(
+                WorkflowRun.id == workflow_run_id,
+                WorkflowRun.project_id == project_id,
+                WorkflowRun.chapter_id == chapter_id,
+                WorkflowRun.workflow_type == self._WORKFLOW_TYPE,
+            )
+            .with_for_update()
+        )
+        if run is None:
+            raise NotFoundError("Chapter production workflow not found.")
+        action = await self.session.scalar(
+            select(ActionRequest)
+            .where(
+                ActionRequest.id == action_id,
+                ActionRequest.workflow_run_id == workflow_run_id,
+                ActionRequest.project_id == project_id,
+                ActionRequest.chapter_id == chapter_id,
+                ActionRequest.request_type == self._ACTION_TYPE,
+            )
+            .with_for_update()
+        )
+        if action is None:
+            raise NotFoundError("Chapter production approval not found.")
+        if decision not in {"approved", "rejected"}:
+            raise WorkflowStateError("Chapter production decisions must be approved or rejected.")
+        if action.status != ActionRequestStatus.PENDING.value or not run.awaiting_user:
+            raise WorkflowStateError("Chapter production approval has already been resolved.")
+
+        approved = decision == "approved"
+        action.status = (
+            ActionRequestStatus.APPROVED.value if approved else ActionRequestStatus.REJECTED.value
+        )
+        action.user_decision = decision
+        action.resolved_at = datetime.now(UTC)
+        run.awaiting_user = False
+        run.status = self._COMPLETED if approved else self._REJECTED
+        run.current_node = self._APPROVAL_NODE
+        run.next_node = None
+        run.completed_at = datetime.now(UTC)
+        if approved:
+            chapter.status = "OUTLINE_APPROVED"
+        self.session.add(
+            WorkflowEvent(
+                workflow_run_id=run.id,
+                event_type=f"approval_{decision}",
+                node_name=self._APPROVAL_NODE,
+                message=f"Chapter production was {decision}.",
+                payload={"decision": decision, "action_id": str(action.id)},
+            )
+        )
+        try:
+            await self.session.commit()
+        except BaseException:
+            await self.session.rollback()
+            raise
+        return ChapterProductionResolved(run.id, action.id, decision)
+
+    async def _scoped_chapter(self, project_id: UUID, chapter_id: UUID) -> Chapter:
+        chapter = await self.session.scalar(
+            select(Chapter)
+            .options(selectinload(Chapter.project))
+            .where(Chapter.id == chapter_id, Chapter.project_id == project_id)
+        )
+        if chapter is None:
+            raise NotFoundError("Chapter not found.")
+        return chapter
+
+    async def _lock_chapter(self, chapter_id: UUID) -> None:
+        await self.session.execute(
+            text("SELECT pg_advisory_xact_lock(hashtextextended(:lock_key, 0))"),
+            {"lock_key": f"chapter-production:{chapter_id}"},
+        )
+
+    @staticmethod
+    def _outline_path(chapter_number: int) -> str:
+        return f"chapters/chapter-{chapter_number:04d}-outline.md"
+
+    @staticmethod
+    def _draft_path(chapter_number: int) -> str:
+        return f"chapters/chapter-{chapter_number:04d}-draft.md"
