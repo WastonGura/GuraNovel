@@ -4,6 +4,7 @@ from app.services.document_service import DocumentService
 from app.services.chapter_service import ChapterService
 from app.services.chapter_production_service import (
     ChapterProductionCommitIndeterminateError,
+    ChapterProductionRunRead,
     ChapterProductionResolved,
     ChapterProductionService,
     ChapterProductionStarted,
@@ -18,6 +19,7 @@ __all__ = [
     "DocumentService",
     "ChapterService",
     "ChapterProductionCommitIndeterminateError",
+    "ChapterProductionRunRead",
     "ChapterProductionResolved",
     "ChapterProductionService",
     "ChapterProductionStarted",

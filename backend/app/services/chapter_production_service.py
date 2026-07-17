@@ -15,8 +15,10 @@ from app.models import (
     ActionRequest,
     ActionRequestStatus,
     Chapter,
+    Document,
     DocumentSource,
     DocumentType,
+    DocumentVersion,
     WorkflowEvent,
     WorkflowRun,
     WorkflowType,
@@ -49,6 +51,38 @@ class ChapterProductionResolved:
     workflow_run_id: UUID
     action_id: UUID
     decision: str
+
+
+@dataclass(frozen=True)
+class ChapterProductionActionRead:
+    id: UUID
+    type: str
+    status: str
+    options: tuple[str, ...]
+    default_option: str | None
+    user_decision: str | None
+
+
+@dataclass(frozen=True)
+class ChapterProductionEventRead:
+    event_type: str
+    node_name: str | None
+    message: str | None
+    payload: dict
+
+
+@dataclass(frozen=True)
+class ChapterProductionRunRead:
+    id: UUID
+    type: str
+    status: str
+    current_node: str | None
+    next_node: str | None
+    awaiting_user: bool
+    actions: tuple[ChapterProductionActionRead, ...]
+    events: tuple[ChapterProductionEventRead, ...]
+    outline_document_id: UUID | None
+    draft_document_id: UUID | None
 
 
 class ChapterProductionService:
@@ -250,6 +284,89 @@ class ChapterProductionService:
             await self.session.rollback()
             raise
         return ChapterProductionResolved(run.id, action.id, decision)
+
+    async def get_production_run(
+        self, project_id: UUID, chapter_id: UUID, workflow_run_id: UUID
+    ) -> ChapterProductionRunRead:
+        """Return detached public workflow state without reading artifact content."""
+        run = await self.session.scalar(
+            select(WorkflowRun).where(
+                WorkflowRun.id == workflow_run_id,
+                WorkflowRun.project_id == project_id,
+                WorkflowRun.chapter_id == chapter_id,
+                WorkflowRun.workflow_type == self._WORKFLOW_TYPE,
+            )
+        )
+        if run is None:
+            raise NotFoundError("Chapter production workflow not found.")
+
+        actions = list(
+            await self.session.scalars(
+                select(ActionRequest)
+                .where(
+                    ActionRequest.workflow_run_id == workflow_run_id,
+                    ActionRequest.project_id == project_id,
+                    ActionRequest.chapter_id == chapter_id,
+                    ActionRequest.request_type == self._ACTION_TYPE,
+                )
+                .order_by(ActionRequest.created_at, ActionRequest.id)
+            )
+        )
+        events = list(
+            await self.session.scalars(
+                select(WorkflowEvent)
+                .where(WorkflowEvent.workflow_run_id == workflow_run_id)
+                .order_by(WorkflowEvent.created_at, WorkflowEvent.id)
+            )
+        )
+        documents = list(
+            await self.session.execute(
+                select(Document.id, Document.type)
+                .join(DocumentVersion, DocumentVersion.document_id == Document.id)
+                .where(
+                    Document.project_id == project_id,
+                    Document.chapter_id == chapter_id,
+                    DocumentVersion.workflow_run_id == workflow_run_id,
+                    Document.type.in_(
+                        (
+                            DocumentType.CHAPTER_OUTLINE_OPTIONS.value,
+                            DocumentType.CHAPTER_DRAFT.value,
+                        )
+                    ),
+                )
+            )
+        )
+        document_ids = {document_type: document_id for document_id, document_type in documents}
+        return ChapterProductionRunRead(
+            id=run.id,
+            type=run.workflow_type,
+            status=run.status,
+            current_node=run.current_node,
+            next_node=run.next_node,
+            awaiting_user=run.awaiting_user,
+            actions=tuple(
+                ChapterProductionActionRead(
+                    id=action.id,
+                    type=action.request_type,
+                    status=action.status,
+                    options=tuple(action.options),
+                    default_option=action.default_option,
+                    user_decision=action.user_decision,
+                )
+                for action in actions
+            ),
+            events=tuple(
+                ChapterProductionEventRead(
+                    event_type=event.event_type,
+                    node_name=event.node_name,
+                    message=event.message,
+                    payload=dict(event.payload),
+                )
+                for event in events
+            ),
+            outline_document_id=document_ids.get(DocumentType.CHAPTER_OUTLINE_OPTIONS.value),
+            draft_document_id=document_ids.get(DocumentType.CHAPTER_DRAFT.value),
+        )
 
     async def _scoped_chapter(self, project_id: UUID, chapter_id: UUID) -> Chapter:
         chapter = await self.session.scalar(
