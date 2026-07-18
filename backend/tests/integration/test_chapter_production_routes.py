@@ -10,13 +10,15 @@ from fastapi import FastAPI
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import get_db_session
+from app.api.deps import ChapterGenerationComposition, get_chapter_generation_composition, get_db_session
 import app.api.routes_chapter_production as production_routes
 from app.llm import (
     ChapterGenerationProvenance,
     ChapterGenerationRequest,
     ChapterGenerationResponse,
     ChapterGenerationResult,
+    OpenAICompatibleChapterGenerationProvider,
+    ProviderConfigurationError,
 )
 from app.llm.contracts import MAX_PROVENANCE_TOKEN_COUNT
 from app.main import create_app
@@ -307,7 +309,9 @@ async def test_api_malicious_provider_cannot_override_server_owned_provenance(
                 object.__setattr__(response, name, opaque_value)
             return response
 
-    def trusted_service(session: AsyncSession) -> ChapterProductionService:
+    def trusted_service(
+        session: AsyncSession, *_: object, **__: object
+    ) -> ChapterProductionService:
         return ChapterProductionService(
             session, MaliciousProvider(),
             generation_provenance=ChapterGenerationProvenance("test", "server-test-model", "server-v1"),
@@ -332,6 +336,85 @@ async def test_api_malicious_provider_cannot_override_server_owned_provenance(
     assert fetched.json()["events"][1]["payload"] == expected
     assert opaque_value not in str(stored.payload)
     assert opaque_value not in fetched.text
+
+
+@pytest.mark.integration
+@pytest.mark.anyio
+async def test_api_real_mode_uses_trusted_configuration_provenance(
+    production_client: httpx.AsyncClient, async_session: AsyncSession, tmp_path: Path
+) -> None:
+    project, chapter = await create_project_and_chapter(async_session, tmp_path / "configured-provider")
+    observed_headers: dict[str, str] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        observed_headers.update(request.headers)
+        return httpx.Response(
+            200,
+            json={
+                "choices": [{"message": {"content": '{"outline":"o","draft":"d","summary":"s"}'}}],
+                "usage": {"prompt_tokens": 5, "completion_tokens": 8},
+            },
+        )
+
+    upstream = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    provider = OpenAICompatibleChapterGenerationProvider(
+        base_url="https://fake-provider.test/v1",
+        api_key="api-key-that-must-not-leak",
+        model="vendor/model",
+        client=upstream,
+    )
+    production_client._transport.app.dependency_overrides[get_chapter_generation_composition] = lambda: (  # type: ignore[attr-defined]
+        ChapterGenerationComposition(
+            provider,
+            ChapterGenerationProvenance("openai_compatible", "vendor/model", "chapter-production-v1"),
+        )
+    )
+    try:
+        started = await production_client.post(production_url(str(project.id), str(chapter.id)))
+    finally:
+        await upstream.aclose()
+
+    assert started.status_code == 201
+    provenance = started.json()["events"][1]["payload"]
+    assert provenance == {
+        "provider_kind": "openai_compatible",
+        "model_identifier": "vendor/model",
+        "prompt_template_version": "chapter-production-v1",
+        "input_tokens": 5,
+        "output_tokens": 8,
+    }
+    assert observed_headers["authorization"] == "Bearer api-key-that-must-not-leak"
+    assert "api-key-that-must-not-leak" not in started.text
+    stored = await async_session.scalar(
+        select(WorkflowEvent).where(
+            WorkflowEvent.workflow_run_id == UUID(started.json()["id"]),
+            WorkflowEvent.event_type == "generation_provenance",
+        )
+    )
+    assert stored is not None
+    assert "api-key-that-must-not-leak" not in str(stored.payload)
+    assert stored.payload == provenance
+
+
+@pytest.mark.integration
+@pytest.mark.anyio
+async def test_api_real_mode_misconfiguration_returns_safe_error_envelope(
+    production_client: httpx.AsyncClient,
+) -> None:
+    def misconfigured() -> ChapterGenerationComposition:
+        raise ProviderConfigurationError()
+
+    production_client._transport.app.dependency_overrides[get_chapter_generation_composition] = misconfigured  # type: ignore[attr-defined]
+    response = await production_client.post(f"/api/v1/projects/{uuid4()}/chapters/{uuid4()}/production-runs")
+
+    assert response.status_code == 503
+    assert response.json() == {
+        "error": {
+            "code": "provider_configuration_error",
+            "message": "The generation provider is not configured. Please contact the service operator.",
+            "details": None,
+        }
+    }
 
 
 @pytest.mark.integration

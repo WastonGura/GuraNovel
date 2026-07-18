@@ -46,3 +46,14 @@ class ProviderInvalidOutputError(AgentOutputInvalidError):
 
     def __init__(self) -> None:
         super().__init__()
+
+
+class ProviderConfigurationError(AppError):
+    """Raised when the selected provider lacks safe server configuration."""
+
+    status_code = status.HTTP_503_SERVICE_UNAVAILABLE
+    code = "provider_configuration_error"
+    default_message = "The generation provider is not configured. Please contact the service operator."
+
+    def __init__(self) -> None:
+        super().__init__()

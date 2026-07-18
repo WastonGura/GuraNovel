@@ -35,6 +35,18 @@ base after it is created.
 
 Same-EUID processes remain trusted deployment principals: they can rename a workspace root and therefore can defeat pathname security. Persistent FD capability/reconciler work is out of scope for this lifecycle; deploy the service so untrusted UIDs cannot bypass the directory boundary.
 
+## Chapter generation provider
+
+`CHAPTER_GENERATION_PROVIDER` defaults to `fake`, which is deterministic and does not make a
+network request. To use a compatible chat-completions service, set it to `openai_compatible` and
+configure `OPENAI_COMPATIBLE_BASE_URL`, `OPENAI_COMPATIBLE_MODEL`,
+`OPENAI_COMPATIBLE_TIMEOUT_SECONDS`, and `OPENAI_COMPATIBLE_API_KEY`. The base URL must use HTTP or
+HTTPS and the timeout must be between 0 and 120 seconds. Missing real-provider settings fail safely
+when chapter production starts, not while the application starts.
+
+Put keys only in ignored `backend/.env` or a deployment secret manager; never commit them or add
+them to `.env.example`.
+
 ## PostgreSQL integration tests
 
 Integration tests are marked separately and never use the development database. Create the
