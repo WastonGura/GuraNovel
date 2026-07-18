@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.core.errors import AppError, ConflictError, NotFoundError
+from app.core.logging import log_event
 from app.models import Document, DocumentSource, DocumentType, DocumentVersion, Project
 from app.workspace.hashing import sha256_content
 from app.workspace.markdown_store import MarkdownStore
@@ -117,6 +118,7 @@ class DocumentService:
             MarkdownStore(Path(project.workspace_root)),
             ((document.path, content), (version.snapshot_path, content)),
         )
+        log_event("document_written", document_id=document.id, version_id=version.id)
         return document
 
     async def write_document(
@@ -149,6 +151,7 @@ class DocumentService:
         await self._commit_with_file_writes(
             self._store_for(document), ((document.path, content), (version.snapshot_path, content))
         )
+        log_event("document_written", document_id=document.id, version_id=version.id)
         return version
 
     async def restore_document(
@@ -173,7 +176,7 @@ class DocumentService:
         if target is None:
             raise NotFoundError("Document version not found.")
         content = self._store_for(document).read(self._snapshot_path(target))
-        return await self._append_version(
+        restored = await self._append_version(
             document=document,
             content=content,
             source=source,
@@ -182,6 +185,13 @@ class DocumentService:
             workflow_run_id=workflow_run_id,
             change_summary=change_summary,
         )
+        log_event(
+            "document_restored",
+            document_id=document.id,
+            version_id=restored.id,
+            restored_from_version_id=version_id,
+        )
+        return restored
 
     async def read_current_content(self, document_id: UUID) -> CurrentDocumentContent:
         document = await self._document(document_id)
