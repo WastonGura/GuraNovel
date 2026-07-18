@@ -90,14 +90,33 @@ def test_raw_chapter_output_conversion_normalizes_all_invalid_payloads(
     assert error.value.message == "The generation provider returned invalid output."
 
 
-@pytest.mark.parametrize("args", [
-    ("", "model", "v1"), ("fake", "", "v1"), ("fake", "model", ""),
-    ("fake", "https://model.example", "v1"),
-    ("fake prompt: write a chapter", "model", "v1"),
-    ("fake", "Authorization: Bearer secret", "v1"),
-    ("fake", "api_key=super-secret", "v1"),
-    ("fake", "model.example/path", "v1"), ("fake", "a" * 129, "v1"),
-])
+@pytest.mark.parametrize("model_identifier", ["vendor/model", "provider:model"])
+def test_server_owned_provenance_accepts_standard_openai_compatible_model_identifiers(
+    model_identifier: str,
+) -> None:
+    provenance = ChapterGenerationProvenance("openai_compatible", model_identifier, "v1")
+    assert provenance.to_payload()["model_identifier"] == model_identifier
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        ("", "model", "v1"),
+        ("fake", "", "v1"),
+        ("fake", "model", ""),
+        ("fake", "https://model.example", "v1"),
+        ("fake prompt: write a chapter", "model", "v1"),
+        ("fake", "Authorization: Bearer secret", "v1"),
+        ("fake", "X-Api-Key:opaque-secret", "v1"),
+        ("fake", "redacted", "v1"),
+        ("fake", "api_key=super-secret", "v1"),
+        ("fake", "sk-proj-abcdefghijklmnopqrstuvwxyz0123456789", "v1"),
+        ("fake", "sk-test-abc", "v1"),
+        ("fake", "sk_abc", "v1"),
+        ("fake", "vendor/model\nnext", "v1"),
+        ("fake", "a" * 129, "v1"),
+    ],
+)
 def test_server_owned_provenance_rejects_invalid_identifiers(args: tuple[object, ...]) -> None:
     with pytest.raises(ValueError):
         ChapterGenerationProvenance(*args)  # type: ignore[arg-type]

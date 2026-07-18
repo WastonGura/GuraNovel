@@ -15,6 +15,28 @@ from app.llm.errors import ProviderInvalidOutputError
 # from storing unbounded accounting values in the public workflow event stream.
 MAX_PROVENANCE_TOKEN_COUNT = 1_000_000_000
 _MACHINE_IDENTIFIER_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
+_MODEL_IDENTIFIER_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}")
+_MODEL_SENSITIVE_PREFIXES = ("sk-", "sk_")
+_MODEL_SENSITIVE_MATERIAL_PATTERN = re.compile(
+    r"(?:^|[-_:/])(?:api[-_]?key|apikey|authorization|bearer|token|secret|redacted)(?=$|[-_:])",
+    re.IGNORECASE,
+)
+
+
+def validate_model_identifier(value: object) -> str:
+    """Return a safe, bounded model identifier suitable for persisted provenance."""
+    has_sensitive_prefix = isinstance(value, str) and value.lower().startswith(
+        _MODEL_SENSITIVE_PREFIXES
+    )
+    if (
+        not isinstance(value, str)
+        or _MODEL_IDENTIFIER_PATTERN.fullmatch(value) is None
+        or "://" in value
+        or has_sensitive_prefix
+        or _MODEL_SENSITIVE_MATERIAL_PATTERN.search(value) is not None
+    ):
+        raise ValueError("model identifier must be a safe bounded identifier")
+    return value
 
 
 @dataclass(frozen=True)
@@ -67,13 +89,14 @@ class ChapterGenerationProvenance:
     prompt_template_version: str
 
     def __post_init__(self) -> None:
-        for value in (self.provider_kind, self.model_identifier, self.prompt_template_version):
+        for value in (self.provider_kind, self.prompt_template_version):
             if (
                 not isinstance(value, str)
                 or _MACHINE_IDENTIFIER_PATTERN.fullmatch(value) is None
                 or value.lower().startswith("sk-")
             ):
                 raise ValueError("provenance text values must be bounded machine identifiers")
+        validate_model_identifier(self.model_identifier)
     def to_payload(
         self, *, input_tokens: int | None = None, output_tokens: int | None = None
     ) -> dict[str, str | int]:

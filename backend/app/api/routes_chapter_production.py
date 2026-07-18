@@ -5,12 +5,13 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import get_db_session
+from app.api.deps import ChapterGenerationComposition, get_chapter_generation_composition, get_db_session
 from app.api.schemas_chapter_production import (
     ChapterProductionRunResponse,
     ResolveChapterProductionActionRequest,
     StartChapterProductionRequest,
 )
+from app.llm import ProviderUnavailableError
 from app.services import ChapterProductionRunRead, ChapterProductionService
 
 router = APIRouter(prefix="/projects/{project_id}/chapters/{chapter_id}/production-runs")
@@ -22,10 +23,30 @@ async def start_chapter_production(
     chapter_id: UUID,
     payload: StartChapterProductionRequest | None = None,
     session: AsyncSession = Depends(get_db_session),
+    generation: ChapterGenerationComposition = Depends(get_chapter_generation_composition),
 ) -> ChapterProductionRunRead:
-    service = ChapterProductionService(session)
-    started = await service.start_production(project_id, chapter_id)
-    return await service.get_production_run(project_id, chapter_id, started.workflow_run_id)
+    service = ChapterProductionService(
+        session, generation.provider, generation_provenance=generation.provenance
+    )
+    try:
+        started = await service.start_production(project_id, chapter_id)
+        result = await service.get_production_run(project_id, chapter_id, started.workflow_run_id)
+    except BaseException:
+        close = getattr(generation.provider, "aclose", None)
+        if close is not None:
+            try:
+                await close()
+            except Exception:
+                pass
+        raise
+    else:
+        close = getattr(generation.provider, "aclose", None)
+        if close is not None:
+            try:
+                await close()
+            except Exception as error:
+                raise ProviderUnavailableError() from error
+        return result
 
 
 @router.get("/{workflow_run_id}", response_model=ChapterProductionRunResponse)
