@@ -1,4 +1,4 @@
-import { useEffect, useState, type FormEvent } from 'react'
+import { useEffect, useRef, useState, type FormEvent } from 'react'
 import { Link, Route, Routes, useNavigate, useParams } from 'react-router-dom'
 import {
   createChapter,
@@ -7,7 +7,12 @@ import {
   getProject,
   listChapters,
   listProjects,
+  resolveChapterProductionAction,
+  startChapterProduction,
   type Chapter,
+  type ChapterProductionAction,
+  type ChapterProductionEvent,
+  type ChapterProductionRun,
   type Project,
 } from './api/client'
 
@@ -170,9 +175,26 @@ function ProjectWorkspace() {
 
 function ChapterWorkspace() {
   const { projectId = '', chapterId = '' } = useParams()
+
+  return <ChapterWorkspaceContent key={`${projectId}:${chapterId}`} projectId={projectId} chapterId={chapterId} />
+}
+
+function ChapterWorkspaceContent({ projectId, chapterId }: { projectId: string, chapterId: string }) {
   const [project, setProject] = useState<Project | null>(null)
   const [chapter, setChapter] = useState<Chapter | null>(null)
   const [failed, setFailed] = useState(false)
+  const [run, setRun] = useState<ChapterProductionRun | null>(null)
+  const [starting, setStarting] = useState(false)
+  const [resolving, setResolving] = useState(false)
+  const [productionError, setProductionError] = useState<string | null>(null)
+  const startingRef = useRef(false)
+  const resolvingRef = useRef(false)
+  const mountedRef = useRef(false)
+
+  useEffect(() => {
+    mountedRef.current = true
+    return () => { mountedRef.current = false }
+  }, [])
 
   useEffect(() => {
     let active = true
@@ -184,8 +206,46 @@ function ChapterWorkspace() {
       },
       () => { if (active) setFailed(true) },
     )
-    return () => { active = false }
+    return () => {
+      active = false
+    }
   }, [chapterId, projectId])
+
+  async function startProduction() {
+    if (startingRef.current || run) return
+    startingRef.current = true
+    setStarting(true)
+    setProductionError(null)
+    try {
+      const startedRun = await startChapterProduction(projectId, chapterId)
+      if (mountedRef.current) setRun(startedRun)
+    } catch {
+      if (mountedRef.current) setProductionError('Chapter production could not be started. Try again.')
+    } finally {
+      if (mountedRef.current) {
+        startingRef.current = false
+        setStarting(false)
+      }
+    }
+  }
+
+  async function resolveApproval(action: ChapterProductionAction, decision: 'approved' | 'rejected') {
+    if (!run || resolvingRef.current) return
+    resolvingRef.current = true
+    setResolving(true)
+    setProductionError(null)
+    try {
+      const resolvedRun = await resolveChapterProductionAction(projectId, chapterId, run.id, action.id, { decision })
+      if (mountedRef.current) setRun(resolvedRun)
+    } catch {
+      if (mountedRef.current) setProductionError('Chapter production approval could not be resolved. Try again.')
+    } finally {
+      if (mountedRef.current) {
+        resolvingRef.current = false
+        setResolving(false)
+      }
+    }
+  }
 
   if (failed) return <section className="page"><LoadError /></section>
   if (!project || !chapter) return <section className="page"><p className="muted">Loading chapter…</p></section>
@@ -195,8 +255,80 @@ function ChapterWorkspace() {
       <p className="eyebrow">Chapter {chapter.chapter_number}</p>
       <h1 id="route-title">{chapter.title || 'Untitled chapter'}</h1>
       <p className="muted">Status: {chapter.status}</p>
-      <section className="placeholder" aria-labelledby="next-title"><h2 id="next-title">Chapter workspace</h2><p className="muted">Drafting and review tools will appear here in a future workspace update.</p></section>
+      <section className="production-workspace" aria-labelledby="production-title">
+        <h2 id="production-title">Chapter production</h2>
+        {!run && <p className="muted">Chapter production has not started yet.</p>}
+        <button type="button" onClick={startProduction} disabled={starting || run !== null}>
+          {starting ? 'Starting chapter production…' : 'Start chapter production'}
+        </button>
+        {productionError && <LoadError>{productionError}</LoadError>}
+        {run && <ProductionRun run={run} resolving={resolving} onResolve={resolveApproval} />}
+      </section>
     </section>
+  )
+}
+
+function isPendingApproval(action: ChapterProductionAction): boolean {
+  return action.type === 'chapter_production_approval'
+    && action.status === 'pending'
+    && action.options.length === 2
+    && action.options.includes('approved')
+    && action.options.includes('rejected')
+}
+
+function safeTokenCount(value: number | undefined): number | null {
+  return value !== undefined && Number.isInteger(value) && value >= 0 && value <= 1_000_000_000 ? value : null
+}
+
+function EventDetails({ event }: { event: ChapterProductionEvent }) {
+  if (event.event_type === 'generation_provenance') {
+    const payload = event.payload as Extract<ChapterProductionEvent['payload'], { provider_kind: string }>
+    const inputTokens = safeTokenCount(payload.input_tokens)
+    const outputTokens = safeTokenCount(payload.output_tokens)
+    return <>
+      <p>Provider: {payload.provider_kind} · Model: {payload.model_identifier} · Template: {payload.prompt_template_version}</p>
+      {(inputTokens !== null || outputTokens !== null) && <p>Tokens: {inputTokens !== null ? `input ${inputTokens}` : 'input unavailable'} · {outputTokens !== null ? `output ${outputTokens}` : 'output unavailable'}</p>}
+    </>
+  }
+  if (event.event_type === 'generation_output_stored' || event.event_type === 'fake_output_stored') {
+    const payload = event.payload as Extract<ChapterProductionEvent['payload'], { outline_document_id: string }>
+    return <p>Outline document: {payload.outline_document_id}</p>
+  }
+  if (event.event_type === 'approval_approved' || event.event_type === 'approval_rejected') {
+    const payload = event.payload as Extract<ChapterProductionEvent['payload'], { decision: 'approved' | 'rejected' }>
+    return <p>Decision: {payload.decision} · Action: {payload.action_id}</p>
+  }
+  return null
+}
+
+function ProductionRun({ run, resolving, onResolve }: { run: ChapterProductionRun, resolving: boolean, onResolve: (action: ChapterProductionAction, decision: 'approved' | 'rejected') => void }) {
+  const action = run.awaiting_user ? run.actions.find(isPendingApproval) : undefined
+  return (
+    <div className="production-run">
+      <dl className="production-status">
+        <div><dt>Run status</dt><dd>{run.status}</dd></div>
+        <div><dt>Current node</dt><dd>{run.current_node || 'None'}</dd></div>
+        <div><dt>Next node</dt><dd>{run.next_node || 'None'}</dd></div>
+      </dl>
+      <section aria-labelledby="timeline-title">
+        <h3 id="timeline-title">Timeline</h3>
+        <ol className="production-timeline">
+          {run.events.map((event, index) => <li key={`${event.event_type}-${index}`}>
+            <p>{event.message || 'Workflow event recorded.'}</p>
+            {event.node_name && <p className="muted">Node: {event.node_name}</p>}
+            <EventDetails event={event} />
+          </li>)}
+        </ol>
+      </section>
+      {action && <section className="approval-panel" aria-labelledby="approval-title">
+        <h3 id="approval-title">Approval required</h3>
+        <p className="muted">Choose how this production run should continue.</p>
+        <div className="approval-actions">
+          <button type="button" onClick={() => onResolve(action, 'approved')} disabled={resolving}>Approve</button>
+          <button type="button" className="secondary-button" onClick={() => onResolve(action, 'rejected')} disabled={resolving}>Reject</button>
+        </div>
+      </section>}
+    </div>
   )
 }
 
