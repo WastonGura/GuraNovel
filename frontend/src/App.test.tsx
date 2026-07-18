@@ -1,7 +1,7 @@
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
-import { MemoryRouter, useLocation } from 'react-router-dom'
+import { Link, MemoryRouter, useLocation } from 'react-router-dom'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import type { Chapter, Project } from './api/client'
+import type { Chapter, ChapterProductionRun, Project } from './api/client'
 import App from './App'
 
 vi.mock('./api/client', () => ({
@@ -11,6 +11,8 @@ vi.mock('./api/client', () => ({
   listChapters: vi.fn(),
   createChapter: vi.fn(),
   getChapter: vi.fn(),
+  startChapterProduction: vi.fn(),
+  resolveChapterProductionAction: vi.fn(),
 }))
 
 import * as api from './api/client'
@@ -34,9 +36,26 @@ function chapter(overrides: Partial<Chapter> = {}): Chapter {
   }
 }
 
+function productionRun(overrides: Partial<ChapterProductionRun> = {}): ChapterProductionRun {
+  return {
+    id: 'run-1', type: 'chapter_production', status: 'awaiting_approval', current_node: 'review_outline',
+    next_node: 'await_user', awaiting_user: true,
+    actions: [{ id: 'action-server-id', type: 'chapter_production_approval', status: 'pending', options: ['approved', 'rejected'], default_option: null, user_decision: null }],
+    events: [
+      { event_type: 'production_started', node_name: 'start', message: 'Production started', payload: {} },
+      { event_type: 'generation_output_stored', node_name: 'store_outline', message: 'Outline stored', payload: { outline_document_id: 'outline-safe-id' } },
+    ],
+    outline_document_id: 'outline-safe-id', draft_document_id: null, ...overrides,
+  }
+}
+
 function Location() {
   const location = useLocation()
   return <output data-testid="location">{location.pathname}</output>
+}
+
+function RouteTransition({ path }: { path: string }) {
+  return <><Link to={path}>Navigate test route</Link><App /><Location /></>
 }
 
 function renderApp(path = '/') {
@@ -126,6 +145,19 @@ describe('project workspace', () => {
     await waitFor(() => expect(mockedApi.createChapter).toHaveBeenCalledWith('project-1', { title: 'A new beginning' }))
     await waitFor(() => expect(screen.getByTestId('location')).toHaveTextContent('/projects/project-1/chapters/server-chapter-id'))
   })
+
+  it('prevents duplicate chapter creation while pending', async () => {
+    mockedApi.getProject.mockResolvedValue(project())
+    mockedApi.listChapters.mockResolvedValue([])
+    mockedApi.createChapter.mockReturnValue(new Promise(() => undefined))
+    renderApp('/projects/project-1')
+    await screen.findByText('No chapters yet.')
+    const button = screen.getByRole('button', { name: 'Create chapter' })
+    fireEvent.click(button)
+    fireEvent.click(button)
+    expect(mockedApi.createChapter).toHaveBeenCalledTimes(1)
+    expect(button).toBeDisabled()
+  })
 })
 
 describe('chapter workspace and routing', () => {
@@ -140,5 +172,173 @@ describe('chapter workspace and routing', () => {
     view.unmount()
     renderApp('/not-a-route')
     expect(screen.getByRole('heading', { name: 'Page not found' })).toBeInTheDocument()
+  })
+
+  it('explains the pre-run state, starts production with route IDs, and renders its returned timeline', async () => {
+    mockedApi.getProject.mockResolvedValue(project())
+    mockedApi.getChapter.mockResolvedValue(chapter())
+    mockedApi.startChapterProduction.mockResolvedValue(productionRun())
+    renderApp('/projects/project-1/chapters/chapter-1')
+
+    expect(await screen.findByText('Chapter production has not started yet.')).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'Start chapter production' }))
+    await waitFor(() => expect(mockedApi.startChapterProduction).toHaveBeenCalledWith('project-1', 'chapter-1'))
+    expect(await screen.findByText('Production started')).toBeInTheDocument()
+    expect(screen.getByText('Node: store_outline')).toBeInTheDocument()
+    expect(screen.getByText('Outline document: outline-safe-id')).toBeInTheDocument()
+  })
+
+  it('clears production state when navigation reuses the workspace for another chapter', async () => {
+    mockedApi.getProject.mockResolvedValue(project())
+    mockedApi.getChapter.mockImplementation(async (_projectId, chapterId) => chapter({
+      id: chapterId,
+      chapter_number: chapterId === 'chapter-a' ? 1 : 2,
+      title: chapterId === 'chapter-a' ? 'Chapter A' : 'Chapter B',
+    }))
+    mockedApi.startChapterProduction.mockResolvedValue(productionRun())
+    const view = render(
+      <MemoryRouter initialEntries={['/projects/project-1/chapters/chapter-a']}>
+        <RouteTransition path="/projects/project-1/chapters/chapter-a" />
+      </MemoryRouter>,
+    )
+
+    await screen.findByRole('heading', { name: 'Chapter A' })
+    fireEvent.click(screen.getByRole('button', { name: 'Start chapter production' }))
+    await screen.findByText('Production started')
+    expect(screen.getByRole('button', { name: 'Approve' })).toBeInTheDocument()
+
+    view.rerender(
+      <MemoryRouter initialEntries={['/projects/project-1/chapters/chapter-a']}>
+        <RouteTransition path="/projects/project-1/chapters/chapter-b" />
+      </MemoryRouter>,
+    )
+    fireEvent.click(screen.getByRole('link', { name: 'Navigate test route' }))
+
+    expect(await screen.findByRole('heading', { name: 'Chapter B' })).toBeInTheDocument()
+    expect(screen.getByText('Chapter production has not started yet.')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Start chapter production' })).toBeEnabled()
+    expect(screen.queryByText('Production started')).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Approve' })).not.toBeInTheDocument()
+  })
+
+  it('ignores an in-flight production start after navigation remounts the workspace', async () => {
+    let resolveStart!: (run: ChapterProductionRun) => void
+    mockedApi.getProject.mockResolvedValue(project())
+    mockedApi.getChapter.mockImplementation(async (_projectId, chapterId) => chapter({
+      id: chapterId,
+      chapter_number: chapterId === 'chapter-a' ? 1 : 2,
+      title: chapterId === 'chapter-a' ? 'Chapter A' : 'Chapter B',
+    }))
+    mockedApi.startChapterProduction.mockReturnValue(new Promise((resolve) => { resolveStart = resolve }))
+    const view = render(
+      <MemoryRouter initialEntries={['/projects/project-1/chapters/chapter-a']}>
+        <RouteTransition path="/projects/project-1/chapters/chapter-a" />
+      </MemoryRouter>,
+    )
+
+    await screen.findByRole('heading', { name: 'Chapter A' })
+    fireEvent.click(screen.getByRole('button', { name: 'Start chapter production' }))
+
+    view.rerender(
+      <MemoryRouter initialEntries={['/projects/project-1/chapters/chapter-a']}>
+        <RouteTransition path="/projects/project-1/chapters/chapter-b" />
+      </MemoryRouter>,
+    )
+    fireEvent.click(screen.getByRole('link', { name: 'Navigate test route' }))
+    expect(await screen.findByRole('heading', { name: 'Chapter B' })).toBeInTheDocument()
+
+    resolveStart(productionRun())
+    await waitFor(() => expect(screen.queryByText('Production started')).not.toBeInTheDocument())
+    expect(screen.getByRole('button', { name: 'Start chapter production' })).toBeEnabled()
+  })
+
+  it('renders only explicitly allowed production event fields', async () => {
+    mockedApi.getProject.mockResolvedValue(project())
+    mockedApi.getChapter.mockResolvedValue(chapter())
+    mockedApi.startChapterProduction.mockResolvedValue(productionRun({
+      events: [{
+        event_type: 'generation_provenance', node_name: 'generate_outline', message: null,
+        payload: { provider_kind: 'fake', model_identifier: 'safe-model', prompt_template_version: 'v1', input_tokens: 12, output_tokens: 34, raw_output: 'SECRET RAW OUTPUT', provider_url: 'https://unsafe.example' } as never,
+      }],
+    }))
+    renderApp('/projects/project-1/chapters/chapter-1')
+    await screen.findByRole('button', { name: 'Start chapter production' })
+    fireEvent.click(screen.getByRole('button', { name: 'Start chapter production' }))
+
+    expect(await screen.findByText('Workflow event recorded.')).toBeInTheDocument()
+    expect(screen.getByText('Provider: fake · Model: safe-model · Template: v1')).toBeInTheDocument()
+    expect(screen.getByText('Tokens: input 12 · output 34')).toBeInTheDocument()
+    expect(screen.queryByText(/SECRET RAW OUTPUT|unsafe\.example|raw_output/)).not.toBeInTheDocument()
+  })
+
+  it('resolves a pending approval once with the server action ID and replaces the run from the response', async () => {
+    let resolveAction!: (run: ChapterProductionRun) => void
+    mockedApi.getProject.mockResolvedValue(project())
+    mockedApi.getChapter.mockResolvedValue(chapter())
+    mockedApi.startChapterProduction.mockResolvedValue(productionRun())
+    mockedApi.resolveChapterProductionAction.mockReturnValue(new Promise((resolve) => { resolveAction = resolve }))
+    renderApp('/projects/project-1/chapters/chapter-1')
+    await screen.findByRole('button', { name: 'Start chapter production' })
+    fireEvent.click(screen.getByRole('button', { name: 'Start chapter production' }))
+    const approve = await screen.findByRole('button', { name: 'Approve' })
+    const reject = screen.getByRole('button', { name: 'Reject' })
+    fireEvent.click(approve)
+    fireEvent.click(approve)
+    expect(mockedApi.resolveChapterProductionAction).toHaveBeenCalledTimes(1)
+    expect(mockedApi.resolveChapterProductionAction).toHaveBeenCalledWith('project-1', 'chapter-1', 'run-1', 'action-server-id', { decision: 'approved' })
+    expect(approve).toBeDisabled()
+    expect(reject).toBeDisabled()
+    resolveAction(productionRun({ status: 'completed', current_node: null, next_node: null, awaiting_user: false, actions: [{ id: 'action-server-id', type: 'chapter_production_approval', status: 'resolved', options: ['approved', 'rejected'], default_option: null, user_decision: 'approved' }] }))
+    expect(await screen.findByText('completed')).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Approve' })).not.toBeInTheDocument()
+  })
+
+  it('does not offer approval controls for unknown or resolved actions', async () => {
+    mockedApi.getProject.mockResolvedValue(project())
+    mockedApi.getChapter.mockResolvedValue(chapter())
+    mockedApi.startChapterProduction.mockResolvedValue(productionRun({ actions: [{ id: 'action-unknown', type: 'approval', status: 'pending', options: ['approved', 'defer'], default_option: null, user_decision: null }] }))
+    renderApp('/projects/project-1/chapters/chapter-1')
+    await screen.findByRole('button', { name: 'Start chapter production' })
+    fireEvent.click(screen.getByRole('button', { name: 'Start chapter production' }))
+    await screen.findByText('awaiting_approval')
+    expect(screen.queryByRole('button', { name: 'Approve' })).not.toBeInTheDocument()
+  })
+
+  it('uses fixed safe errors for production and project or chapter load failures', async () => {
+    mockedApi.getProject.mockResolvedValue(project())
+    mockedApi.getChapter.mockResolvedValue(chapter())
+    mockedApi.startChapterProduction.mockRejectedValue(new Error('provider URL https://secret.example'))
+    const view = renderApp('/projects/project-1/chapters/chapter-1')
+    await screen.findByRole('button', { name: 'Start chapter production' })
+    fireEvent.click(screen.getByRole('button', { name: 'Start chapter production' }))
+    expect(await screen.findByText('Chapter production could not be started. Try again.')).toBeInTheDocument()
+    expect(screen.queryByText(/secret\.example/)).not.toBeInTheDocument()
+
+    view.unmount()
+    mockedApi.getProject.mockRejectedValue(new Error('internal project details'))
+    mockedApi.getChapter.mockResolvedValue(chapter())
+    renderApp('/projects/project-1/chapters/chapter-1')
+    expect(await screen.findByText('This workspace could not be loaded. Try again.')).toBeInTheDocument()
+    expect(screen.queryByText(/internal project details/)).not.toBeInTheDocument()
+
+    cleanup()
+    mockedApi.getProject.mockResolvedValue(project())
+    mockedApi.getChapter.mockRejectedValue(new Error('internal chapter details'))
+    renderApp('/projects/project-1/chapters/chapter-1')
+    expect(await screen.findByText('This workspace could not be loaded. Try again.')).toBeInTheDocument()
+    expect(screen.queryByText(/internal chapter details/)).not.toBeInTheDocument()
+  })
+
+  it('uses a fixed safe error when approval resolution fails', async () => {
+    mockedApi.getProject.mockResolvedValue(project())
+    mockedApi.getChapter.mockResolvedValue(chapter())
+    mockedApi.startChapterProduction.mockResolvedValue(productionRun())
+    mockedApi.resolveChapterProductionAction.mockRejectedValue(new Error('raw response and headers'))
+    renderApp('/projects/project-1/chapters/chapter-1')
+    await screen.findByRole('button', { name: 'Start chapter production' })
+    fireEvent.click(screen.getByRole('button', { name: 'Start chapter production' }))
+    fireEvent.click(await screen.findByRole('button', { name: 'Reject' }))
+    expect(await screen.findByText('Chapter production approval could not be resolved. Try again.')).toBeInTheDocument()
+    expect(screen.queryByText(/raw response and headers/)).not.toBeInTheDocument()
   })
 })
