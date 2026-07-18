@@ -126,7 +126,7 @@ async def test_start_get_and_resolve_chapter_production_run(
     assert [event["event_type"] for event in started_body["events"]] == [
         "production_started",
         "generation_provenance",
-        "fake_output_stored",
+        "generation_output_stored",
         "awaiting_approval",
     ]
     assert all(set(event) == {"event_type", "node_name", "message", "payload"} for event in started_body["events"])
@@ -164,7 +164,7 @@ async def test_start_get_and_resolve_chapter_production_run(
     assert [event["event_type"] for event in resolved_body["events"]] == [
         "production_started",
         "generation_provenance",
-        "fake_output_stored",
+        "generation_output_stored",
         "awaiting_approval",
         "approval_approved",
     ]
@@ -423,6 +423,20 @@ async def test_api_real_mode_uses_trusted_configuration_provenance(
         "input_tokens": 5,
         "output_tokens": 8,
     }
+    output_event = started.json()["events"][2]
+    assert output_event == {
+        "event_type": "generation_output_stored",
+        "node_name": "generate",
+        "message": "Stored generated chapter output.",
+        "payload": {"outline_document_id": started.json()["outline_document_id"]},
+    }
+    assert started.json()["events"][0]["message"] == "Started chapter production."
+    assert all(
+        "fake" not in event["message"].lower()
+        and "deterministic" not in event["message"].lower()
+        for event in started.json()["events"]
+        if event["message"] is not None
+    )
     assert observed_headers["authorization"] == "Bearer api-key-that-must-not-leak"
     assert "api-key-that-must-not-leak" not in started.text
     stored = await async_session.scalar(

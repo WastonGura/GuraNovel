@@ -1,4 +1,4 @@
-"""Persist the deterministic chapter-production approval gate."""
+"""Persist the chapter-production approval gate."""
 
 from __future__ import annotations
 
@@ -94,7 +94,7 @@ class ChapterProductionRunRead:
 
 
 class ChapterProductionService:
-    """Create and resolve the deterministic chapter-production approval gate.
+    """Create and resolve the chapter-production approval gate.
 
     Providers are untrusted transports.  A caller that injects one must also pass
     ``generation_provenance`` selected by server composition/configuration; this
@@ -196,7 +196,7 @@ class ChapterProductionService:
                 workflow_run_id=run.id,
                 event_type="production_started",
                 node_name="start",
-                message="Started deterministic chapter production.",
+                message="Started chapter production.",
             )
         )
         self.session.add(
@@ -225,15 +225,15 @@ class ChapterProductionService:
                 source=DocumentSource.OUTLINE_AGENT,
                 agent_role="outline_agent",
                 workflow_run_id=run.id,
-                change_summary="Generated deterministic chapter outline.",
+                change_summary="Generated chapter outline.",
             )
             artifacts_committed = True
             self.session.add(
                 WorkflowEvent(
                     workflow_run_id=run.id,
-                    event_type="fake_output_stored",
+                    event_type="generation_output_stored",
                     node_name="generate",
-                    message="Stored deterministic fake chapter output.",
+                    message="Stored generated chapter output.",
                     payload={"outline_document_id": str(outline.id)},
                 )
             )
@@ -247,7 +247,7 @@ class ChapterProductionService:
                 source=DocumentSource.WRITER_AGENT,
                 agent_role="writer_agent",
                 workflow_run_id=run.id,
-                change_summary="Generated deterministic chapter draft.",
+                change_summary="Generated chapter draft.",
             )
             chapter.current_outline_document_id = outline.id
             chapter.current_draft_document_id = draft.id
@@ -459,7 +459,9 @@ class ChapterProductionService:
                 ):
                     return {}
             return provenance.to_payload(input_tokens=input_tokens, output_tokens=output_tokens)
-        if event_type == "fake_output_stored":
+        # Historical fake_output_stored events remain public only when their
+        # outline_document_id satisfies the current canonical UUID contract.
+        if event_type in {"generation_output_stored", "fake_output_stored"}:
             document_id = ChapterProductionService._canonical_uuid(payload.get("outline_document_id"))
             return {"outline_document_id": document_id} if document_id is not None else {}
         if event_type in {"approval_approved", "approval_rejected"}:
