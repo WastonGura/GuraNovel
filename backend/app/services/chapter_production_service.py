@@ -11,6 +11,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.core.errors import AppError, ConflictError, NotFoundError, WorkflowStateError
+from app.llm import (
+    ChapterGenerationProvider,
+    ChapterGenerationRequest,
+    FakeChapterGenerationProvider,
+)
 from app.models import (
     ActionRequest,
     ActionRequestStatus,
@@ -23,7 +28,6 @@ from app.models import (
     WorkflowRun,
     WorkflowType,
 )
-from app.production.fake_generator import FakeChapterGenerator
 from app.services.document_service import DocumentService
 
 
@@ -101,10 +105,14 @@ class ChapterProductionService:
     _APPROVAL_NODE = "approval"
     _ACTION_TYPE = "chapter_production_approval"
 
-    def __init__(self, session: AsyncSession) -> None:
+    def __init__(
+        self,
+        session: AsyncSession,
+        generation_provider: ChapterGenerationProvider | None = None,
+    ) -> None:
         self.session = session
         self.documents = DocumentService(session)
-        self.generator = FakeChapterGenerator()
+        self.generation_provider = generation_provider or FakeChapterGenerationProvider()
 
     async def start_production(
         self, project_id: UUID, chapter_id: UUID
@@ -125,7 +133,20 @@ class ChapterProductionService:
         if active_run is not None:
             raise ConflictError("Chapter production is already awaiting approval.")
 
-        generated = self.generator.generate(chapter.project.title, chapter.chapter_number, chapter.title)
+        try:
+            generated = await self.generation_provider.generate(
+                ChapterGenerationRequest(
+                    project_title=chapter.project.title,
+                    chapter_number=chapter.chapter_number,
+                    title=chapter.title,
+                )
+            )
+        except BaseException as provider_error:
+            try:
+                await self.session.rollback()
+            except BaseException as rollback_error:
+                raise provider_error from rollback_error
+            raise
         run = WorkflowRun(
             project_id=project_id,
             chapter_id=chapter_id,

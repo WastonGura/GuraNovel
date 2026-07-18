@@ -12,6 +12,12 @@ from app.core.errors import (
     WorkflowStateError,
     register_exception_handlers,
 )
+from app.llm import (
+    ProviderInvalidOutputError,
+    ProviderRateLimitedError,
+    ProviderTimeoutError,
+    ProviderUnavailableError,
+)
 
 
 class Payload(BaseModel):
@@ -38,6 +44,22 @@ def client() -> TestClient:
     @app.get("/agent-output")
     async def agent_output() -> None:
         raise AgentOutputInvalidError()
+
+    @app.get("/provider-unavailable")
+    async def provider_unavailable() -> None:
+        raise ProviderUnavailableError()
+
+    @app.get("/provider-timeout")
+    async def provider_timeout() -> None:
+        raise ProviderTimeoutError()
+
+    @app.get("/provider-rate-limited")
+    async def provider_rate_limited() -> None:
+        raise ProviderRateLimitedError()
+
+    @app.get("/provider-invalid-output")
+    async def provider_invalid_output() -> None:
+        raise ProviderInvalidOutputError()
 
     @app.post("/payload")
     async def payload(_: Payload) -> None:
@@ -77,6 +99,30 @@ def client() -> TestClient:
             "The workflow is not in a state that allows this operation.",
         ),
         ("/agent-output", 422, "agent_output_invalid", "The agent returned an invalid output."),
+        (
+            "/provider-unavailable",
+            503,
+            "provider_unavailable",
+            "The generation provider is temporarily unavailable. Please try again later.",
+        ),
+        (
+            "/provider-timeout",
+            504,
+            "provider_timeout",
+            "The generation provider timed out. Please try again later.",
+        ),
+        (
+            "/provider-rate-limited",
+            429,
+            "provider_rate_limited",
+            "The generation provider is rate limited. Please try again later.",
+        ),
+        (
+            "/provider-invalid-output",
+            422,
+            "provider_invalid_output",
+            "The generation provider returned invalid output.",
+        ),
     ],
 )
 def test_application_errors_use_standard_envelope(
@@ -90,6 +136,25 @@ def test_application_errors_use_standard_envelope(
         "message": message,
         "details": {"novel_id": "missing"} if path == "/not-found" else None,
     }
+
+
+@pytest.mark.parametrize(
+    "error_type",
+    [
+        ProviderUnavailableError,
+        ProviderTimeoutError,
+        ProviderRateLimitedError,
+        ProviderInvalidOutputError,
+    ],
+)
+def test_provider_errors_never_accept_or_expose_upstream_details(error_type: type[Exception]) -> None:
+    upstream_text = "upstream secret: Bearer sk-not-for-clients"
+    error = error_type()
+
+    assert upstream_text not in str(error)
+    assert getattr(error, "details") is None
+    with pytest.raises(TypeError):
+        error_type(upstream_text)
 
 
 def test_validation_errors_use_standard_envelope(client: TestClient) -> None:

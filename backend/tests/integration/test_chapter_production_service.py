@@ -22,6 +22,11 @@ from app.models import (
 )
 from app.core.errors import ConflictError, NotFoundError
 from app.core.errors import WorkflowStateError
+from app.llm import (
+    ChapterGenerationRequest,
+    ChapterGenerationResult,
+    ProviderUnavailableError,
+)
 from app.services.chapter_production_service import (
     ChapterProductionCommitIndeterminateError,
     ChapterProductionService,
@@ -118,6 +123,132 @@ async def test_start_production_persists_fake_artifacts_and_approval_gate(
     assert action.options == ["approved", "rejected"]
     assert action.default_option == "approved"
     assert action.prompt == "Approve the generated chapter outline and draft?"
+
+
+@pytest.mark.integration
+@pytest.mark.anyio
+async def test_start_production_uses_injected_provider_and_persists_its_artifacts(
+    async_session: AsyncSession, tmp_path: Path
+) -> None:
+    project, chapter = await create_project_and_chapter(async_session, tmp_path / "provider")
+
+    class SpyProvider:
+        def __init__(self) -> None:
+            self.requests: list[ChapterGenerationRequest] = []
+
+        async def generate(self, request: ChapterGenerationRequest) -> ChapterGenerationResult:
+            self.requests.append(request)
+            return ChapterGenerationResult(
+                outline="# Provider outline\n",
+                draft="# Provider draft\n",
+                summary="Provider summary",
+            )
+
+    provider = SpyProvider()
+    result = await ChapterProductionService(
+        async_session, generation_provider=provider
+    ).start_production(project.id, chapter.id)
+
+    assert provider.requests == [
+        ChapterGenerationRequest(
+            project_title="Archive of Ash", chapter_number=1, title="The Locked Door"
+        )
+    ]
+    documents = list(
+        await async_session.scalars(
+            select(Document)
+            .options(selectinload(Document.current_version))
+            .where(Document.project_id == project.id)
+            .order_by(Document.path)
+        )
+    )
+    outline = next(document for document in documents if document.type == DocumentType.CHAPTER_OUTLINE_OPTIONS.value)
+    draft = next(document for document in documents if document.type == DocumentType.CHAPTER_DRAFT.value)
+    assert (await DocumentService(async_session).read_current_content(outline.id)).content == "# Provider outline\n"
+    assert (await DocumentService(async_session).read_current_content(draft.id)).content == "# Provider draft\n"
+    assert [
+        event.event_type
+        for event in await async_session.scalars(
+            select(WorkflowEvent)
+            .where(WorkflowEvent.workflow_run_id == result.workflow_run_id)
+            .order_by(WorkflowEvent.created_at, WorkflowEvent.id)
+        )
+    ] == ["production_started", "fake_output_stored", "awaiting_approval"]
+    action = await async_session.scalar(
+        select(ActionRequest).where(ActionRequest.id == result.action_id)
+    )
+    assert action is not None
+    assert action.status == ActionRequestStatus.PENDING.value
+    assert action.options == ["approved", "rejected"]
+
+
+@pytest.mark.integration
+@pytest.mark.anyio
+async def test_provider_failure_rolls_back_lock_and_leaves_no_production_artifacts(
+    async_session: AsyncSession, tmp_path: Path
+) -> None:
+    project, chapter = await create_project_and_chapter(async_session, tmp_path / "provider-failure")
+    project_id = project.id
+    chapter_id = chapter.id
+    workspace = Path(project.workspace_root)
+
+    class FailingProvider:
+        async def generate(self, _: ChapterGenerationRequest) -> ChapterGenerationResult:
+            raise ProviderUnavailableError()
+
+    with pytest.raises(ProviderUnavailableError) as error:
+        await ChapterProductionService(
+            async_session, generation_provider=FailingProvider()
+        ).start_production(project_id, chapter_id)
+
+    assert error.value.status_code == 503
+    assert error.value.code == "provider_unavailable"
+    assert error.value.message == "The generation provider is temporarily unavailable. Please try again later."
+    assert await async_session.scalar(
+        select(WorkflowRun.id).where(WorkflowRun.chapter_id == chapter_id)
+    ) is None
+    assert await async_session.scalar(
+        select(WorkflowEvent.id).join(WorkflowRun).where(WorkflowRun.chapter_id == chapter_id)
+    ) is None
+    assert await async_session.scalar(
+        select(ActionRequest.id).where(ActionRequest.chapter_id == chapter_id)
+    ) is None
+    assert await async_session.scalar(
+        select(Document.id).where(Document.chapter_id == chapter_id)
+    ) is None
+    assert not list(workspace.rglob("*.md"))
+
+    retry = await ChapterProductionService(async_session).start_production(project_id, chapter_id)
+    assert retry.workflow_run_id
+
+
+@pytest.mark.integration
+@pytest.mark.anyio
+async def test_provider_failure_remains_primary_when_rollback_fails(
+    async_session: AsyncSession, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project, chapter = await create_project_and_chapter(
+        async_session, tmp_path / "provider-rollback-failure"
+    )
+    original_rollback = async_session.rollback
+
+    class FailingProvider:
+        async def generate(self, _: ChapterGenerationRequest) -> ChapterGenerationResult:
+            raise ProviderUnavailableError()
+
+    async def fail_rollback() -> None:
+        raise RuntimeError("database rollback failed")
+
+    monkeypatch.setattr(async_session, "rollback", fail_rollback)
+    with pytest.raises(ProviderUnavailableError) as error:
+        await ChapterProductionService(
+            async_session, generation_provider=FailingProvider()
+        ).start_production(project.id, chapter.id)
+
+    assert isinstance(error.value.__cause__, RuntimeError)
+    assert str(error.value.__cause__) == "database rollback failed"
+    monkeypatch.setattr(async_session, "rollback", original_rollback)
+    await async_session.rollback()
 
 
 @pytest.mark.integration
