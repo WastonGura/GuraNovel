@@ -24,7 +24,10 @@ from app.core.errors import ConflictError, NotFoundError
 from app.core.errors import WorkflowStateError
 from app.llm import (
     ChapterGenerationRequest,
+    ChapterGenerationResponse,
     ChapterGenerationResult,
+    ChapterGenerationProvenance,
+    ProviderInvalidOutputError,
     ProviderUnavailableError,
 )
 from app.services.chapter_production_service import (
@@ -109,9 +112,15 @@ async def test_start_production_persists_fake_artifacts_and_approval_gate(
     )
     assert [event.event_type for event in events] == [
         "production_started",
+        "generation_provenance",
         "fake_output_stored",
         "awaiting_approval",
     ]
+    assert events[1].payload == {
+        "provider_kind": "fake",
+        "model_identifier": "deterministic-fake-v1",
+        "prompt_template_version": "chapter-production-v1",
+    }
     action = await async_session.scalar(
         select(ActionRequest).where(ActionRequest.workflow_run_id == run.id)
     )
@@ -136,18 +145,24 @@ async def test_start_production_uses_injected_provider_and_persists_its_artifact
         def __init__(self) -> None:
             self.requests: list[ChapterGenerationRequest] = []
 
-        async def generate(self, request: ChapterGenerationRequest) -> ChapterGenerationResult:
+        async def generate(self, request: ChapterGenerationRequest) -> ChapterGenerationResponse:
             self.requests.append(request)
-            return ChapterGenerationResult(
-                outline="# Provider outline\n",
-                draft="# Provider draft\n",
-                summary="Provider summary",
+            return ChapterGenerationResponse(
+                result=ChapterGenerationResult(
+                    outline="# Provider outline\n",
+                    draft="# Provider draft\n",
+                    summary="Provider summary",
+                ), input_tokens=123, output_tokens=456,
             )
 
     provider = SpyProvider()
-    result = await ChapterProductionService(
-        async_session, generation_provider=provider
-    ).start_production(project.id, chapter.id)
+    service = ChapterProductionService(
+        async_session, generation_provider=provider,
+        generation_provenance=ChapterGenerationProvenance(
+            "test_provider", "test-model-2026", "chapter-template-v2"
+        ),
+    )
+    result = await service.start_production(project.id, chapter.id)
 
     assert provider.requests == [
         ChapterGenerationRequest(
@@ -166,14 +181,28 @@ async def test_start_production_uses_injected_provider_and_persists_its_artifact
     draft = next(document for document in documents if document.type == DocumentType.CHAPTER_DRAFT.value)
     assert (await DocumentService(async_session).read_current_content(outline.id)).content == "# Provider outline\n"
     assert (await DocumentService(async_session).read_current_content(draft.id)).content == "# Provider draft\n"
-    assert [
-        event.event_type
-        for event in await async_session.scalars(
+    events = list(
+        await async_session.scalars(
             select(WorkflowEvent)
             .where(WorkflowEvent.workflow_run_id == result.workflow_run_id)
             .order_by(WorkflowEvent.created_at, WorkflowEvent.id)
         )
-    ] == ["production_started", "fake_output_stored", "awaiting_approval"]
+    )
+    assert [event.event_type for event in events] == [
+        "production_started",
+        "generation_provenance",
+        "fake_output_stored",
+        "awaiting_approval",
+    ]
+    assert events[1].payload == {
+        "provider_kind": "test_provider",
+        "model_identifier": "test-model-2026",
+        "prompt_template_version": "chapter-template-v2",
+        "input_tokens": 123,
+        "output_tokens": 456,
+    }
+    run_read = await service.get_production_run(project.id, chapter.id, result.workflow_run_id)
+    assert run_read.events[1].payload == events[1].payload
     action = await async_session.scalar(
         select(ActionRequest).where(ActionRequest.id == result.action_id)
     )
@@ -193,12 +222,13 @@ async def test_provider_failure_rolls_back_lock_and_leaves_no_production_artifac
     workspace = Path(project.workspace_root)
 
     class FailingProvider:
-        async def generate(self, _: ChapterGenerationRequest) -> ChapterGenerationResult:
+        async def generate(self, _: ChapterGenerationRequest) -> ChapterGenerationResponse:
             raise ProviderUnavailableError()
 
     with pytest.raises(ProviderUnavailableError) as error:
         await ChapterProductionService(
-            async_session, generation_provider=FailingProvider()
+            async_session, generation_provider=FailingProvider(),
+            generation_provenance=ChapterGenerationProvenance("test_provider", "test-model", "v1"),
         ).start_production(project_id, chapter_id)
 
     assert error.value.status_code == 503
@@ -224,6 +254,140 @@ async def test_provider_failure_rolls_back_lock_and_leaves_no_production_artifac
 
 @pytest.mark.integration
 @pytest.mark.anyio
+async def test_injected_provider_requires_explicit_server_owned_provenance(
+    async_session: AsyncSession,
+) -> None:
+    class Provider:
+        async def generate(self, _: ChapterGenerationRequest) -> ChapterGenerationResponse:
+            return ChapterGenerationResponse(ChapterGenerationResult("outline", "draft", "summary"))
+
+    with pytest.raises(ValueError, match="explicit trusted server provenance"):
+        ChapterProductionService(async_session, generation_provider=Provider())
+
+
+@pytest.mark.integration
+@pytest.mark.anyio
+async def test_malformed_provider_response_rolls_back_before_persistence_and_permits_retry(
+    async_session: AsyncSession, tmp_path: Path
+) -> None:
+    project, chapter = await create_project_and_chapter(async_session, tmp_path / "invalid-provider")
+    project_id = project.id
+    chapter_id = chapter.id
+    workspace = Path(project.workspace_root)
+
+    class MalformedProvider:
+        async def generate(self, _: ChapterGenerationRequest) -> ChapterGenerationResponse:
+            return ChapterGenerationResponse(
+                result=ChapterGenerationResult(outline=42, draft="draft", summary="summary"),  # type: ignore[arg-type]
+            )
+
+    with pytest.raises(ProviderInvalidOutputError) as error:
+        await ChapterProductionService(
+            async_session, generation_provider=MalformedProvider(),
+            generation_provenance=ChapterGenerationProvenance("test_provider", "test-model", "v1"),
+        ).start_production(project_id, chapter_id)
+
+    assert error.value.code == "provider_invalid_output"
+    assert error.value.message == "The generation provider returned invalid output."
+    assert await async_session.scalar(
+        select(WorkflowRun.id).where(WorkflowRun.chapter_id == chapter_id)
+    ) is None
+    assert await async_session.scalar(
+        select(WorkflowEvent.id).join(WorkflowRun).where(WorkflowRun.chapter_id == chapter_id)
+    ) is None
+    assert await async_session.scalar(
+        select(ActionRequest.id).where(ActionRequest.chapter_id == chapter_id)
+    ) is None
+    assert await async_session.scalar(
+        select(Document.id).where(Document.chapter_id == chapter_id)
+    ) is None
+    assert not list(workspace.rglob("*.md"))
+
+    retry = await ChapterProductionService(async_session).start_production(project_id, chapter_id)
+    assert retry.workflow_run_id
+
+
+@pytest.mark.integration
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "opaque_value",
+    [
+        "sk-proj-abcdefghijklmnopqrstuvwxyz0123456789",
+        "a" * 64,
+        "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJvcGFxdWUtc2VjcmV0In0.signature",
+    ],
+)
+async def test_provider_supplied_provenance_is_never_persisted_or_projected(
+    async_session: AsyncSession, tmp_path: Path, opaque_value: str
+) -> None:
+    project, chapter = await create_project_and_chapter(async_session, tmp_path / "opaque-provenance")
+
+    class UnsafeProvider:
+        async def generate(self, _: ChapterGenerationRequest) -> ChapterGenerationResponse:
+            response = ChapterGenerationResponse(ChapterGenerationResult("outline", "draft", "summary"))
+            # Simulates any legacy/extra provider response shape; validation ignores it.
+            object.__setattr__(response, "provenance", opaque_value)
+            object.__setattr__(response, "provider_kind", opaque_value)
+            object.__setattr__(response, "model_identifier", opaque_value)
+            object.__setattr__(response, "prompt_template_version", opaque_value)
+            return response
+
+    service = ChapterProductionService(
+        async_session, UnsafeProvider(),
+        generation_provenance=ChapterGenerationProvenance("test_provider", "server-model", "server-v1"),
+    )
+    started = await service.start_production(project.id, chapter.id)
+    event = await async_session.scalar(select(WorkflowEvent).where(
+        WorkflowEvent.workflow_run_id == started.workflow_run_id,
+        WorkflowEvent.event_type == "generation_provenance",
+    ))
+    assert event is not None
+    assert event.payload == {
+        "provider_kind": "test_provider", "model_identifier": "server-model",
+        "prompt_template_version": "server-v1",
+    }
+    assert opaque_value not in str(event.payload)
+    assert opaque_value not in str((await service.get_production_run(
+        project.id, chapter.id, started.workflow_run_id
+    )).events)
+
+
+@pytest.mark.integration
+@pytest.mark.anyio
+async def test_get_production_run_projects_event_payloads_and_excludes_secrets(
+    async_session: AsyncSession, tmp_path: Path
+) -> None:
+    project, chapter = await create_project_and_chapter(async_session, tmp_path / "event-projection")
+    service = ChapterProductionService(async_session)
+    started = await service.start_production(project.id, chapter.id)
+    event = await async_session.scalar(
+        select(WorkflowEvent).where(
+            WorkflowEvent.workflow_run_id == started.workflow_run_id,
+            WorkflowEvent.event_type == "generation_provenance",
+        )
+    )
+    assert event is not None
+    event.payload = {**event.payload, "Authorization": "Bearer secret", "raw_output": "chapter text"}
+    async_session.add(
+        WorkflowEvent(
+            workflow_run_id=started.workflow_run_id,
+            event_type="unknown_provider_event",
+            payload={"api_key": "super-secret"},
+        )
+    )
+    await async_session.commit()
+
+    run = await service.get_production_run(project.id, chapter.id, started.workflow_run_id)
+    assert run.events[1].payload == {
+        "provider_kind": "fake",
+        "model_identifier": "deterministic-fake-v1",
+        "prompt_template_version": "chapter-production-v1",
+    }
+    assert run.events[-1].payload == {}
+
+
+@pytest.mark.integration
+@pytest.mark.anyio
 async def test_provider_failure_remains_primary_when_rollback_fails(
     async_session: AsyncSession, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -233,7 +397,7 @@ async def test_provider_failure_remains_primary_when_rollback_fails(
     original_rollback = async_session.rollback
 
     class FailingProvider:
-        async def generate(self, _: ChapterGenerationRequest) -> ChapterGenerationResult:
+        async def generate(self, _: ChapterGenerationRequest) -> ChapterGenerationResponse:
             raise ProviderUnavailableError()
 
     async def fail_rollback() -> None:
@@ -242,7 +406,8 @@ async def test_provider_failure_remains_primary_when_rollback_fails(
     monkeypatch.setattr(async_session, "rollback", fail_rollback)
     with pytest.raises(ProviderUnavailableError) as error:
         await ChapterProductionService(
-            async_session, generation_provider=FailingProvider()
+            async_session, generation_provider=FailingProvider(),
+            generation_provenance=ChapterGenerationProvenance("test_provider", "test-model", "v1"),
         ).start_production(project.id, chapter.id)
 
     assert isinstance(error.value.__cause__, RuntimeError)
@@ -368,7 +533,13 @@ async def test_resolve_action_approves_the_scoped_pending_gate_and_rejects_repla
             .where(WorkflowEvent.workflow_run_id == started.workflow_run_id)
             .order_by(WorkflowEvent.created_at)
         )
-    ) == ["production_started", "fake_output_stored", "awaiting_approval", "approval_approved"]
+    ) == [
+        "production_started",
+        "generation_provenance",
+        "fake_output_stored",
+        "awaiting_approval",
+        "approval_approved",
+    ]
 
     with pytest.raises(WorkflowStateError):
         await service.resolve_action(

@@ -12,10 +12,14 @@ from sqlalchemy.orm import selectinload
 
 from app.core.errors import AppError, ConflictError, NotFoundError, WorkflowStateError
 from app.llm import (
+    ChapterGenerationProvenance,
     ChapterGenerationProvider,
     ChapterGenerationRequest,
     FakeChapterGenerationProvider,
+    ProviderInvalidOutputError,
+    validate_chapter_generation_response,
 )
+from app.llm.contracts import MAX_PROVENANCE_TOKEN_COUNT
 from app.models import (
     ActionRequest,
     ActionRequestStatus,
@@ -92,6 +96,10 @@ class ChapterProductionRunRead:
 class ChapterProductionService:
     """Create and resolve the deterministic chapter-production approval gate.
 
+    Providers are untrusted transports.  A caller that injects one must also pass
+    ``generation_provenance`` selected by server composition/configuration; this
+    service never reads provenance identity from ``provider.generate()`` output.
+
     ``DocumentService`` commits each artifact and its filesystem write internally.
     Consequently this service deliberately does not claim atomic workflow-plus-filesystem
     behavior; after an artifact commit, a later persistence failure is indeterminate and
@@ -104,15 +112,31 @@ class ChapterProductionService:
     _REJECTED = "rejected"
     _APPROVAL_NODE = "approval"
     _ACTION_TYPE = "chapter_production_approval"
+    _FAKE_PROVENANCE = ChapterGenerationProvenance(
+        provider_kind="fake",
+        model_identifier="deterministic-fake-v1",
+        prompt_template_version="chapter-production-v1",
+    )
 
     def __init__(
         self,
         session: AsyncSession,
         generation_provider: ChapterGenerationProvider | None = None,
+        *,
+        generation_provenance: ChapterGenerationProvenance | None = None,
     ) -> None:
         self.session = session
         self.documents = DocumentService(session)
-        self.generation_provider = generation_provider or FakeChapterGenerationProvider()
+        if generation_provider is None:
+            self.generation_provider = FakeChapterGenerationProvider()
+            self.generation_provenance = self._FAKE_PROVENANCE
+        else:
+            if generation_provenance is None:
+                raise ValueError(
+                    "injected generation providers require explicit trusted server provenance"
+                )
+            self.generation_provider = generation_provider
+            self.generation_provenance = generation_provenance
 
     async def start_production(
         self, project_id: UUID, chapter_id: UUID
@@ -134,19 +158,28 @@ class ChapterProductionService:
             raise ConflictError("Chapter production is already awaiting approval.")
 
         try:
-            generated = await self.generation_provider.generate(
+            response = await self.generation_provider.generate(
                 ChapterGenerationRequest(
                     project_title=chapter.project.title,
                     chapter_number=chapter.chapter_number,
                     title=chapter.title,
                 )
             )
+            response = validate_chapter_generation_response(response)
+        except (TypeError, ValueError) as error:
+            provider_error = ProviderInvalidOutputError()
+            try:
+                await self.session.rollback()
+            except BaseException as rollback_error:
+                raise provider_error from rollback_error
+            raise provider_error from error
         except BaseException as provider_error:
             try:
                 await self.session.rollback()
             except BaseException as rollback_error:
                 raise provider_error from rollback_error
             raise
+        generated = response.result
         run = WorkflowRun(
             project_id=project_id,
             chapter_id=chapter_id,
@@ -164,6 +197,19 @@ class ChapterProductionService:
                 event_type="production_started",
                 node_name="start",
                 message="Started deterministic chapter production.",
+            )
+        )
+        self.session.add(
+            WorkflowEvent(
+                workflow_run_id=run.id,
+                event_type="generation_provenance",
+                node_name="generate",
+                message="Recorded chapter generation provenance.",
+                payload=self.generation_provenance.to_payload(
+                    input_tokens=response.input_tokens,
+                    output_tokens=response.output_tokens,
+                ),
+                created_at=datetime.now(UTC),
             )
         )
 
@@ -381,13 +427,60 @@ class ChapterProductionService:
                     event_type=event.event_type,
                     node_name=event.node_name,
                     message=event.message,
-                    payload=dict(event.payload),
+                    payload=self._public_event_payload(event.event_type, event.payload),
                 )
                 for event in events
             ),
             outline_document_id=document_ids.get(DocumentType.CHAPTER_OUTLINE_OPTIONS.value),
             draft_document_id=document_ids.get(DocumentType.CHAPTER_DRAFT.value),
         )
+
+    @staticmethod
+    def _public_event_payload(event_type: str, payload: object) -> dict[str, str | int]:
+        """Project event payloads onto the small, public chapter-production schema."""
+        if not isinstance(payload, dict):
+            return {}
+        if event_type == "generation_provenance":
+            try:
+                provenance = ChapterGenerationProvenance(
+                    provider_kind=payload["provider_kind"],
+                    model_identifier=payload["model_identifier"],
+                    prompt_template_version=payload["prompt_template_version"],
+                )
+            except (KeyError, TypeError, ValueError):
+                return {}
+            input_tokens = payload.get("input_tokens")
+            output_tokens = payload.get("output_tokens")
+            for value in (input_tokens, output_tokens):
+                if value is not None and (
+                    isinstance(value, bool)
+                    or not isinstance(value, int)
+                    or not 0 <= value <= MAX_PROVENANCE_TOKEN_COUNT
+                ):
+                    return {}
+            return provenance.to_payload(input_tokens=input_tokens, output_tokens=output_tokens)
+        if event_type == "fake_output_stored":
+            document_id = ChapterProductionService._canonical_uuid(payload.get("outline_document_id"))
+            return {"outline_document_id": document_id} if document_id is not None else {}
+        if event_type in {"approval_approved", "approval_rejected"}:
+            decision = event_type.removeprefix("approval_")
+            action_id = ChapterProductionService._canonical_uuid(payload.get("action_id"))
+            if payload.get("decision") != decision or action_id is None:
+                return {}
+            return {"decision": decision, "action_id": action_id}
+        if event_type in {"production_started", "awaiting_approval"}:
+            return {}
+        return {}
+
+    @staticmethod
+    def _canonical_uuid(value: object) -> str | None:
+        if not isinstance(value, str):
+            return None
+        try:
+            parsed = UUID(value)
+        except (TypeError, ValueError, AttributeError):
+            return None
+        return value if str(parsed) == value else None
 
     async def _scoped_chapter(self, project_id: UUID, chapter_id: UUID) -> Chapter:
         chapter = await self.session.scalar(
