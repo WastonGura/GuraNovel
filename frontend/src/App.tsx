@@ -1,18 +1,28 @@
 import { useEffect, useRef, useState, type FormEvent } from 'react'
 import { Link, Route, Routes, useNavigate, useParams } from 'react-router-dom'
 import {
+  ApiError,
   createChapter,
   createProject,
   getChapter,
+  getDocument,
   getProject,
   listChapters,
+  listDocumentVersions,
   listProjects,
+  readDocumentContent,
+  readDocumentVersionContent,
+  restoreDocument,
   resolveChapterProductionAction,
   startChapterProduction,
+  writeDocument,
   type Chapter,
   type ChapterProductionAction,
   type ChapterProductionEvent,
   type ChapterProductionRun,
+  type Document,
+  type DocumentContent,
+  type DocumentVersion,
   type Project,
 } from './api/client'
 
@@ -218,7 +228,14 @@ function ChapterWorkspaceContent({ projectId, chapterId }: { projectId: string, 
     setProductionError(null)
     try {
       const startedRun = await startChapterProduction(projectId, chapterId)
-      if (mountedRef.current) setRun(startedRun)
+      if (mountedRef.current) {
+        setRun(startedRun)
+        setChapter((currentChapter) => currentChapter && {
+          ...currentChapter,
+          current_outline_document_id: startedRun.outline_document_id,
+          current_draft_document_id: startedRun.draft_document_id,
+        })
+      }
     } catch {
       if (mountedRef.current) setProductionError('Chapter production could not be started. Try again.')
     } finally {
@@ -255,6 +272,7 @@ function ChapterWorkspaceContent({ projectId, chapterId }: { projectId: string, 
       <p className="eyebrow">Chapter {chapter.chapter_number}</p>
       <h1 id="route-title">{chapter.title || 'Untitled chapter'}</h1>
       <p className="muted">Status: {chapter.status}</p>
+      <ChapterDocuments chapter={chapter} />
       <section className="production-workspace" aria-labelledby="production-title">
         <h2 id="production-title">Chapter production</h2>
         {!run && <p className="muted">Chapter production has not started yet.</p>}
@@ -266,6 +284,135 @@ function ChapterWorkspaceContent({ projectId, chapterId }: { projectId: string, 
       </section>
     </section>
   )
+}
+
+const documentRoles = [
+  ['current_outline_document_id', 'Outline'],
+  ['current_draft_document_id', 'Draft'],
+  ['final_document_id', 'Final'],
+  ['summary_document_id', 'Summary'],
+] as const
+
+type DocumentRole = typeof documentRoles[number][0]
+
+function ChapterDocuments({ chapter }: { chapter: Chapter }) {
+  const documents = documentRoles.flatMap(([field, label]) => {
+    const id = chapter[field as DocumentRole]
+    return id ? [{ id, label }] : []
+  })
+  const [selectedId, setSelectedId] = useState(documents[0]?.id ?? '')
+
+  if (documents.length === 0) return <section className="document-workspace" aria-labelledby="documents-title"><h2 id="documents-title">Documents</h2><p className="muted">No server documents are available for this chapter.</p></section>
+  const selected = documents.find((item) => item.id === selectedId) ?? documents[0]
+  return <section className="document-workspace" aria-labelledby="documents-title">
+    <h2 id="documents-title">Documents</h2>
+    <div className="document-tabs" aria-label="Available documents">
+      {documents.map((item) => <button type="button" className="secondary-button" key={item.id} onClick={() => setSelectedId(item.id)} aria-pressed={item.id === selected.id}>{item.label}</button>)}
+    </div>
+    <DocumentEditor key={selected.id} documentId={selected.id} fallbackTitle={selected.label} />
+  </section>
+}
+
+function DocumentEditor({ documentId, fallbackTitle }: { documentId: string, fallbackTitle: string }) {
+  const [document, setDocument] = useState<Document | null>(null)
+  const [content, setContent] = useState<DocumentContent | null>(null)
+  const [versions, setVersions] = useState<DocumentVersion[]>([])
+  const [currentVersionId, setCurrentVersionId] = useState<string | null>(null)
+  const [error, setError] = useState<string | null>(null)
+  const [saving, setSaving] = useState(false)
+  const [selectedVersion, setSelectedVersion] = useState<DocumentVersion | null>(null)
+  const [selectedContent, setSelectedContent] = useState<DocumentContent | null>(null)
+  const mountedRef = useRef(false)
+  const versionSelectionRequestRef = useRef(0)
+
+  useEffect(() => {
+    mountedRef.current = true
+    return () => { mountedRef.current = false }
+  }, [])
+
+  useEffect(() => {
+    let active = true
+    Promise.all([getDocument(documentId), readDocumentContent(documentId), listDocumentVersions(documentId)]).then(
+      ([loadedDocument, loadedContent, loadedVersions]) => {
+        if (!active) return
+        setDocument(loadedDocument)
+        setContent(loadedContent)
+        setVersions(loadedVersions)
+        setCurrentVersionId(loadedDocument.current_version_id)
+      },
+      () => { if (active) setError('Document could not be loaded. Try again.') },
+    )
+    return () => { active = false }
+  }, [documentId])
+
+  async function selectVersion(version: DocumentVersion) {
+    const requestId = ++versionSelectionRequestRef.current
+    setError(null)
+    try {
+      const versionContent = await readDocumentVersionContent(documentId, version.id)
+      if (!mountedRef.current || requestId !== versionSelectionRequestRef.current) return
+      setSelectedVersion(version)
+      setSelectedContent(versionContent)
+    } catch {
+      if (mountedRef.current && requestId === versionSelectionRequestRef.current) setError('Document version could not be loaded. Try again.')
+    }
+  }
+
+  async function save() {
+    if (!content || !currentVersionId || saving) return
+    setSaving(true)
+    setError(null)
+    try {
+      const saved = await writeDocument(documentId, { content: content.content, expected_current_version_id: currentVersionId })
+      if (!mountedRef.current) return
+      setCurrentVersionId(saved.id)
+      setVersions((previous) => [...previous, saved])
+    } catch (caught: unknown) {
+      if (!mountedRef.current) return
+      setError(caught instanceof ApiError && caught.status === 409 && caught.code === 'document_version_conflict'
+        ? 'This document changed on the server. Your local draft was kept.'
+        : 'Document could not be saved. Try again.')
+    } finally { if (mountedRef.current) setSaving(false) }
+  }
+
+  async function restore() {
+    if (!selectedVersion || !currentVersionId || saving) return
+    setSaving(true)
+    setError(null)
+    try {
+      const restored = await restoreDocument(documentId, selectedVersion.id, { expected_current_version_id: currentVersionId })
+      if (!mountedRef.current) return
+      setCurrentVersionId(restored.id)
+      setVersions((previous) => [...previous, restored])
+      if (selectedContent) setContent({ document_id: documentId, version_id: restored.id, content: selectedContent.content })
+    } catch {
+      if (mountedRef.current) setError('Document version could not be restored. Try again.')
+    } finally { if (mountedRef.current) setSaving(false) }
+  }
+
+  if (error && !document && !content) return <LoadError>{error}</LoadError>
+  if (!document || !content) return <p className="muted">Loading document…</p>
+  const title = document.title || fallbackTitle
+  return <div className="document-editor">
+    <label>{title}<textarea value={content.content} onChange={(event) => setContent({ ...content, content: event.target.value })} /></label>
+    <button type="button" onClick={save} disabled={saving || !currentVersionId}>{saving ? 'Saving document…' : 'Save document'}</button>
+    {error && <LoadError>{error}</LoadError>}
+    <section aria-labelledby="versions-title">
+      <h3 id="versions-title">Versions</h3>
+      <div className="version-list">{versions.map((version) => <button type="button" className="secondary-button" key={version.id} onClick={() => void selectVersion(version)}>Version {version.version_number}</button>)}</div>
+      {selectedVersion && selectedContent && <div className="version-preview" role="region" aria-label="Immutable version details">
+        <p>Viewing immutable server version {selectedVersion.version_number}.</p>
+        <dl className="metadata">
+          <div><dt>Version</dt><dd>{selectedVersion.version_number}</dd></div>
+          <div><dt>Created</dt><dd>{selectedVersion.created_at}</dd></div>
+          <div><dt>Source</dt><dd>{selectedVersion.source}</dd></div>
+          <div><dt>Change summary</dt><dd>{selectedVersion.change_summary || 'No change summary provided.'}</dd></div>
+        </dl>
+        <pre>{selectedContent.content}</pre>
+        <button type="button" onClick={restore} disabled={saving || !currentVersionId}>Restore version {selectedVersion.version_number}</button>
+      </div>}
+    </section>
+  </div>
 }
 
 function isPendingApproval(action: ChapterProductionAction): boolean {

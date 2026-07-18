@@ -1,7 +1,7 @@
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { Link, MemoryRouter, useLocation } from 'react-router-dom'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import type { Chapter, ChapterProductionRun, Project } from './api/client'
+import type { Chapter, ChapterProductionRun, Document, DocumentContent, DocumentVersion, Project } from './api/client'
 import App from './App'
 
 vi.mock('./api/client', () => ({
@@ -11,6 +11,21 @@ vi.mock('./api/client', () => ({
   listChapters: vi.fn(),
   createChapter: vi.fn(),
   getChapter: vi.fn(),
+  getDocument: vi.fn(),
+  readDocumentContent: vi.fn(),
+  listDocumentVersions: vi.fn(),
+  readDocumentVersionContent: vi.fn(),
+  writeDocument: vi.fn(),
+  restoreDocument: vi.fn(),
+  ApiError: class ApiError extends Error {
+    status: number
+    code: string
+    constructor(status: number, code: string, message: string) {
+      super(message)
+      this.status = status
+      this.code = code
+    }
+  },
   startChapterProduction: vi.fn(),
   resolveChapterProductionAction: vi.fn(),
 }))
@@ -45,8 +60,29 @@ function productionRun(overrides: Partial<ChapterProductionRun> = {}): ChapterPr
       { event_type: 'production_started', node_name: 'start', message: 'Production started', payload: {} },
       { event_type: 'generation_output_stored', node_name: 'store_outline', message: 'Outline stored', payload: { outline_document_id: 'outline-safe-id' } },
     ],
-    outline_document_id: 'outline-safe-id', draft_document_id: null, ...overrides,
+    outline_document_id: null, draft_document_id: null, ...overrides,
   }
+}
+
+function documentVersion(overrides: Partial<DocumentVersion> = {}): DocumentVersion {
+  return {
+    id: 'version-current', document_id: 'document-draft', version_number: 2, parent_version_id: 'version-first',
+    source: 'user', actor_user_id: null, agent_role: null, workflow_run_id: null, content_hash: 'hash',
+    byte_size: 12, word_count: 2, file_path: 'chapters/draft.md', change_summary: null,
+    created_at: '2026-07-19T00:00:00Z', ...overrides,
+  }
+}
+
+function document(overrides: Partial<Document> = {}): Document {
+  return {
+    id: 'document-draft', project_id: 'project-1', chapter_id: 'chapter-1', type: 'chapter_draft',
+    title: 'Chapter draft', path: 'chapters/draft.md', current_version_id: 'version-current',
+    current_version: documentVersion(), created_at: '2026-07-19T00:00:00Z', updated_at: '2026-07-19T00:00:00Z', ...overrides,
+  }
+}
+
+function documentContent(overrides: Partial<DocumentContent> = {}): DocumentContent {
+  return { document_id: 'document-draft', version_id: 'version-current', content: '# Server draft', ...overrides }
 }
 
 function Location() {
@@ -186,6 +222,40 @@ describe('chapter workspace and routing', () => {
     expect(await screen.findByText('Production started')).toBeInTheDocument()
     expect(screen.getByText('Node: store_outline')).toBeInTheDocument()
     expect(screen.getByText('Outline document: outline-safe-id')).toBeInTheDocument()
+  })
+
+  it('makes exact document IDs from a started run available without reloading the chapter', async () => {
+    mockedApi.getProject.mockResolvedValue(project())
+    mockedApi.getChapter.mockResolvedValue(chapter())
+    mockedApi.startChapterProduction.mockResolvedValue(productionRun({
+      outline_document_id: 'run-outline-id', draft_document_id: 'run-draft-id',
+    }))
+    mockedApi.getDocument.mockImplementation(async (id) => document({
+      id, title: id === 'run-outline-id' ? 'Server outline' : 'Server draft',
+      current_version_id: `${id}-version`, current_version: documentVersion({ id: `${id}-version`, document_id: id }),
+    }))
+    mockedApi.readDocumentContent.mockImplementation(async (id) => documentContent({
+      document_id: id, version_id: `${id}-version`, content: `# ${id}`,
+    }))
+    mockedApi.listDocumentVersions.mockResolvedValue([])
+    renderApp('/projects/project-1/chapters/chapter-1')
+
+    expect(await screen.findByText('No server documents are available for this chapter.')).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'Start chapter production' }))
+
+    expect(await screen.findByRole('button', { name: 'Outline' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Draft' })).toBeInTheDocument()
+    expect(await screen.findByLabelText('Server outline')).toHaveValue('# run-outline-id')
+    expect(mockedApi.getDocument).toHaveBeenCalledWith('run-outline-id')
+    expect(mockedApi.readDocumentContent).toHaveBeenCalledWith('run-outline-id')
+    expect(mockedApi.listDocumentVersions).toHaveBeenCalledWith('run-outline-id')
+
+    fireEvent.click(screen.getByRole('button', { name: 'Draft' }))
+    expect(await screen.findByLabelText('Server draft')).toHaveValue('# run-draft-id')
+    expect(mockedApi.getDocument).toHaveBeenCalledWith('run-draft-id')
+    expect(mockedApi.readDocumentContent).toHaveBeenCalledWith('run-draft-id')
+    expect(mockedApi.listDocumentVersions).toHaveBeenCalledWith('run-draft-id')
+    expect(mockedApi.startChapterProduction).toHaveBeenCalledTimes(1)
   })
 
   it('clears production state when navigation reuses the workspace for another chapter', async () => {
@@ -340,5 +410,139 @@ describe('chapter workspace and routing', () => {
     fireEvent.click(await screen.findByRole('button', { name: 'Reject' }))
     expect(await screen.findByText('Chapter production approval could not be resolved. Try again.')).toBeInTheDocument()
     expect(screen.queryByText(/raw response and headers/)).not.toBeInTheDocument()
+  })
+})
+
+describe('chapter document workspace', () => {
+  function mockDocumentWorkspace() {
+    mockedApi.getProject.mockResolvedValue(project())
+    mockedApi.getChapter.mockResolvedValue(chapter({ current_draft_document_id: 'document-draft' }))
+    mockedApi.getDocument.mockResolvedValue(document())
+    mockedApi.readDocumentContent.mockResolvedValue(documentContent())
+    mockedApi.listDocumentVersions.mockResolvedValue([
+      documentVersion({ id: 'version-first', version_number: 1 }),
+      documentVersion(),
+    ])
+  }
+
+  it('derives its only available document from the chapter and saves with its current server version', async () => {
+    mockDocumentWorkspace()
+    mockedApi.readDocumentContent.mockResolvedValue(documentContent({ content: '<img src=x onerror=alert(1)>' }))
+    mockedApi.writeDocument.mockResolvedValue(documentVersion({ id: 'version-saved', version_number: 3 }))
+    renderApp('/projects/project-1/chapters/chapter-1')
+
+    const editor = await screen.findByLabelText('Chapter draft')
+    expect(editor).toHaveValue('<img src=x onerror=alert(1)>')
+    expect(globalThis.document.querySelector('img')).toBeNull()
+    expect(mockedApi.getDocument).toHaveBeenCalledWith('document-draft')
+    expect(mockedApi.readDocumentContent).toHaveBeenCalledWith('document-draft')
+    expect(screen.queryByRole('button', { name: /outline|final|summary/i })).not.toBeInTheDocument()
+    fireEvent.change(editor, { target: { value: 'My local revision' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Save document' }))
+    await waitFor(() => expect(mockedApi.writeDocument).toHaveBeenCalledWith('document-draft', {
+      content: 'My local revision', expected_current_version_id: 'version-current',
+    }))
+  })
+
+  it('keeps the local draft and gives a fixed message when the server reports a version conflict', async () => {
+    mockDocumentWorkspace()
+    mockedApi.writeDocument.mockRejectedValue(new api.ApiError(409, 'document_version_conflict', 'unsafe server detail'))
+    renderApp('/projects/project-1/chapters/chapter-1')
+
+    const editor = await screen.findByLabelText('Chapter draft')
+    fireEvent.change(editor, { target: { value: 'Keep this local draft' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Save document' }))
+    expect(await screen.findByRole('alert')).toHaveTextContent('This document changed on the server. Your local draft was kept.')
+    expect(editor).toHaveValue('Keep this local draft')
+    expect(screen.queryByText(/unsafe server detail/)).not.toBeInTheDocument()
+  })
+
+  it('reads immutable selected server versions and restores the selected server ID', async () => {
+    mockDocumentWorkspace()
+    mockedApi.readDocumentVersionContent.mockResolvedValue(documentContent({ version_id: 'version-first', content: 'First server revision' }))
+    mockedApi.restoreDocument.mockResolvedValue(documentVersion({ id: 'version-restored', version_number: 3 }))
+    renderApp('/projects/project-1/chapters/chapter-1')
+
+    await screen.findByLabelText('Chapter draft')
+    fireEvent.click(screen.getByRole('button', { name: 'Version 1' }))
+    expect(await screen.findByText('First server revision')).toBeInTheDocument()
+    expect(mockedApi.readDocumentVersionContent).toHaveBeenCalledWith('document-draft', 'version-first')
+    fireEvent.click(screen.getByRole('button', { name: 'Restore version 1' }))
+    await waitFor(() => expect(mockedApi.restoreDocument).toHaveBeenCalledWith('document-draft', 'version-first', {
+      expected_current_version_id: 'version-current',
+    }))
+  })
+
+  it('keeps the most recently selected server version when earlier content arrives late', async () => {
+    let resolveFirst!: (content: DocumentContent) => void
+    let resolveCurrent!: (content: DocumentContent) => void
+    mockDocumentWorkspace()
+    mockedApi.readDocumentVersionContent.mockImplementation((_documentId, versionId) => new Promise((resolve) => {
+      if (versionId === 'version-first') resolveFirst = resolve
+      else resolveCurrent = resolve
+    }))
+    renderApp('/projects/project-1/chapters/chapter-1')
+
+    await screen.findByLabelText('Chapter draft')
+    fireEvent.click(screen.getByRole('button', { name: 'Version 1' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Version 2' }))
+    resolveCurrent(documentContent({ version_id: 'version-current', content: 'Version B content' }))
+    expect(await screen.findByText('Version B content')).toBeInTheDocument()
+
+    resolveFirst(documentContent({ version_id: 'version-first', content: 'Version A content' }))
+    await waitFor(() => expect(screen.getByText('Version B content')).toBeInTheDocument())
+    expect(screen.queryByText('Version A content')).not.toBeInTheDocument()
+    expect(screen.getByText('Viewing immutable server version 2.')).toBeInTheDocument()
+  })
+
+  it('renders only the allowed server-returned metadata for an immutable version view', async () => {
+    mockDocumentWorkspace()
+    mockedApi.listDocumentVersions.mockResolvedValue([
+      Object.assign(documentVersion({
+        id: 'version-first',
+        version_number: 1,
+        created_at: '2026-07-18T12:34:56Z',
+        source: 'writer_agent',
+        change_summary: 'Tightened the opening scene.',
+        file_path: 'private/drafts/first.md',
+        content_hash: 'private-content-hash',
+      }), { raw_error: 'private server error', unexpected_field: 'private arbitrary value' }),
+    ])
+    mockedApi.readDocumentVersionContent.mockResolvedValue(documentContent({
+      version_id: 'version-first', content: 'First server revision',
+    }))
+    renderApp('/projects/project-1/chapters/chapter-1')
+
+    await screen.findByLabelText('Chapter draft')
+    fireEvent.click(screen.getByRole('button', { name: 'Version 1' }))
+
+    const versionView = await screen.findByRole('region', { name: 'Immutable version details' })
+    expect(versionView).toHaveTextContent(/Version\s*1/)
+    expect(versionView).toHaveTextContent('2026-07-18T12:34:56Z')
+    expect(versionView).toHaveTextContent('writer_agent')
+    expect(versionView).toHaveTextContent('Tightened the opening scene.')
+    expect(versionView).not.toHaveTextContent(/private\/drafts|private-content-hash|private server error|private arbitrary value/)
+  })
+
+  it('renders Markdown as text and ignores stale document responses after navigation', async () => {
+    let resolveContent!: (content: DocumentContent) => void
+    mockedApi.getProject.mockResolvedValue(project())
+    mockedApi.getChapter.mockImplementation(async (_projectId, id) => chapter({
+      id, title: id, current_draft_document_id: id === 'chapter-a' ? 'document-a' : 'document-b',
+    }))
+    mockedApi.getDocument.mockImplementation(async (id) => document({ id, title: id, current_version_id: `${id}-version`, current_version: documentVersion({ id: `${id}-version`, document_id: id }) }))
+    mockedApi.listDocumentVersions.mockResolvedValue([])
+    mockedApi.readDocumentContent.mockImplementation((id) => id === 'document-a'
+      ? new Promise((resolve) => { resolveContent = resolve })
+      : Promise.resolve(documentContent({ document_id: id, version_id: `${id}-version`, content: 'Safe document B' })))
+    const view = render(<MemoryRouter initialEntries={['/projects/project-1/chapters/chapter-a']}><RouteTransition path="/projects/project-1/chapters/chapter-b" /></MemoryRouter>)
+
+    await screen.findByRole('heading', { name: 'chapter-a' })
+    view.rerender(<MemoryRouter initialEntries={['/projects/project-1/chapters/chapter-a']}><RouteTransition path="/projects/project-1/chapters/chapter-b" /></MemoryRouter>)
+    fireEvent.click(screen.getByRole('link', { name: 'Navigate test route' }))
+    expect(await screen.findByDisplayValue('Safe document B')).toBeInTheDocument()
+    resolveContent(documentContent({ document_id: 'document-a', content: '<img src=x onerror=alert(1)>' }))
+    await waitFor(() => expect(screen.queryByDisplayValue(/<img/)).not.toBeInTheDocument())
+    expect(globalThis.document.querySelector('img')).toBeNull()
   })
 })
