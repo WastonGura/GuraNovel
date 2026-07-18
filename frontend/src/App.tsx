@@ -338,7 +338,7 @@ function DocumentEditor({ documentId, fallbackTitle }: { documentId: string, fal
         setDocument(loadedDocument)
         setContent(loadedContent)
         setVersions(loadedVersions)
-        setCurrentVersionId(loadedDocument.current_version_id)
+        setCurrentVersionId(loadedContent.version_id)
       },
       () => { if (active) setError('Document could not be loaded. Try again.') },
     )
@@ -359,13 +359,14 @@ function DocumentEditor({ documentId, fallbackTitle }: { documentId: string, fal
   }
 
   async function save() {
-    if (!content || !currentVersionId || saving) return
+    if (!content || !content.version_id || saving) return
     setSaving(true)
     setError(null)
     try {
-      const saved = await writeDocument(documentId, { content: content.content, expected_current_version_id: currentVersionId })
+      const saved = await writeDocument(documentId, { content: content.content, expected_current_version_id: content.version_id })
       if (!mountedRef.current) return
       setCurrentVersionId(saved.id)
+      setContent((previous) => previous && { ...previous, version_id: saved.id })
       setVersions((previous) => [...previous, saved])
     } catch (caught: unknown) {
       if (!mountedRef.current) return
@@ -395,7 +396,7 @@ function DocumentEditor({ documentId, fallbackTitle }: { documentId: string, fal
   const title = document.title || fallbackTitle
   return <div className="document-editor">
     <label>{title}<textarea value={content.content} onChange={(event) => setContent({ ...content, content: event.target.value })} /></label>
-    <button type="button" onClick={save} disabled={saving || !currentVersionId}>{saving ? 'Saving document…' : 'Save document'}</button>
+    <button type="button" onClick={save} disabled={saving || !content.version_id}>{saving ? 'Saving document…' : 'Save document'}</button>
     {error && <LoadError>{error}</LoadError>}
     <section aria-labelledby="versions-title">
       <h3 id="versions-title">Versions</h3>

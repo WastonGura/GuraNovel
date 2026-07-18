@@ -444,6 +444,40 @@ describe('chapter document workspace', () => {
     }))
   })
 
+  it('saves against the exact version of the loaded content snapshot', async () => {
+    mockDocumentWorkspace()
+    mockedApi.getDocument.mockResolvedValue(document({ current_version_id: 'V2' }))
+    mockedApi.readDocumentContent.mockResolvedValue(documentContent({ version_id: 'V1', content: 'Version one draft' }))
+    mockedApi.writeDocument.mockResolvedValue(documentVersion({ id: 'V3', version_number: 3 }))
+    renderApp('/projects/project-1/chapters/chapter-1')
+
+    const editor = await screen.findByLabelText('Chapter draft')
+    fireEvent.change(editor, { target: { value: 'Edited version one draft' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Save document' }))
+
+    await waitFor(() => expect(mockedApi.writeDocument).toHaveBeenCalledWith('document-draft', {
+      content: 'Edited version one draft', expected_current_version_id: 'V1',
+    }))
+  })
+
+  it('restores against the exact version of the loaded content snapshot', async () => {
+    mockDocumentWorkspace()
+    mockedApi.getDocument.mockResolvedValue(document({ current_version_id: 'V2' }))
+    mockedApi.readDocumentContent.mockResolvedValue(documentContent({ version_id: 'V1', content: 'Version one draft' }))
+    mockedApi.readDocumentVersionContent.mockResolvedValue(documentContent({ version_id: 'version-first', content: 'First server revision' }))
+    mockedApi.restoreDocument.mockResolvedValue(documentVersion({ id: 'V3', version_number: 3 }))
+    renderApp('/projects/project-1/chapters/chapter-1')
+
+    await screen.findByLabelText('Chapter draft')
+    fireEvent.click(screen.getByRole('button', { name: 'Version 1' }))
+    expect(await screen.findByText('First server revision')).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'Restore version 1' }))
+
+    await waitFor(() => expect(mockedApi.restoreDocument).toHaveBeenCalledWith('document-draft', 'version-first', {
+      expected_current_version_id: 'V1',
+    }))
+  })
+
   it('keeps the local draft and gives a fixed message when the server reports a version conflict', async () => {
     mockDocumentWorkspace()
     mockedApi.writeDocument.mockRejectedValue(new api.ApiError(409, 'document_version_conflict', 'unsafe server detail'))
