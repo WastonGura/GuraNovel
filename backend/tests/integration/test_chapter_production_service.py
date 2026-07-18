@@ -93,9 +93,11 @@ async def test_start_production_persists_fake_artifacts_and_approval_gate(
     assert outline.current_version.source == DocumentSource.OUTLINE_AGENT.value
     assert outline.current_version.agent_role == "outline_agent"
     assert outline.current_version.workflow_run_id == run.id
+    assert outline.current_version.change_summary == "Generated chapter outline."
     assert draft.current_version.source == DocumentSource.WRITER_AGENT.value
     assert draft.current_version.agent_role == "writer_agent"
     assert draft.current_version.workflow_run_id == run.id
+    assert draft.current_version.change_summary == "Generated chapter draft."
     assert (Path(project.workspace_root) / outline.path).read_text() == (
         await DocumentService(async_session).read_current_content(outline.id)
     ).content
@@ -113,7 +115,7 @@ async def test_start_production_persists_fake_artifacts_and_approval_gate(
     assert [event.event_type for event in events] == [
         "production_started",
         "generation_provenance",
-        "fake_output_stored",
+        "generation_output_stored",
         "awaiting_approval",
     ]
     assert events[1].payload == {
@@ -121,6 +123,8 @@ async def test_start_production_persists_fake_artifacts_and_approval_gate(
         "model_identifier": "deterministic-fake-v1",
         "prompt_template_version": "chapter-production-v1",
     }
+    assert events[0].message == "Started chapter production."
+    assert events[2].message == "Stored generated chapter output."
     action = await async_session.scalar(
         select(ActionRequest).where(ActionRequest.workflow_run_id == run.id)
     )
@@ -191,7 +195,7 @@ async def test_start_production_uses_injected_provider_and_persists_its_artifact
     assert [event.event_type for event in events] == [
         "production_started",
         "generation_provenance",
-        "fake_output_stored",
+        "generation_output_stored",
         "awaiting_approval",
     ]
     assert events[1].payload == {
@@ -536,7 +540,7 @@ async def test_resolve_action_approves_the_scoped_pending_gate_and_rejects_repla
     ) == [
         "production_started",
         "generation_provenance",
-        "fake_output_stored",
+        "generation_output_stored",
         "awaiting_approval",
         "approval_approved",
     ]
