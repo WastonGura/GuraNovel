@@ -1,6 +1,6 @@
 import { expect, it } from 'vitest'
-import { apiBaseUrl } from './config'
+import { getApiBaseUrl } from './config'
 
 it('uses the local API path when no API base URL is supplied', () => {
-  expect(apiBaseUrl).toBe('/api/v1')
+  expect(getApiBaseUrl()).toBe('/api/v1')
 })
