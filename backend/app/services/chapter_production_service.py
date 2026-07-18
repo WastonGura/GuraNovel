@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.core.errors import AppError, ConflictError, NotFoundError, WorkflowStateError
+from app.core.logging import log_event
 from app.llm import (
     ChapterGenerationProvenance,
     ChapterGenerationProvider,
@@ -282,6 +283,13 @@ class ChapterProductionService:
             if artifacts_committed:
                 raise ChapterProductionCommitIndeterminateError() from error
             raise
+        log_event(
+            "chapter_production_started",
+            project_id=project_id,
+            chapter_id=chapter_id,
+            workflow_run_id=run.id,
+            action_id=action.id,
+        )
         return ChapterProductionStarted(run.id, action.id, outline.id, draft.id)
 
     async def resolve_action(
@@ -350,6 +358,14 @@ class ChapterProductionService:
         except BaseException:
             await self.session.rollback()
             raise
+        log_event(
+            "chapter_production_action_resolved",
+            project_id=project_id,
+            chapter_id=chapter_id,
+            workflow_run_id=run.id,
+            action_id=action.id,
+            decision=decision,
+        )
         return ChapterProductionResolved(run.id, action.id, decision)
 
     async def get_production_run(
