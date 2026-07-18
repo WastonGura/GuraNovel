@@ -1,17 +1,27 @@
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from pathlib import Path
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import httpx
 import pytest
 from fastapi import FastAPI
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_db_session
+import app.api.routes_chapter_production as production_routes
+from app.llm import (
+    ChapterGenerationProvenance,
+    ChapterGenerationRequest,
+    ChapterGenerationResponse,
+    ChapterGenerationResult,
+)
+from app.llm.contracts import MAX_PROVENANCE_TOKEN_COUNT
 from app.main import create_app
-from app.services import ChapterService, ProjectService
+from app.models import WorkflowEvent
+from app.services import ChapterProductionService, ChapterService, ProjectService
 from app.workspace import ProjectWorkspace
 
 
@@ -73,10 +83,24 @@ async def test_start_get_and_resolve_chapter_production_run(
     }
     assert [event["event_type"] for event in started_body["events"]] == [
         "production_started",
+        "generation_provenance",
         "fake_output_stored",
         "awaiting_approval",
     ]
     assert all(set(event) == {"event_type", "node_name", "message", "payload"} for event in started_body["events"])
+    provenance = started_body["events"][1]["payload"]
+    assert provenance == {
+        "provider_kind": "fake",
+        "model_identifier": "deterministic-fake-v1",
+        "prompt_template_version": "chapter-production-v1",
+    }
+    assert set(provenance) <= {
+        "provider_kind",
+        "model_identifier",
+        "prompt_template_version",
+        "input_tokens",
+        "output_tokens",
+    }
     assert started_body["outline_document_id"]
     assert started_body["draft_document_id"]
 
@@ -97,6 +121,7 @@ async def test_start_get_and_resolve_chapter_production_run(
     assert resolved_body["actions"][0]["user_decision"] == "approved"
     assert [event["event_type"] for event in resolved_body["events"]] == [
         "production_started",
+        "generation_provenance",
         "fake_output_stored",
         "awaiting_approval",
         "approval_approved",
@@ -107,6 +132,206 @@ async def test_start_get_and_resolve_chapter_production_run(
     )
     assert replay.status_code == 409
     assert replay.json()["error"]["code"] == "workflow_state_error"
+
+
+@pytest.mark.integration
+@pytest.mark.anyio
+async def test_get_chapter_production_excludes_stored_event_secrets(
+    production_client: httpx.AsyncClient, async_session: AsyncSession, tmp_path: Path
+) -> None:
+    project, chapter = await create_project_and_chapter(async_session, tmp_path / "event-secret")
+    url = production_url(str(project.id), str(chapter.id))
+    started = await production_client.post(url)
+    provenance = await async_session.scalar(
+        select(WorkflowEvent).where(
+            WorkflowEvent.workflow_run_id == UUID(started.json()["id"]),
+            WorkflowEvent.event_type == "generation_provenance",
+        )
+    )
+    assert provenance is not None
+    provenance.payload = {**provenance.payload, "Authorization": "Bearer secret", "raw": "chapter"}
+    await async_session.commit()
+
+    fetched = await production_client.get(f"{url}/{started.json()['id']}")
+
+    assert fetched.status_code == 200
+    payload = fetched.json()["events"][1]["payload"]
+    assert payload == {
+        "provider_kind": "fake",
+        "model_identifier": "deterministic-fake-v1",
+        "prompt_template_version": "chapter-production-v1",
+    }
+    assert "secret" not in str(fetched.json())
+
+
+@pytest.mark.integration
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("case", "corrupt_payload", "opaque_secrets"),
+    [
+        *[
+            pytest.param(
+                f"{field}-opaque-secret",
+                lambda payload, field=field, secret=f"sk-proj-{field}-opaque-secret": {
+                    **payload,
+                    field: secret,
+                },
+                (f"sk-proj-{field}-opaque-secret",),
+                id=f"{field}-opaque-secret",
+            )
+            for field in ("provider_kind", "model_identifier", "prompt_template_version")
+        ],
+        *[
+            pytest.param(
+                f"{field}-invalid-whitespace-url",
+                lambda payload, field=field: {**payload, field: "https://opaque.invalid/value with space"},
+                ("https://opaque.invalid/value with space",),
+                id=f"{field}-invalid-whitespace-url",
+            )
+            for field in ("provider_kind", "model_identifier", "prompt_template_version")
+        ],
+        *[
+            pytest.param(
+                f"{field}-non-string",
+                lambda payload, field=field, secret=f"opaque-{field}-secret": {
+                    **payload,
+                    field: [secret],
+                },
+                (f"opaque-{field}-secret",),
+                id=f"{field}-non-string",
+            )
+            for field in ("provider_kind", "model_identifier", "prompt_template_version")
+        ],
+        *[
+            pytest.param(
+                f"{field}-missing",
+                lambda payload, field=field: {key: value for key, value in payload.items() if key != field},
+                (),
+                id=f"{field}-missing",
+            )
+            for field in ("provider_kind", "model_identifier", "prompt_template_version")
+        ],
+        *[
+            pytest.param(
+                f"{field}-bad-bool",
+                lambda payload, field=field: {**payload, field: True},
+                (),
+                id=f"{field}-bad-bool",
+            )
+            for field in ("input_tokens", "output_tokens")
+        ],
+        *[
+            pytest.param(
+                f"{field}-bad-string",
+                lambda payload, field=field, secret=f"opaque-{field}-secret": {
+                    **payload,
+                    field: secret,
+                },
+                (f"opaque-{field}-secret",),
+                id=f"{field}-bad-string",
+            )
+            for field in ("input_tokens", "output_tokens")
+        ],
+        *[
+            pytest.param(
+                f"{field}-negative",
+                lambda payload, field=field: {**payload, field: -1},
+                (),
+                id=f"{field}-negative",
+            )
+            for field in ("input_tokens", "output_tokens")
+        ],
+        *[
+            pytest.param(
+                f"{field}-over-limit",
+                lambda payload, field=field: {**payload, field: MAX_PROVENANCE_TOKEN_COUNT + 1},
+                (),
+                id=f"{field}-over-limit",
+            )
+            for field in ("input_tokens", "output_tokens")
+        ],
+    ],
+)
+async def test_get_chapter_production_fail_closes_corrupt_stored_provenance(
+    production_client: httpx.AsyncClient,
+    async_session: AsyncSession,
+    tmp_path: Path,
+    case: str,
+    corrupt_payload: Callable[[dict[str, object]], dict[str, object]],
+    opaque_secrets: tuple[str, ...],
+) -> None:
+    project, chapter = await create_project_and_chapter(async_session, tmp_path / case)
+    url = production_url(str(project.id), str(chapter.id))
+    started = await production_client.post(url)
+    assert started.status_code == 201
+    provenance = await async_session.scalar(
+        select(WorkflowEvent).where(
+            WorkflowEvent.workflow_run_id == UUID(started.json()["id"]),
+            WorkflowEvent.event_type == "generation_provenance",
+        )
+    )
+    assert provenance is not None
+    provenance.payload = corrupt_payload(dict(provenance.payload))
+    await async_session.commit()
+
+    fetched = await production_client.get(f"{url}/{started.json()['id']}")
+
+    assert fetched.status_code == 200
+    assert fetched.json()["events"][1]["payload"] == {}
+    assert all(secret not in fetched.text for secret in opaque_secrets)
+
+
+@pytest.mark.integration
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "opaque_value",
+    [
+        "sk-proj-abcdefghijklmnopqrstuvwxyz0123456789",
+        "a" * 64,
+        "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJvcGFxdWUtc2VjcmV0In0.signature",
+    ],
+)
+async def test_api_malicious_provider_cannot_override_server_owned_provenance(
+    production_client: httpx.AsyncClient,
+    async_session: AsyncSession,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    opaque_value: str,
+) -> None:
+    project, chapter = await create_project_and_chapter(async_session, tmp_path / "malicious-provider")
+
+    class MaliciousProvider:
+        async def generate(self, _: ChapterGenerationRequest) -> ChapterGenerationResponse:
+            response = ChapterGenerationResponse(ChapterGenerationResult("outline", "draft", "summary"))
+            for name in ("provenance", "provider_kind", "model_identifier", "prompt_template_version"):
+                object.__setattr__(response, name, opaque_value)
+            return response
+
+    def trusted_service(session: AsyncSession) -> ChapterProductionService:
+        return ChapterProductionService(
+            session, MaliciousProvider(),
+            generation_provenance=ChapterGenerationProvenance("test", "server-test-model", "server-v1"),
+        )
+
+    monkeypatch.setattr(production_routes, "ChapterProductionService", trusted_service)
+    url = production_url(str(project.id), str(chapter.id))
+    started = await production_client.post(url)
+    assert started.status_code == 201
+    stored = await async_session.scalar(select(WorkflowEvent).where(
+        WorkflowEvent.workflow_run_id == UUID(started.json()["id"]),
+        WorkflowEvent.event_type == "generation_provenance",
+    ))
+    assert stored is not None
+    expected = {
+        "provider_kind": "test", "model_identifier": "server-test-model",
+        "prompt_template_version": "server-v1",
+    }
+    assert stored.payload == expected
+    fetched = await production_client.get(f"{url}/{started.json()['id']}")
+    assert fetched.status_code == 200
+    assert fetched.json()["events"][1]["payload"] == expected
+    assert opaque_value not in str(stored.payload)
+    assert opaque_value not in fetched.text
 
 
 @pytest.mark.integration
