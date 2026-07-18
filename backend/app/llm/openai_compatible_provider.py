@@ -40,7 +40,9 @@ class OpenAICompatibleChapterGenerationProvider:
         self._owns_client = self.client is None
         if self.client is None:
             self.client = httpx.AsyncClient(
-                base_url=f"{self.base_url.rstrip('/')}/", timeout=self.timeout_seconds
+                base_url=f"{self.base_url.rstrip('/')}/",
+                timeout=self.timeout_seconds,
+                trust_env=False,
             )
 
     async def aclose(self) -> None:

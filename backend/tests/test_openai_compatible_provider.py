@@ -18,6 +18,26 @@ def request() -> ChapterGenerationRequest:
 
 
 @pytest.mark.anyio
+async def test_owned_client_ignores_ambient_socks_proxy_configuration(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    proxy_url = "socks5://proxy-user:proxy-password@proxy.test:1080"
+    for name in ("ALL_PROXY", "HTTPS_PROXY", "HTTP_PROXY", "all_proxy", "https_proxy", "http_proxy"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("ALL_PROXY", proxy_url)
+
+    provider = OpenAICompatibleChapterGenerationProvider(
+        base_url="https://provider.test/v1", api_key="test-secret-key", model="server-model-v1"
+    )
+
+    try:
+        assert provider.client is not None
+        assert provider.client._trust_env is False
+    finally:
+        await provider.aclose()
+
+
+@pytest.mark.anyio
 async def test_posts_server_owned_prompt_and_returns_validated_artifacts_without_leaking_key() -> None:
     captured: dict[str, object] = {}
 

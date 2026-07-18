@@ -17,6 +17,7 @@ from app.llm import (
     ChapterGenerationRequest,
     ChapterGenerationResponse,
     ChapterGenerationResult,
+    FakeChapterGenerationProvider,
     OpenAICompatibleChapterGenerationProvider,
     ProviderConfigurationError,
 )
@@ -34,10 +35,49 @@ async def production_client(async_session: AsyncSession) -> AsyncIterator[httpx.
     async def override_db_session() -> AsyncIterator[AsyncSession]:
         yield async_session
 
+    def override_chapter_generation_composition() -> ChapterGenerationComposition:
+        return ChapterGenerationComposition(
+            FakeChapterGenerationProvider(),
+            ChapterGenerationProvenance("fake", "deterministic-fake-v1", "chapter-production-v1"),
+        )
+
     app.dependency_overrides[get_db_session] = override_db_session
+    app.dependency_overrides[get_chapter_generation_composition] = (
+        override_chapter_generation_composition
+    )
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
         yield client
+
+
+@pytest.mark.integration
+@pytest.mark.anyio
+async def test_default_production_client_uses_fake_provider_without_network(
+    production_client: httpx.AsyncClient,
+    async_session: AsyncSession,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project, chapter = await create_project_and_chapter(async_session, tmp_path / "default-fake")
+    attempted_requests: list[httpx.Request] = []
+
+    async def reject_network(
+        _: httpx.AsyncHTTPTransport, request: httpx.Request
+    ) -> httpx.Response:
+        attempted_requests.append(request)
+        raise httpx.ConnectError("integration tests must not use network transport", request=request)
+
+    monkeypatch.setattr(httpx.AsyncHTTPTransport, "handle_async_request", reject_network)
+
+    started = await production_client.post(production_url(str(project.id), str(chapter.id)))
+
+    assert started.status_code == 201, started.text
+    assert started.json()["events"][1]["payload"] == {
+        "provider_kind": "fake",
+        "model_identifier": "deterministic-fake-v1",
+        "prompt_template_version": "chapter-production-v1",
+    }
+    assert attempted_requests == []
 
 
 async def create_project_and_chapter(async_session: AsyncSession, workspace_base: Path):
@@ -400,9 +440,16 @@ async def test_api_real_mode_uses_trusted_configuration_provenance(
 @pytest.mark.anyio
 async def test_api_real_mode_misconfiguration_returns_safe_error_envelope(
     production_client: httpx.AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    proxy_url = "socks5://proxy-user:proxy-password@proxy.test:1080"
+    monkeypatch.setenv("ALL_PROXY", proxy_url)
+
     def misconfigured() -> ChapterGenerationComposition:
-        raise ProviderConfigurationError()
+        try:
+            raise ImportError(f"SOCKS support unavailable for {proxy_url}")
+        except ImportError as error:
+            raise ProviderConfigurationError() from error
 
     production_client._transport.app.dependency_overrides[get_chapter_generation_composition] = misconfigured  # type: ignore[attr-defined]
     response = await production_client.post(f"/api/v1/projects/{uuid4()}/chapters/{uuid4()}/production-runs")
@@ -415,6 +462,7 @@ async def test_api_real_mode_misconfiguration_returns_safe_error_envelope(
             "details": None,
         }
     }
+    assert proxy_url not in response.text
 
 
 @pytest.mark.integration
