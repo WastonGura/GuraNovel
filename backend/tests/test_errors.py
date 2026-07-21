@@ -3,7 +3,7 @@ from typing import Any
 import pytest
 from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
 from app.core.errors import (
     AgentOutputInvalidError,
@@ -21,6 +21,8 @@ from app.llm import (
 
 
 class Payload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     name: str
 
 
@@ -165,6 +167,18 @@ def test_validation_errors_use_standard_envelope(client: TestClient) -> None:
     assert body["error"]["code"] == "validation_error"
     assert body["error"]["message"] == "The request validation failed."
     assert isinstance(body["error"]["details"], list)
+
+
+def test_validation_errors_do_not_echo_untrusted_input_or_context(client: TestClient) -> None:
+    secret = "seed-with-secret-sk-test-value"
+    unsafe_field = f"unsafe-{secret}"
+
+    response = client.post("/payload", json={"name": [secret], unsafe_field: secret})
+
+    assert response.status_code == 422
+    details = response.json()["error"]["details"]
+    assert secret not in response.text
+    assert details == [{"type": "validation_error"}, {"type": "validation_error"}]
 
 
 def test_unmatched_routes_use_standard_envelope(client: TestClient) -> None:

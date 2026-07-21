@@ -37,6 +37,25 @@ class ProjectCreationWaiting:
     state: ProjectCreationState
 
 
+@dataclass(frozen=True)
+class ProjectCreationPendingActionRead:
+    id: UUID
+    type: str
+    status: str
+    allowed_decisions: tuple[str, str]
+
+
+@dataclass(frozen=True)
+class ProjectCreationRunRead:
+    id: UUID
+    type: str
+    status: str
+    current_node: str | None
+    next_node: str | None
+    awaiting_user: bool
+    pending_action: ProjectCreationPendingActionRead | None
+
+
 class ProjectCreationService:
     """Persist state-machine mechanics without persisting creative/user content."""
 
@@ -212,6 +231,74 @@ class ProjectCreationService:
             raise NotFoundError("Project creation workflow not found.")
         state, _ = await self._latest_state_locked(run)
         return state
+
+    async def get_project_creation_run(
+        self, project_id: UUID, workflow_run_id: UUID
+    ) -> ProjectCreationRunRead:
+        """Return only the public workflow mechanics, never workflow payloads or content."""
+        run = await self._scoped_run(project_id, workflow_run_id)
+        state, _ = await self._latest_state_locked(run)
+        pending_action: ProjectCreationPendingActionRead | None = None
+        if state.awaiting_user:
+            action_id = UUID(state.action_request_id or "")
+            action = await self.session.scalar(
+                select(ActionRequest).where(
+                    ActionRequest.id == action_id,
+                    ActionRequest.workflow_run_id == run.id,
+                    ActionRequest.project_id == project_id,
+                    ActionRequest.request_type == self._CONCEPT_REVIEW_ACTION,
+                    ActionRequest.status == ActionRequestStatus.PENDING.value,
+                )
+            )
+            if action is None:
+                raise WorkflowStateError("Project creation workflow state is inconsistent.")
+            pending_action = ProjectCreationPendingActionRead(
+                id=action.id,
+                type=action.request_type,
+                status=action.status,
+                allowed_decisions=("approved", "rejected"),
+            )
+        return ProjectCreationRunRead(
+            id=run.id,
+            type=run.workflow_type,
+            status=run.status,
+            current_node=run.current_node,
+            next_node=run.next_node,
+            awaiting_user=run.awaiting_user,
+            pending_action=pending_action,
+        )
+
+    async def resolve_concept_review(
+        self, project_id: UUID, workflow_run_id: UUID, action_request_id: UUID, decision: str
+    ) -> ProjectCreationState:
+        """Scope an API decision before delegating its durable transition to the state machine."""
+        run = await self._scoped_run(project_id, workflow_run_id, for_update=True)
+        action = await self.session.scalar(
+            select(ActionRequest.id).where(
+                ActionRequest.id == action_request_id,
+                ActionRequest.workflow_run_id == run.id,
+                ActionRequest.project_id == project_id,
+                ActionRequest.request_type == self._CONCEPT_REVIEW_ACTION,
+            )
+        )
+        if action is None:
+            raise NotFoundError("Project creation action not found.")
+        return await self.resume_concept_review(workflow_run_id, action_request_id, decision)
+
+    async def _scoped_run(
+        self, project_id: UUID, workflow_run_id: UUID, *, for_update: bool = False
+    ) -> WorkflowRun:
+        statement = select(WorkflowRun).where(
+            WorkflowRun.id == workflow_run_id,
+            WorkflowRun.project_id == project_id,
+            WorkflowRun.workflow_type == self._WORKFLOW_TYPE,
+        )
+        if for_update:
+            statement = statement.with_for_update()
+        run = await self.session.scalar(statement)
+        if run is None:
+            raise NotFoundError("Project creation workflow not found.")
+        return run
 
     async def _locked_run(self, workflow_run_id: UUID) -> WorkflowRun:
         run = await self.session.scalar(
