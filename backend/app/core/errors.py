@@ -106,8 +106,13 @@ async def request_validation_error_handler(
         status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
         code="validation_error",
         message="The request validation failed.",
-        details=exc.errors(),
+        details=_safe_validation_details(exc.errors()),
     )
+
+
+def _safe_validation_details(errors: list[object]) -> list[dict[str, object]]:
+    """Return one constant-shaped marker per error without echoing request data."""
+    return [{"type": "validation_error"} for _ in errors]
 
 
 async def http_exception_handler(

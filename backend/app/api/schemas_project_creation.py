@@ -1,0 +1,45 @@
+"""Safe HTTP contracts for the project-creation workflow foundation."""
+
+from typing import Annotated, Literal
+from uuid import UUID
+
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints
+
+
+NonBlankText = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=500)]
+UserSeed = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=4_000)]
+
+
+class StartProjectCreationRequest(BaseModel):
+    """Transient creative preferences accepted at the creation boundary only."""
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    user_seed: UserSeed
+    target_platform: NonBlankText | None = None
+    preferred_genres: list[NonBlankText] | None = Field(default=None, min_length=1, max_length=10)
+    disliked_elements: list[NonBlankText] | None = Field(default=None, min_length=1, max_length=10)
+    style_preference: NonBlankText | None = None
+
+
+class ProjectCreationPendingActionResponse(BaseModel):
+    id: UUID
+    type: str
+    status: Literal["pending"]
+    allowed_decisions: tuple[Literal["approved", "rejected"], ...]
+
+
+class ProjectCreationRunResponse(BaseModel):
+    id: UUID
+    type: str
+    status: str
+    current_node: str | None
+    next_node: str | None
+    awaiting_user: bool
+    pending_action: ProjectCreationPendingActionResponse | None
+
+
+class ResolveProjectCreationActionRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    decision: Literal["approved", "rejected"]
