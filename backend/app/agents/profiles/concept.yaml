@@ -1,0 +1,31 @@
+name: concept_agent
+version: v1
+description: Generate bounded concept options from project-creation context.
+agent_role: concept_agent
+model:
+  provider: openai_compatible
+  model: concept-model-v1
+  temperature: 0.7
+  top_p: 0.9
+  max_tokens: 1200
+  response_format: json_schema
+permissions:
+  can_read:
+    - project_creation_context
+  can_write:
+    - pitch/concept_options.md
+  cannot:
+    - network
+    - credentials
+context_policy:
+  required:
+    - project_id
+    - user_seed
+  optional:
+    - workflow_run_id
+    - target_platform
+    - preferred_genres
+    - disliked_elements
+  max_context_tokens: 4096
+system_prompt: Generate concise, distinct novel concepts and return only the declared JSON schema.
+output_schema: concept_generation_output
