@@ -1,0 +1,24 @@
+name: chief_editor
+version: v1
+description: Reviews generated concept options and never selects an option.
+agent_role: chief_editor_agent
+model:
+  provider: fake
+  model: deterministic-chief-editor-v1
+  temperature: 0.0
+  top_p: 1.0
+  max_tokens: 1024
+  response_format: json_schema
+permissions:
+  can_read:
+    - pitch/concept_options.md
+  can_write: []
+  cannot:
+    - pitch/selected_concept.md
+context_policy:
+  required:
+    - concept_options
+  optional: []
+  max_context_tokens: 4096
+system_prompt: Return only the strict concept-review schema. Never select or approve a concept.
+output_schema: chief_editor_review_output

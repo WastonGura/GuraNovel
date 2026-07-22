@@ -42,6 +42,7 @@ class ModelProfile(_StrictProfileModel):
     def safe_model_identifier(cls, value: str) -> str:
         return validate_model_identifier(value)
 
+
 class PermissionsProfile(_StrictProfileModel):
     can_read: list[str] = Field(max_length=16)
     can_write: list[str] = Field(max_length=16)
@@ -69,15 +70,15 @@ class ContextPolicyProfile(_StrictProfileModel):
 
 
 class AgentProfile(_StrictProfileModel):
-    name: Literal["concept_agent"]
+    name: Literal["concept_agent", "chief_editor"]
     version: str = Field(min_length=1, max_length=64)
     description: str = Field(min_length=1, max_length=512)
-    agent_role: Literal["concept_agent"]
+    agent_role: Literal["concept_agent", "chief_editor_agent"]
     model: ModelProfile
     permissions: PermissionsProfile
     context_policy: ContextPolicyProfile
     system_prompt: str = Field(min_length=1, max_length=4000)
-    output_schema: Literal["concept_generation_output"]
+    output_schema: Literal["concept_generation_output", "chief_editor_review_output"]
 
     @field_validator("version")
     @classmethod
@@ -106,10 +107,11 @@ class ProfileRegistry:
         self._profiles_directory = profiles_directory or Path(__file__).with_name("profiles")
 
     def load(self, name: str) -> AgentProfile:
-        if name != "concept_agent":
+        if name not in {"concept_agent", "chief_editor"}:
             raise ProfileRegistryError()
         try:
-            raw = yaml.safe_load((self._profiles_directory / "concept.yaml").read_text())
+            filename = "concept.yaml" if name == "concept_agent" else "chief_editor.yaml"
+            raw = yaml.safe_load((self._profiles_directory / filename).read_text())
             return AgentProfile.model_validate(raw)
         except (OSError, yaml.YAMLError, TypeError, ValueError, ValidationError):
             raise ProfileRegistryError() from None

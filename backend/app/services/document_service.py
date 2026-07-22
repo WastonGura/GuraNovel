@@ -121,6 +121,83 @@ class DocumentService:
         log_event("document_written", document_id=document.id, version_id=version.id)
         return document
 
+    async def stage_create_document(
+        self, **kwargs
+    ) -> tuple[Document, tuple[str, str], tuple[str, str]]:
+        """Stage a create in the caller's transaction; deliberately does not commit."""
+        project_id = kwargs["project_id"]
+        path = kwargs["path"]
+        content = kwargs["content"]
+        self._ensure_document_path_is_not_reserved(path)
+        project = await self.session.get(Project, project_id)
+        if project is None:
+            raise NotFoundError("Project not found.")
+        await self._lock_create_path(project_id, path)
+        if (
+            await self.session.scalar(
+                select(Document.id).where(Document.project_id == project_id, Document.path == path)
+            )
+            is not None
+        ):
+            raise ConflictError("A document already exists at this path.")
+        document = Document(
+            project_id=project_id,
+            chapter_id=kwargs.get("chapter_id"),
+            type=kwargs["document_type"].value,
+            title=kwargs.get("title"),
+            path=path,
+        )
+        document.project = project
+        self.session.add(document)
+        await self.session.flush()
+        version = self._new_version(
+            document=document,
+            version_number=1,
+            parent_version_id=None,
+            content=content,
+            source=kwargs["source"],
+            actor_user_id=kwargs.get("actor_user_id"),
+            agent_role=kwargs.get("agent_role"),
+            workflow_run_id=kwargs.get("workflow_run_id"),
+            change_summary=kwargs.get("change_summary"),
+        )
+        document.current_version = version
+        self.session.add(version)
+        await self.session.flush()
+        return document, (document.path, content), (version.snapshot_path or "", content)
+
+    async def stage_write_document(
+        self, **kwargs
+    ) -> tuple[DocumentVersion, tuple[str, str], tuple[str, str]]:
+        """Stage a version in the caller's transaction; deliberately does not commit."""
+        document = await self._locked_document(kwargs["document_id"])
+        self._ensure_expected_current_version(document, kwargs["expected_current_version_id"])
+        content = kwargs["content"]
+        version = self._new_version(
+            document=document,
+            version_number=await self._next_version_number(document.id),
+            parent_version_id=document.current_version_id,
+            content=content,
+            source=kwargs["source"],
+            actor_user_id=kwargs.get("actor_user_id"),
+            agent_role=kwargs.get("agent_role"),
+            workflow_run_id=kwargs.get("workflow_run_id"),
+            change_summary=kwargs.get("change_summary"),
+        )
+        document.current_version = version
+        self.session.add(version)
+        await self.session.flush()
+        return version, (document.path, content), (version.snapshot_path or "", content)
+
+    def write_staged_files(self, document: Document, writes: Sequence[tuple[str, str]]) -> None:
+        """Called only after known DB commit; failures are explicit reconciliation cases."""
+        try:
+            store = self._store_for(document)
+            for path, content in writes:
+                store.write(path, content)
+        except Exception:
+            raise DocumentCommitIndeterminateError() from None
+
     async def write_document(
         self,
         *,

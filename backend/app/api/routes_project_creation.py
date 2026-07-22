@@ -5,27 +5,40 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import get_db_session
+from app.api.deps import get_db_session, get_project_creation_composition
 from app.api.schemas_project_creation import (
     ProjectCreationRunResponse,
     ResolveProjectCreationActionRequest,
     StartProjectCreationRequest,
 )
 from app.services.project_creation_service import ProjectCreationRunRead, ProjectCreationService
+from app.agents import ConceptAgentRequest
+from app.agents.composition import ProjectCreationComposition
 
 router = APIRouter(prefix="/projects/{project_id}/creation")
 
 
-@router.post("/start", response_model=ProjectCreationRunResponse, status_code=status.HTTP_201_CREATED)
+@router.post(
+    "/start", response_model=ProjectCreationRunResponse, status_code=status.HTTP_201_CREATED
+)
 async def start_project_creation(
     project_id: UUID,
     payload: StartProjectCreationRequest,
     session: AsyncSession = Depends(get_db_session),
+    composition: ProjectCreationComposition = Depends(get_project_creation_composition),
 ) -> ProjectCreationRunRead:
-    # #65 owns safe generation and document persistence; this validated input is transient in #64.
-    del payload
-    service = ProjectCreationService(session)
-    started = await service.start(project_id)
+    service = ProjectCreationService(session, composition)
+    started = await service.start(
+        project_id,
+        ConceptAgentRequest(
+            project_id=project_id,
+            user_seed=payload.user_seed,
+            target_platform=payload.target_platform,
+            preferred_genres=payload.preferred_genres or [],
+            disliked_elements=payload.disliked_elements or [],
+            style_preference=payload.style_preference,
+        ),
+    )
     return await service.get_project_creation_run(project_id, started.workflow_run_id)
 
 
@@ -34,8 +47,11 @@ async def get_project_creation(
     project_id: UUID,
     workflow_run_id: UUID,
     session: AsyncSession = Depends(get_db_session),
+    composition: ProjectCreationComposition = Depends(get_project_creation_composition),
 ) -> ProjectCreationRunRead:
-    return await ProjectCreationService(session).get_project_creation_run(project_id, workflow_run_id)
+    return await ProjectCreationService(session, composition).get_project_creation_run(
+        project_id, workflow_run_id
+    )
 
 
 @router.post(
@@ -47,7 +63,16 @@ async def resolve_project_creation_action(
     action_id: UUID,
     payload: ResolveProjectCreationActionRequest,
     session: AsyncSession = Depends(get_db_session),
+    composition: ProjectCreationComposition = Depends(get_project_creation_composition),
 ) -> ProjectCreationRunRead:
-    service = ProjectCreationService(session)
-    await service.resolve_concept_review(project_id, workflow_run_id, action_id, payload.decision)
+    service = ProjectCreationService(session, composition)
+    await service.resolve_action(
+        project_id,
+        workflow_run_id,
+        action_id,
+        decision=payload.decision,
+        fused_concept=payload.fused_concept,
+        option_id=payload.option_id,
+        feedback=payload.feedback,
+    )
     return await service.get_project_creation_run(project_id, workflow_run_id)

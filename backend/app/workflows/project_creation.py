@@ -12,7 +12,10 @@ class ProjectCreationStatus(str, Enum):
 
     USER_IDEA = "user_idea"
     CONCEPT_OPTIONS = "concept_options"
+    # Legacy value retained solely to read #64 checkpoints; #65 never transitions to it.
     CONCEPT_REVIEWED = "concept_reviewed"
+    REVISION_REQUIRED = "revision_required"
+    CONCEPT_SELECTED = "concept_selected"
     COMPLETED = "completed"
     REJECTED = "rejected"
 
@@ -25,10 +28,16 @@ _NODES_BY_STATUS = {
     ProjectCreationStatus.USER_IDEA: "user_idea",
     ProjectCreationStatus.CONCEPT_OPTIONS: "concept_review",
     ProjectCreationStatus.CONCEPT_REVIEWED: "concept_reviewed",
+    ProjectCreationStatus.REVISION_REQUIRED: "concept_revision",
+    ProjectCreationStatus.CONCEPT_SELECTED: "concept_selected",
     ProjectCreationStatus.COMPLETED: "complete",
     ProjectCreationStatus.REJECTED: "concept_review",
 }
-_TERMINAL_STATUSES = {ProjectCreationStatus.COMPLETED, ProjectCreationStatus.REJECTED}
+_TERMINAL_STATUSES = {
+    ProjectCreationStatus.CONCEPT_SELECTED,
+    ProjectCreationStatus.COMPLETED,
+    ProjectCreationStatus.REJECTED,
+}
 
 
 @dataclass(frozen=True)
@@ -52,18 +61,29 @@ class ProjectCreationState:
             raise ProjectCreationValidationError("Checkpoint waiting flag is not typed.")
         if self.current_node != _NODES_BY_STATUS[self.status]:
             raise ProjectCreationValidationError("Checkpoint node does not match its status.")
-        needs_action = self.status is ProjectCreationStatus.CONCEPT_OPTIONS
+        needs_action = self.status in {
+            ProjectCreationStatus.CONCEPT_OPTIONS,
+            ProjectCreationStatus.REVISION_REQUIRED,
+        }
         if self.awaiting_user != needs_action:
-            raise ProjectCreationValidationError("Checkpoint waiting flag does not match its status.")
+            raise ProjectCreationValidationError(
+                "Checkpoint waiting flag does not match its status."
+            )
         if needs_action != (self.action_request_id is not None):
-            raise ProjectCreationValidationError("Checkpoint action reference does not match its status.")
+            raise ProjectCreationValidationError(
+                "Checkpoint action reference does not match its status."
+            )
         if self.action_request_id is not None:
             try:
                 parsed = UUID(self.action_request_id)
             except (TypeError, ValueError, AttributeError) as error:
-                raise ProjectCreationValidationError("Checkpoint action reference is invalid.") from error
+                raise ProjectCreationValidationError(
+                    "Checkpoint action reference is invalid."
+                ) from error
             if str(parsed) != self.action_request_id:
-                raise ProjectCreationValidationError("Checkpoint action reference is not canonical.")
+                raise ProjectCreationValidationError(
+                    "Checkpoint action reference is not canonical."
+                )
 
     @property
     def is_terminal(self) -> bool:
@@ -81,7 +101,11 @@ class ProjectCreationState:
     @classmethod
     def from_checkpoint(cls, payload: object) -> ProjectCreationState:
         if not isinstance(payload, dict) or set(payload) != {
-            "version", "status", "current_node", "awaiting_user", "action_request_id"
+            "version",
+            "status",
+            "current_node",
+            "awaiting_user",
+            "action_request_id",
         }:
             raise ProjectCreationValidationError("Checkpoint payload has an unrecognized shape.")
         if (
@@ -89,7 +113,9 @@ class ProjectCreationState:
             or payload["version"] != 1
             or not isinstance(payload["status"], str)
         ):
-            raise ProjectCreationValidationError("Checkpoint payload has an invalid version or status.")
+            raise ProjectCreationValidationError(
+                "Checkpoint payload has an invalid version or status."
+            )
         if not isinstance(payload["current_node"], str) or not isinstance(
             payload["awaiting_user"], bool
         ):

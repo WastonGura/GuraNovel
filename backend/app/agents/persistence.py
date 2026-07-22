@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
+import re
 from uuid import UUID
 
 from sqlalchemy import select
 
-from app.agents.contracts import ConceptGenerationOutput, validate_concept_generation_output
+from app.agents.contracts import (
+    ConceptGenerationOutput,
+    validate_concept_generation_output,
+)
 from app.agents.errors import ConceptArtifactWorkflowError
 from app.models import (
     ActionRequest,
@@ -28,6 +32,11 @@ from app.workflows.project_creation import (
 
 
 _CONCEPT_REVIEW_ACTION = "project_creation_concept_review"
+_CONCEPT_OPTION = re.compile(
+    r"^## Option `(?P<id>[a-z][a-z0-9-]{0,63})`: (?P<title>[^\n]+)\n\n"
+    r"(?P<logline>[^\n]+)\n\n(?P<premise>[^\n]+)\n\nGenres: (?P<genres>[^\n]+)$",
+    re.MULTILINE,
+)
 
 
 def render_concept_options_markdown(output: ConceptGenerationOutput) -> str:
@@ -37,7 +46,7 @@ def render_concept_options_markdown(output: ConceptGenerationOutput) -> str:
         sections.append(
             "\n\n".join(
                 (
-                    f"## {option.title}",
+                    f"## Option `{option.id}`: {option.title}",
                     option.logline,
                     option.premise,
                     f"Genres: {', '.join(option.genres)}",
@@ -45,6 +54,60 @@ def render_concept_options_markdown(output: ConceptGenerationOutput) -> str:
             )
         )
     return "\n\n".join(sections) + "\n"
+
+
+def parse_concept_options_markdown(content: str) -> ConceptGenerationOutput:
+    """Return the canonical validated concept artifact, or one safe workflow error."""
+    if not isinstance(content, str):
+        raise ConceptArtifactWorkflowError()
+    options = []
+    for match in _CONCEPT_OPTION.finditer(content.rstrip()):
+        options.append(
+            {
+                "id": match["id"],
+                "title": match["title"],
+                "logline": match["logline"],
+                "premise": match["premise"],
+                "genres": [part.strip() for part in match["genres"].split(",")],
+            }
+        )
+    try:
+        output = validate_concept_generation_output({"options": options})
+    except Exception:
+        raise ConceptArtifactWorkflowError() from None
+    if render_concept_options_markdown(output) != content:
+        raise ConceptArtifactWorkflowError()
+    return output
+
+
+def selected_concept_markdown(content: str, option_id: str) -> str:
+    """Reconstruct one validated option from the reviewed, versioned artifact.
+
+    The artifact is deliberately the only durable source for option prose; action
+    rows retain IDs only.  The format is generated above, not accepted from users.
+    """
+    return selected_concept_markdown_from_output(parse_concept_options_markdown(content), option_id)
+
+
+def selected_concept_markdown_from_output(
+    output: ConceptGenerationOutput, option_id: str
+) -> str:
+    """Render a selected concept from an already validated canonical artifact."""
+    option = next((item for item in output.options if item.id == option_id), None)
+    if option is None:
+        raise ConceptArtifactWorkflowError()
+    return (
+        "\n\n".join(
+            (
+                "# Selected Concept",
+                f"## {option.title}",
+                option.logline,
+                option.premise,
+                f"Genres: {', '.join(option.genres)}",
+            )
+        )
+        + "\n"
+    )
 
 
 async def persist_concept_generation_output(
@@ -76,6 +139,51 @@ async def persist_concept_generation_output(
         workflow_run_id=workflow_run_id,
         change_summary="Generated concept options",
     )
+
+
+async def stage_concept_generation_output(
+    *,
+    document_service: DocumentService,
+    project_id: UUID,
+    workflow_run_id: UUID | None,
+    output: ConceptGenerationOutput,
+) -> tuple[Document, UUID, tuple[tuple[str, str], ...]]:
+    """Validate and stage the #65 artifact without committing the caller transaction."""
+    validated = validate_concept_generation_output(output)
+    await _require_project_creation_workflow_run(
+        document_service=document_service, project_id=project_id, workflow_run_id=workflow_run_id
+    )
+    content = render_concept_options_markdown(validated)
+    document = await document_service.session.scalar(
+        select(Document)
+        .where(Document.project_id == project_id, Document.path == "pitch/concept_options.md")
+        .with_for_update()
+    )
+    if document is not None and document.current_version_id is not None:
+        version, *writes = await document_service.stage_write_document(
+            document_id=document.id,
+            content=content,
+            source=DocumentSource.CONCEPT_AGENT,
+            expected_current_version_id=document.current_version_id,
+            agent_role="concept_agent",
+            workflow_run_id=workflow_run_id,
+            change_summary="Generated concept options for new creation run",
+        )
+        return document, version.id, tuple(writes)
+    document, *writes = await document_service.stage_create_document(
+        project_id=project_id,
+        document_type=DocumentType.PITCH,
+        title="Concept options",
+        path="pitch/concept_options.md",
+        content=content,
+        source=DocumentSource.CONCEPT_AGENT,
+        agent_role="concept_agent",
+        workflow_run_id=workflow_run_id,
+        change_summary="Generated concept options",
+    )
+    if document.current_version_id is None:
+        raise ConceptArtifactWorkflowError()
+    return document, document.current_version_id, tuple(writes)
 
 
 async def _require_project_creation_workflow_run(
@@ -140,7 +248,10 @@ async def _require_project_creation_workflow_run(
         ):
             raise ConceptArtifactWorkflowError()
         if state.awaiting_user:
-            if len(pending_action_ids) != 1 or str(pending_action_ids[0]) != state.action_request_id:
+            if (
+                len(pending_action_ids) != 1
+                or str(pending_action_ids[0]) != state.action_request_id
+            ):
                 raise ConceptArtifactWorkflowError()
         elif pending_action_ids:
             raise ConceptArtifactWorkflowError()
