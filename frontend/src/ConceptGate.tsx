@@ -150,7 +150,7 @@ export default function ConceptGate({ projectId, workflowRunId }: { projectId: s
   const [showRetry, setShowRetry] = useState(false)
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null)
   const mountedRef = useRef(false)
-  const fetchGateRef = useRef<() => Promise<void>>()
+  const fetchGateRef = useRef<(() => Promise<void>) | null>(null)
 
   useEffect(() => {
     mountedRef.current = true
