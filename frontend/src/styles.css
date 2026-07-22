@@ -127,7 +127,7 @@ textarea:focus-visible { outline: 3px solid #1d4ed8; outline-offset: 2px; }
   font-size: 14px;
   font-weight: 500;
   min-height: 36px;
-  padding: 6px 12px;
+  padding: 8px 12px;
 }
 
 .mode-tab:hover:not(:disabled) {
@@ -304,16 +304,16 @@ textarea:focus-visible { outline: 3px solid #1d4ed8; outline-offset: 2px; }
 .concept-genres {
   display: flex;
   flex-wrap: wrap;
-  gap: 6px;
+  gap: 4px;
 }
 
 .genre-tag {
   background: #dbeafe;
   border-radius: 4px;
   color: #2563eb;
-  font-size: 12px;
+  font-size: 14px;
   font-weight: 500;
-  padding: 2px 8px;
+  padding: 4px 8px;
   line-height: 1.5;
 }
 
