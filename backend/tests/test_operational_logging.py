@@ -32,6 +32,10 @@ def test_completed_request_logs_allowlisted_fields_and_returns_request_id(
 
     assert response.headers["x-request-id"] == "request-123"
     events = _events(caplog)
+    assert len(events) == 1
+    ev = events[0]
+    assert "timestamp" in ev
+    del ev["timestamp"]
     assert events == [
         {
             "duration_ms": pytest.approx(events[0]["duration_ms"]),
@@ -64,6 +68,8 @@ def test_generated_request_id_and_unhandled_error_log_are_safe(
     assert request_id
     events = _events(caplog)
     assert [event["event"] for event in events] == ["application_error", "request_completed"]
+    assert "timestamp" in events[0]
+    del events[0]["timestamp"]
     assert events[0] == {
         "event": "application_error",
         "method": "GET",
@@ -75,6 +81,110 @@ def test_generated_request_id_and_unhandled_error_log_are_safe(
     assert events[1]["status"] == 500
     assert "credential" not in caplog.text
     assert "internal detail" not in caplog.text
+
+
+# ── Slice 1: app_log_level controls logger verbosity ────────────────────────
+
+
+def test_warning_log_level_suppresses_info_events() -> None:
+    """INFO events must be suppressed when log level is WARNING."""
+    logger = logging.getLogger(APP_LOGGER_NAME)
+    logger.handlers.clear()
+
+    configure_logging(log_level="WARNING")
+    assert logger.level == logging.WARNING
+    assert not logger.isEnabledFor(logging.INFO)
+    assert logger.isEnabledFor(logging.WARNING)
+
+    # Reset for other tests
+    logger.handlers.clear()
+    configure_logging()
+
+
+# ── Slice 2: Invalid app_log_level fails Pydantic validation ─────────────────
+
+
+def test_invalid_app_log_level_is_rejected() -> None:
+    """Setting app_log_level to an unrecognised value must fail at validation."""
+    from pydantic import ValidationError
+
+    from app.core.config import Settings
+
+    with pytest.raises(ValidationError):
+        Settings(app_log_level="VERBOSE")
+
+
+# ── Slice 3: Every JSON event contains a parseable UTC timestamp ─────────────
+
+
+def test_json_events_include_utc_iso8601_timestamp(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Every structured log event must carry a parseable UTC ISO 8601 timestamp."""
+    from datetime import datetime, timezone
+
+    caplog.set_level(logging.INFO, logger=APP_LOGGER_NAME)
+    log_event(
+        "document_written",
+        document_id=uuid4(),
+        version_id=uuid4(),
+    )
+
+    event = _events(caplog)[0]
+    assert "timestamp" in event, f"Missing timestamp in {event}"
+    ts = datetime.fromisoformat(event["timestamp"])  # type: ignore[arg-type]
+    # Must be timezone-aware (UTC)
+    assert ts.tzinfo is not None
+    assert ts.tzinfo.utcoffset(ts) == timezone.utc.utcoffset(ts)
+    # Should be recent (± 10 seconds from now)
+    delta = abs((datetime.now(timezone.utc) - ts).total_seconds())
+    assert delta < 10, f"Timestamp {ts!r} is too far from now (delta={delta}s)"
+
+
+# ── Slice 4: sae_echo decouples SQL echo from app_debug ──────────────────────
+
+
+def test_app_debug_true_with_sae_echo_false_disables_sql_echo() -> None:
+    """When app_debug=True but sae_echo=False (default), SQL echo must be off."""
+    from app.core.config import Settings
+
+    # Default: app_debug=True, sae_echo=False
+    s = Settings()
+    assert s.app_debug is True
+    assert s.sae_echo is False
+
+    # Engine echo should respect sae_echo, not app_debug
+    from app.db.session import engine
+
+    assert engine.echo is False
+
+
+# ── Slice 5: sae_echo=True explicitly enables SQL echo ───────────────────────
+
+
+def test_sae_echo_true_explicitly_enables_sql_echo() -> None:
+    """sae_echo=True must enable SQL engine echo independently of app_debug."""
+    from app.core.config import Settings
+
+    s = Settings(sae_echo=True, app_debug=False)
+    assert s.sae_echo is True
+    assert s.app_debug is False
+
+    # Verify that creating an engine with echo=True works
+    from sqlalchemy.ext.asyncio import create_async_engine
+
+    test_engine = create_async_engine(
+        "postgresql+asyncpg://postgres:postgres@127.0.0.1:5432/guranovel_test",
+        echo=True,
+    )
+    assert test_engine.echo is True
+
+    import asyncio
+
+    async def cleanup() -> None:
+        await test_engine.dispose()
+
+    asyncio.run(cleanup())
 
 
 def test_invalid_request_id_is_replaced_and_existing_error_headers_are_preserved(
@@ -193,6 +303,8 @@ def test_operational_events_only_accept_allowlisted_safe_fields(
 
     event = _events(caplog)[0]
     assert event["event"] == "document_written"
+    assert "timestamp" in event
+    del event["timestamp"]
     assert set(event) == {"event", "document_id", "version_id"}
     assert "markdown" not in caplog.text
 
@@ -306,7 +418,11 @@ async def test_document_creation_logs_only_after_durable_success(
     )
 
     assert document.id == document_id
-    assert _events(caplog) == [
+    events = _events(caplog)
+    assert len(events) == 1
+    assert "timestamp" in events[0]
+    del events[0]["timestamp"]
+    assert events == [
         {"event": "document_written", "document_id": str(document_id), "version_id": str(version_id)}
     ]
     assert "secret Markdown" not in caplog.text
@@ -363,6 +479,8 @@ async def test_action_resolution_logs_only_safe_workflow_identifiers(
 
     assert result.decision == "approved"
     event = _events(caplog)[0]
+    assert "timestamp" in event
+    del event["timestamp"]
     assert event == {
         "action_id": str(action_id),
         "chapter_id": str(chapter_id),

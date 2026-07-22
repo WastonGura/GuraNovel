@@ -8,6 +8,7 @@ import re
 import sys
 import time
 from contextvars import ContextVar
+from datetime import datetime, timezone
 from uuid import UUID, uuid4
 
 from starlette.requests import Request
@@ -39,18 +40,27 @@ class _JsonFormatter(logging.Formatter):
         return record.getMessage()
 
 
-def configure_logging() -> logging.Logger:
+def _resolve_log_level(level: str) -> int:
+    """Convert a log-level string to a ``logging`` level constant."""
+    numeric = getattr(logging, level.upper(), None)
+    if not isinstance(numeric, int):
+        raise ValueError(f"Invalid log level: {level!r}")
+    return numeric
+
+
+def configure_logging(log_level: str = "INFO") -> logging.Logger:
     """Configure only the dedicated application logger, without changing root logging."""
     # request_completed replaces Uvicorn's unsafe access log, which includes raw paths and queries.
     logging.getLogger("uvicorn.access").disabled = True
     logger = logging.getLogger(APP_LOGGER_NAME)
-    logger.setLevel(logging.INFO)
     logger.propagate = False
     if not any(getattr(handler, "_guranovel_operational", False) for handler in logger.handlers):
         handler = logging.StreamHandler(sys.stdout)
         handler._guranovel_operational = True  # type: ignore[attr-defined]
+        handler.setLevel(logging.INFO)
         handler.setFormatter(_JsonFormatter())
         logger.addHandler(handler)
+        logger.setLevel(_resolve_log_level(log_level))
     return logger
 
 
@@ -62,7 +72,10 @@ def log_event(event: str, **fields: object) -> None:
     allowed = _EVENT_FIELDS.get(event)
     if allowed is None:
         raise ValueError("Unknown operational log event")
-    record: dict[str, object] = {"event": event}
+    record: dict[str, object] = {
+        "event": event,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
     for name in allowed:
         value = fields.get(name)
         if name == "request_id" and value is None:
