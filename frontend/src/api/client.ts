@@ -212,6 +212,27 @@ export interface RestoreDocumentRequest {
   change_summary?: string | null
 }
 
+export interface ProjectCreationPendingAction {
+  id: string
+  type: string
+  status: string
+  allowed_decisions: string[]
+  review_severity: string | null
+  concept_document_id?: string | null
+  concept_version_id?: string | null
+  options?: string[]
+}
+
+export interface ProjectCreationRun {
+  id: string
+  type: string
+  status: string
+  current_node: string | null
+  next_node: string | null
+  awaiting_user: boolean
+  pending_action: ProjectCreationPendingAction | null
+}
+
 export class ApiError extends Error {
   readonly status: number
   readonly code: string
@@ -559,4 +580,101 @@ export function restoreDocument(
   documentId: string, versionId: string, payload: RestoreDocumentRequest,
 ): Promise<DocumentVersion> {
   return request('POST', () => apiPath('documents', documentId, 'versions', versionId, 'restore'), decodeDocumentVersion, payload)
+}
+
+export interface ProjectCreationPendingAction {
+  id: string
+  type: string
+  status: string
+  allowed_decisions: string[]
+  review_severity: string | null
+}
+
+export interface ProjectCreationStarted {
+  id: string
+  status: string
+  pending_action: ProjectCreationPendingAction
+}
+
+export interface StartProjectCreationRequest {
+  user_seed: string
+  target_platform?: string | null
+  preferred_genres?: string[]
+  disliked_elements?: string[]
+  style_preference?: string | null
+}
+
+export interface ProjectCreationRun {
+  id: string
+  type: string
+  status: string
+  current_node: string | null
+  next_node: string | null
+  awaiting_user: boolean
+  pending_action: ProjectCreationPendingAction | null
+}
+
+function decodeProjectCreationPendingAction(value: unknown): ProjectCreationPendingAction {
+  const data = object(value)
+  if (!Array.isArray(data.allowed_decisions)) throw invalidResponse()
+  return {
+    id: string(data.id), type: string(data.type), status: string(data.status),
+    allowed_decisions: data.allowed_decisions.map(string),
+    review_severity: nullableString(data.review_severity),
+  }
+}
+
+function decodeProjectCreationStarted(value: unknown): ProjectCreationStarted {
+  const data = object(value)
+  return {
+    id: string(data.id),
+    status: string(data.status),
+    pending_action: decodeProjectCreationPendingAction(data.pending_action),
+  }
+}
+
+export function startProjectCreation(
+  projectId: string,
+  payload: StartProjectCreationRequest,
+): Promise<ProjectCreationStarted> {
+  return request('POST', () => apiPath('projects', projectId, 'creation', 'start'), decodeProjectCreationStarted, payload as unknown as Record<string, unknown>)
+}
+
+function decodeProjectCreationRun(value: unknown): ProjectCreationRun {
+  const data = object(value)
+  return {
+    id: string(data.id), type: string(data.type), status: string(data.status),
+    current_node: nullableString(data.current_node), next_node: nullableString(data.next_node),
+    awaiting_user: boolean(data.awaiting_user),
+    pending_action: data.pending_action === null ? null : decodeProjectCreationPendingAction(data.pending_action),
+  }
+}
+
+export function getProjectCreationRun(projectId: string, workflowRunId: string): Promise<ProjectCreationRun> {
+  return request('GET', () => apiPath('projects', projectId, 'creation', workflowRunId), decodeProjectCreationRun)
+}
+
+export type ResolveProjectCreationActionRequest =
+  | { decision: 'select'; option_id: string }
+  | { decision: 'fuse'; fused_concept: string }
+
+export interface ResolveProjectCreationActionResponse {
+  status: string
+}
+
+export function resolveProjectCreationAction(
+  projectId: string,
+  workflowRunId: string,
+  actionId: string,
+  body: ResolveProjectCreationActionRequest,
+): Promise<ResolveProjectCreationActionResponse> {
+  return request(
+    'POST',
+    () => apiPath('projects', projectId, 'creation', workflowRunId, 'actions', actionId, 'resolve'),
+    (value) => {
+      const data = object(value)
+      return { status: string(data.status) }
+    },
+    body,
+  )
 }
