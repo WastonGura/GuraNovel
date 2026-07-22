@@ -6,7 +6,9 @@ from uuid import UUID
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints
 
 
-NonBlankText = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=500)]
+NonBlankText = Annotated[
+    str, StringConstraints(strip_whitespace=True, min_length=1, max_length=500)
+]
 UserSeed = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=4_000)]
 
 
@@ -26,7 +28,8 @@ class ProjectCreationPendingActionResponse(BaseModel):
     id: UUID
     type: str
     status: Literal["pending"]
-    allowed_decisions: tuple[Literal["approved", "rejected"], ...]
+    allowed_decisions: tuple[str, ...]
+    review_severity: Literal["blocking", "warning", "clean"] | None = None
 
 
 class ProjectCreationRunResponse(BaseModel):
@@ -41,5 +44,13 @@ class ProjectCreationRunResponse(BaseModel):
 
 class ResolveProjectCreationActionRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
-
-    decision: Literal["approved", "rejected"]
+    decision: Literal["select", "fuse", "regenerate", "feedback"]
+    option_id: Annotated[str, StringConstraints(pattern=r"[a-z][a-z0-9-]{0,63}")] | None = None
+    fused_concept: (
+        Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=4000)]
+        | None
+    ) = None
+    feedback: (
+        Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=1000)]
+        | None
+    ) = None

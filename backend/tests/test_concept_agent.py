@@ -167,7 +167,13 @@ def test_concept_request_target_platform_accepts_explicit_or_omitted_none_only_w
     assert explicit_none.model_dump()["target_platform"] is None
     assert omitted.target_platform is None
     assert omitted.model_dump()["target_platform"] is None
-    for invalid in ("", "x" * 129, 7, ["web novel"]):
+    assert (
+        ConceptAgentRequest.model_validate(
+            {**request.model_dump(), "target_platform": "x" * 500}
+        ).target_platform
+        == "x" * 500
+    )
+    for invalid in ("", "x" * 501, 7, ["web novel"]):
         with pytest.raises(ValidationError):
             ConceptAgentRequest.model_validate({**request.model_dump(), "target_platform": invalid})
 

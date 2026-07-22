@@ -8,6 +8,7 @@ from app.llm import (
     ProviderConfigurationError,
 )
 from app.workspace import ProjectWorkspace
+from app.agents.composition import ProjectCreationComposition
 
 
 class ChapterGenerationComposition:
@@ -55,9 +56,15 @@ def get_project_workspace() -> ProjectWorkspace:
     """Provide the configured workspace authority; clients never choose roots."""
     return ProjectWorkspace(settings.workspace_base_dir)
 
+
+def get_project_creation_composition() -> ProjectCreationComposition:
+    """The route owns a local-only composition; clients cannot select providers."""
+    return ProjectCreationComposition()
+
 __all__ = [
     "ChapterGenerationComposition",
     "get_chapter_generation_composition",
     "get_db_session",
     "get_project_workspace",
+    "get_project_creation_composition",
 ]

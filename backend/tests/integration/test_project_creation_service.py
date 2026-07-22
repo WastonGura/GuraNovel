@@ -5,11 +5,21 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
+
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from app.core.errors import ConflictError, WorkflowStateError
-from app.models import ActionRequest, Project, WorkflowCheckpoint, WorkflowEvent, WorkflowRun, WorkflowType
+from app.models import (
+    ActionRequest,
+    Chapter,
+    Project,
+    User,
+    WorkflowCheckpoint,
+    WorkflowEvent,
+    WorkflowRun,
+    WorkflowType,
+)
 from app.services.project_creation_service import ProjectCreationService
 from app.services.project_service import ProjectService
 from app.workflows.project_creation import ProjectCreationStatus
@@ -22,22 +32,24 @@ async def create_project(async_session: AsyncSession, workspace_base: Path) -> P
     )
 
 
-async def workflow_counts(async_session: AsyncSession, workflow_run_id: object) -> tuple[int, int, int]:
+async def workflow_counts(
+    async_session: AsyncSession, workflow_run_id: object
+) -> tuple[int, int, int]:
     return (
         await async_session.scalar(
-            select(func.count()).select_from(WorkflowCheckpoint).where(
-                WorkflowCheckpoint.workflow_run_id == workflow_run_id
-            )
+            select(func.count())
+            .select_from(WorkflowCheckpoint)
+            .where(WorkflowCheckpoint.workflow_run_id == workflow_run_id)
         ),
         await async_session.scalar(
-            select(func.count()).select_from(ActionRequest).where(
-                ActionRequest.workflow_run_id == workflow_run_id
-            )
+            select(func.count())
+            .select_from(ActionRequest)
+            .where(ActionRequest.workflow_run_id == workflow_run_id)
         ),
         await async_session.scalar(
-            select(func.count()).select_from(WorkflowEvent).where(
-                WorkflowEvent.workflow_run_id == workflow_run_id
-            )
+            select(func.count())
+            .select_from(WorkflowEvent)
+            .where(WorkflowEvent.workflow_run_id == workflow_run_id)
         ),
     )
 
@@ -65,7 +77,10 @@ async def test_start_persists_initial_safe_checkpoint_for_real_project(
             .order_by(WorkflowCheckpoint.checkpoint_index)
         )
     )
-    assert [(checkpoint.checkpoint_index, checkpoint.node_name, checkpoint.state_json) for checkpoint in checkpoints] == [
+    assert [
+        (checkpoint.checkpoint_index, checkpoint.node_name, checkpoint.state_json)
+        for checkpoint in checkpoints
+    ] == [
         (
             0,
             "user_idea",
@@ -114,9 +129,14 @@ async def test_start_rolls_back_when_initial_flush_fails(
     monkeypatch.setattr(async_session, "flush", original_flush)
 
     assert rollback_calls == 1
-    assert await async_session.scalar(
-        select(func.count()).select_from(WorkflowRun).where(WorkflowRun.project_id == project_id)
-    ) == 0
+    assert (
+        await async_session.scalar(
+            select(func.count())
+            .select_from(WorkflowRun)
+            .where(WorkflowRun.project_id == project_id)
+        )
+        == 0
+    )
 
 
 @pytest.mark.integration
@@ -146,16 +166,22 @@ async def test_request_concept_review_rolls_back_when_action_flush_fails(
     monkeypatch.setattr(async_session, "flush", original_flush)
 
     assert rollback_calls == 1
-    assert await async_session.scalar(
-        select(func.count()).select_from(ActionRequest).where(
-            ActionRequest.workflow_run_id == started.workflow_run_id
+    assert (
+        await async_session.scalar(
+            select(func.count())
+            .select_from(ActionRequest)
+            .where(ActionRequest.workflow_run_id == started.workflow_run_id)
         )
-    ) == 0
-    assert await async_session.scalar(
-        select(func.count()).select_from(WorkflowCheckpoint).where(
-            WorkflowCheckpoint.workflow_run_id == started.workflow_run_id
+        == 0
+    )
+    assert (
+        await async_session.scalar(
+            select(func.count())
+            .select_from(WorkflowCheckpoint)
+            .where(WorkflowCheckpoint.workflow_run_id == started.workflow_run_id)
         )
-    ) == 1
+        == 1
+    )
 
 
 @pytest.mark.integration
@@ -285,7 +311,9 @@ async def test_transition_rejects_terminal_state_without_completion_timestamp(
     service = ProjectCreationService(async_session)
     started = await service.start(project.id)
     waiting = await service.request_concept_review(started.workflow_run_id)
-    await service.resume_concept_review(started.workflow_run_id, waiting.action_request_id, "rejected")
+    await service.resume_concept_review(
+        started.workflow_run_id, waiting.action_request_id, "rejected"
+    )
     await async_session.execute(
         WorkflowRun.__table__.update()
         .where(WorkflowRun.id == started.workflow_run_id)
@@ -339,7 +367,9 @@ async def test_resume_rejects_invalid_waiting_action_without_durable_mutation(
     await async_session.commit()
 
     with pytest.raises(WorkflowStateError, match="state is inconsistent"):
-        await service.resume_concept_review(started.workflow_run_id, waiting.action_request_id, "approved")
+        await service.resume_concept_review(
+            started.workflow_run_id, waiting.action_request_id, "approved"
+        )
 
     expected_actions = 0 if corruption == "missing" else 2 if corruption == "duplicate" else 1
     assert await workflow_counts(async_session, started.workflow_run_id) == (2, expected_actions, 2)
@@ -354,7 +384,9 @@ async def test_complete_rejects_pending_concept_action_for_nonwaiting_state(
     service = ProjectCreationService(async_session)
     started = await service.start(project.id)
     waiting = await service.request_concept_review(started.workflow_run_id)
-    await service.resume_concept_review(started.workflow_run_id, waiting.action_request_id, "approved")
+    await service.resume_concept_review(
+        started.workflow_run_id, waiting.action_request_id, "approved"
+    )
     async_session.add(
         ActionRequest(
             workflow_run_id=started.workflow_run_id,
@@ -391,21 +423,30 @@ async def test_request_concept_review_rejects_mismatched_terminal_run_projection
     with pytest.raises(WorkflowStateError, match="state is inconsistent"):
         await service.request_concept_review(started.workflow_run_id)
 
-    assert await async_session.scalar(
-        select(func.count()).select_from(WorkflowCheckpoint).where(
-            WorkflowCheckpoint.workflow_run_id == started.workflow_run_id
+    assert (
+        await async_session.scalar(
+            select(func.count())
+            .select_from(WorkflowCheckpoint)
+            .where(WorkflowCheckpoint.workflow_run_id == started.workflow_run_id)
         )
-    ) == 1
-    assert await async_session.scalar(
-        select(func.count()).select_from(ActionRequest).where(
-            ActionRequest.workflow_run_id == started.workflow_run_id
+        == 1
+    )
+    assert (
+        await async_session.scalar(
+            select(func.count())
+            .select_from(ActionRequest)
+            .where(ActionRequest.workflow_run_id == started.workflow_run_id)
         )
-    ) == 0
-    assert await async_session.scalar(
-        select(func.count()).select_from(WorkflowEvent).where(
-            WorkflowEvent.workflow_run_id == started.workflow_run_id
+        == 0
+    )
+    assert (
+        await async_session.scalar(
+            select(func.count())
+            .select_from(WorkflowEvent)
+            .where(WorkflowEvent.workflow_run_id == started.workflow_run_id)
         )
-    ) == 1
+        == 1
+    )
 
 
 @pytest.mark.integration
@@ -425,21 +466,29 @@ async def test_resume_concept_review_rejects_mismatched_run_projection_before_re
     await async_session.commit()
 
     with pytest.raises(WorkflowStateError, match="state is inconsistent"):
-        await service.resume_concept_review(started.workflow_run_id, waiting.action_request_id, "approved")
+        await service.resume_concept_review(
+            started.workflow_run_id, waiting.action_request_id, "approved"
+        )
 
     action = await async_session.get(ActionRequest, waiting.action_request_id)
     assert action is not None
     assert action.status == "pending"
-    assert await async_session.scalar(
-        select(func.count()).select_from(WorkflowCheckpoint).where(
-            WorkflowCheckpoint.workflow_run_id == started.workflow_run_id
+    assert (
+        await async_session.scalar(
+            select(func.count())
+            .select_from(WorkflowCheckpoint)
+            .where(WorkflowCheckpoint.workflow_run_id == started.workflow_run_id)
         )
-    ) == 2
-    assert await async_session.scalar(
-        select(func.count()).select_from(WorkflowEvent).where(
-            WorkflowEvent.workflow_run_id == started.workflow_run_id
+        == 2
+    )
+    assert (
+        await async_session.scalar(
+            select(func.count())
+            .select_from(WorkflowEvent)
+            .where(WorkflowEvent.workflow_run_id == started.workflow_run_id)
         )
-    ) == 2
+        == 2
+    )
 
 
 @pytest.mark.integration
@@ -451,7 +500,9 @@ async def test_complete_rejects_mismatched_terminal_run_projection_before_checkp
     service = ProjectCreationService(async_session)
     started = await service.start(project.id)
     waiting = await service.request_concept_review(started.workflow_run_id)
-    await service.resume_concept_review(started.workflow_run_id, waiting.action_request_id, "approved")
+    await service.resume_concept_review(
+        started.workflow_run_id, waiting.action_request_id, "approved"
+    )
     await async_session.execute(
         WorkflowRun.__table__.update()
         .where(WorkflowRun.id == started.workflow_run_id)
@@ -462,16 +513,22 @@ async def test_complete_rejects_mismatched_terminal_run_projection_before_checkp
     with pytest.raises(WorkflowStateError, match="state is inconsistent"):
         await service.complete(started.workflow_run_id)
 
-    assert await async_session.scalar(
-        select(func.count()).select_from(WorkflowCheckpoint).where(
-            WorkflowCheckpoint.workflow_run_id == started.workflow_run_id
+    assert (
+        await async_session.scalar(
+            select(func.count())
+            .select_from(WorkflowCheckpoint)
+            .where(WorkflowCheckpoint.workflow_run_id == started.workflow_run_id)
         )
-    ) == 3
-    assert await async_session.scalar(
-        select(func.count()).select_from(WorkflowEvent).where(
-            WorkflowEvent.workflow_run_id == started.workflow_run_id
+        == 3
+    )
+    assert (
+        await async_session.scalar(
+            select(func.count())
+            .select_from(WorkflowEvent)
+            .where(WorkflowEvent.workflow_run_id == started.workflow_run_id)
         )
-    ) == 3
+        == 3
+    )
 
 
 @pytest.mark.integration
@@ -487,9 +544,17 @@ async def test_waiting_gate_rejects_regular_transition_and_terminal_run_rejects_
     with pytest.raises(WorkflowStateError, match="awaiting a user decision"):
         await service.complete(started.workflow_run_id)
 
-    await service.resume_concept_review(started.workflow_run_id, waiting.action_request_id, "rejected")
-    with pytest.raises(WorkflowStateError, match="terminal"):
+    await service.resume_concept_review(
+        started.workflow_run_id, waiting.action_request_id, "rejected"
+    )
+    before = await workflow_counts(async_session, started.workflow_run_id)
+    with pytest.raises(WorkflowStateError):
         await service.request_concept_review(started.workflow_run_id)
+    run = await async_session.get(WorkflowRun, started.workflow_run_id)
+    assert run is not None
+    assert run.status == ProjectCreationStatus.REJECTED.value
+    assert run.completed_at is not None
+    assert await workflow_counts(async_session, started.workflow_run_id) == before
 
 
 @pytest.mark.integration
@@ -522,3 +587,66 @@ async def test_invalid_transition_corrupt_checkpoint_and_events_fail_closed_and_
     assert "secret seed" not in serialized
     assert all(event.message is None for event in events)
     assert all(set(event.payload) <= {"status", "action_request_id"} for event in events)
+
+
+@pytest.mark.integration
+@pytest.mark.anyio
+async def test_legacy_waiting_action_remains_narrowly_readable(
+    async_session: AsyncSession, tmp_path: Path
+) -> None:
+    project = await create_project(async_session, tmp_path / "legacy-read")
+    service = ProjectCreationService(async_session)
+    started = await service.start(project.id)
+    waiting = await service.request_concept_review(started.workflow_run_id)
+
+    read = await service.get_project_creation_run(project.id, started.workflow_run_id)
+    assert read.pending_action is not None
+    assert read.pending_action.id == waiting.action_request_id
+    assert read.pending_action.type == "project_creation_concept_review"
+    assert read.pending_action.allowed_decisions == ("approved", "rejected")
+    assert read.pending_action.review_severity is None
+
+
+@pytest.mark.integration
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "field",
+    [
+        "chapter_id",
+        "user_decision",
+        "user_feedback",
+        "resolved_by_id",
+        "resolved_at",
+        "expires_at",
+    ],
+)
+async def test_legacy_waiting_action_corruption_fails_closed_for_read_and_resume(
+    async_session: AsyncSession, tmp_path: Path, field: str
+) -> None:
+    project = await create_project(async_session, tmp_path / field)
+    service = ProjectCreationService(async_session)
+    started = await service.start(project.id)
+    waiting = await service.request_concept_review(started.workflow_run_id)
+    action = await async_session.get(ActionRequest, waiting.action_request_id)
+    assert action is not None
+    user = User(username=f"legacy-corruption-{field}")
+    chapter = Chapter(project_id=project.id, chapter_number=1, title="Foreign-looking scope")
+    async_session.add_all((user, chapter))
+    await async_session.flush()
+    values = {
+        "chapter_id": chapter.id,
+        "user_decision": "approved",
+        "user_feedback": "private feedback",
+        "resolved_by_id": user.id,
+        "resolved_at": datetime.now(UTC),
+        "expires_at": datetime.now(UTC),
+    }
+    setattr(action, field, values[field])
+    await async_session.commit()
+
+    with pytest.raises(WorkflowStateError):
+        await service.get_project_creation_run(project.id, started.workflow_run_id)
+    with pytest.raises(WorkflowStateError):
+        await service.resume_concept_review(
+            started.workflow_run_id, waiting.action_request_id, "approved"
+        )

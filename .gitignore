@@ -29,7 +29,7 @@ workspaces/*
 
 # Private design drafts / internal planning notes
 docs/design/
-.hermes/
+# .hermes/ contains tracked project continuity documents (not private runtime state).
 
 # Databases and local volumes
 *.db

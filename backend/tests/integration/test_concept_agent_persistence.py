@@ -2,6 +2,7 @@ from pathlib import Path
 from uuid import uuid4
 
 import pytest
+
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -86,7 +87,7 @@ async def test_validated_concepts_persist_only_as_document_service_version_chain
     assert version.agent_role == "concept_agent"
     assert version.workflow_run_id == workflow_run.id
     assert (tmp_path / document.path).read_text() == (
-        "# Concept Options\n\n## The Glass Archive\n\nA memory thief threatens a city.\n\n"
+        "# Concept Options\n\n## Option `glass-archive`: The Glass Archive\n\nA memory thief threatens a city.\n\n"
         "An apprentice archivist stops stolen memories rewriting her home.\n\nGenres: fantasy\n"
     )
     assert len((await async_session.scalars(select(DocumentVersion))).all()) == 1
