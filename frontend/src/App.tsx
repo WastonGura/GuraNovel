@@ -25,7 +25,6 @@ import {
   type DocumentVersion,
   type Project,
 } from './api/client'
-import ConceptSelection from './ConceptSelection'
 import ConceptGate from './ConceptGate'
 import ProjectCreationForm from './ProjectCreationForm'
 
@@ -171,6 +170,7 @@ function ProjectWorkspace() {
         {project.genre && <div><dt>Genre</dt><dd>{project.genre}</dd></div>}
         {project.target_platform && <div><dt>Target platform</dt><dd>{project.target_platform}</dd></div>}
       </dl>
+      <Link to={`/projects/${projectId}/creation/start`}>开始构思</Link>
       <section aria-labelledby="chapters-title">
         <h2 id="chapters-title">Chapters</h2>
         {chapters.length === 0 ? <p className="muted">No chapters yet.</p> : (
@@ -509,34 +509,13 @@ function NotFound() {
   return <section className="page" aria-labelledby="route-title"><h1 id="route-title">Page not found</h1><p className="muted">The requested workspace does not exist.</p><Link to="/">Return to projects</Link></section>
 }
 
-function ConceptSelectionPage() {
-  const { projectId = '', workflowRunId = '', actionId = '' } = useParams()
-  const navigate = useNavigate()
-
-  return (
-    <section className="page" aria-labelledby="route-title">
-      <Link className="back-link" to={`/projects/${projectId}`}>返回项目</Link>
-      <p className="eyebrow">项目创建</p>
-      <h1 id="route-title">概念选择</h1>
-      <ConceptSelection
-        projectId={projectId}
-        workflowRunId={workflowRunId}
-        actionId={actionId}
-        allowedDecisions={['select', 'fuse']}
-        options={[]}
-        onResolved={() => navigate(`/projects/${projectId}`)}
-      />
-    </section>
-  )
-}
-
 export default function App() {
   return (
     <div className="app-shell">
       <header className="topbar" aria-label="GuraNovel workbench"><Link className="wordmark" to="/">GuraNovel</Link><span className="workspace-name">Creative workbench</span></header>
       <div className="workspace">
         <nav aria-label="Workbench navigation"><Link to="/">Projects</Link><span>Approvals</span><span>Documents</span></nav>
-        <main><Routes><Route path="/" element={<ProjectListPage />} /><Route path="/projects/:projectId" element={<ProjectWorkspace />} /><Route path="/projects/:projectId/chapters/:chapterId" element={<ChapterWorkspace />} /><Route path="/projects/:projectId/creation/:workflowRunId/actions/:actionId" element={<ConceptSelectionPage />} /><Route path="/projects/:projectId/creation/start" element={<ProjectCreationPage />} /><Route path="/projects/:projectId/creation/:workflowRunId/gate" element={<ConceptGatePage />} /><Route path="*" element={<NotFound />} /></Routes></main>
+        <main><Routes><Route path="/" element={<ProjectListPage />} /><Route path="/projects/:projectId" element={<ProjectWorkspace />} /><Route path="/projects/:projectId/chapters/:chapterId" element={<ChapterWorkspace />} /><Route path="/projects/:projectId/creation/start" element={<ProjectCreationPage />} /><Route path="/projects/:projectId/creation/:workflowRunId/gate" element={<ConceptGatePage />} /><Route path="*" element={<NotFound />} /></Routes></main>
       </div>
     </div>
   )

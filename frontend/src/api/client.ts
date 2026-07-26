@@ -212,27 +212,6 @@ export interface RestoreDocumentRequest {
   change_summary?: string | null
 }
 
-export interface ProjectCreationPendingAction {
-  id: string
-  type: string
-  status: string
-  allowed_decisions: string[]
-  review_severity: string | null
-  concept_document_id?: string | null
-  concept_version_id?: string | null
-  options?: string[]
-}
-
-export interface ProjectCreationRun {
-  id: string
-  type: string
-  status: string
-  current_node: string | null
-  next_node: string | null
-  awaiting_user: boolean
-  pending_action: ProjectCreationPendingAction | null
-}
-
 export class ApiError extends Error {
   readonly status: number
   readonly code: string
@@ -582,12 +561,21 @@ export function restoreDocument(
   return request('POST', () => apiPath('documents', documentId, 'versions', versionId, 'restore'), decodeDocumentVersion, payload)
 }
 
+export interface ProjectCreationConceptOption {
+  id: string
+  title: string
+  logline: string
+  premise: string
+  genres: string[]
+}
+
 export interface ProjectCreationPendingAction {
   id: string
   type: string
   status: string
   allowed_decisions: string[]
   review_severity: string | null
+  concept_options: ProjectCreationConceptOption[]
 }
 
 export interface ProjectCreationStarted {
@@ -614,13 +602,42 @@ export interface ProjectCreationRun {
   pending_action: ProjectCreationPendingAction | null
 }
 
+function decodeProjectCreationConceptOption(value: unknown): ProjectCreationConceptOption {
+  const data = object(value)
+  const id = string(data.id)
+  const title = string(data.title)
+  const logline = string(data.logline)
+  const premise = string(data.premise)
+  if (
+    !/^[a-z][a-z0-9-]{0,63}$/.test(id)
+    || !title || title.length > 160 || /[\r\n]/.test(title)
+    || !logline || logline.length > 600 || /[\r\n]/.test(logline)
+    || !premise || premise.length > 2000 || /[\r\n]/.test(premise)
+    || !Array.isArray(data.genres)
+    || data.genres.length < 1
+    || data.genres.length > 6
+  ) {
+    throw invalidResponse()
+  }
+  const genres = data.genres.map(string)
+  if (genres.some((genre) => !genre || genre.length > 256 || /[,\r\n]/.test(genre))) {
+    throw invalidResponse()
+  }
+  return { id, title, logline, premise, genres }
+}
+
 function decodeProjectCreationPendingAction(value: unknown): ProjectCreationPendingAction {
   const data = object(value)
-  if (!Array.isArray(data.allowed_decisions)) throw invalidResponse()
+  if (
+    !Array.isArray(data.allowed_decisions)
+    || !Array.isArray(data.concept_options)
+    || data.concept_options.length > 5
+  ) throw invalidResponse()
   return {
     id: string(data.id), type: string(data.type), status: string(data.status),
     allowed_decisions: data.allowed_decisions.map(string),
     review_severity: nullableString(data.review_severity),
+    concept_options: data.concept_options.map(decodeProjectCreationConceptOption),
   }
 }
 

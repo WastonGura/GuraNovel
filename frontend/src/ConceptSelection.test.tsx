@@ -19,12 +19,22 @@ import * as api from './api/client'
 
 const mockedApi = vi.mocked(api)
 
+function option(id: string) {
+  return {
+    id,
+    title: id,
+    logline: `${id} logline`,
+    premise: `${id} premise`,
+    genres: ['fantasy'],
+  }
+}
+
 const defaultProps = {
   projectId: 'project-1',
   workflowRunId: 'run-1',
   actionId: 'action-1',
   allowedDecisions: ['select', 'fuse'],
-  options: ['glass-archive', 'iron-kingdom', 'crystal-realm'],
+  options: [option('glass-archive'), option('iron-kingdom'), option('crystal-realm')],
   onResolved: vi.fn(),
 }
 

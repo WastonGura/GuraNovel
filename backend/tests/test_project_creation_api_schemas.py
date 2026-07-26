@@ -2,6 +2,7 @@ import pytest
 from pydantic import ValidationError
 
 from app.api.schemas_project_creation import (
+    ProjectCreationConceptOptionResponse,
     ResolveProjectCreationActionRequest,
     StartProjectCreationRequest,
 )
@@ -66,3 +67,30 @@ def test_project_creation_start_request_rejects_non_string_text_values(
 def test_project_creation_resolution_only_accepts_confirmation_decisions(decision: str) -> None:
     with pytest.raises(ValidationError):
         ResolveProjectCreationActionRequest.model_validate({"decision": decision})
+
+
+def test_project_creation_concept_option_response_is_strict_and_allowlisted() -> None:
+    option = ProjectCreationConceptOptionResponse.model_validate(
+        {
+            "id": "glass-archive",
+            "title": "The Glass Archive",
+            "logline": "An archivist discovers a city preserved in glass.",
+            "premise": "Every recovered memory changes the city that contains it.",
+            "genres": ("fantasy", "mystery"),
+        }
+    )
+
+    assert option.model_dump() == {
+        "id": "glass-archive",
+        "title": "The Glass Archive",
+        "logline": "An archivist discovers a city preserved in glass.",
+        "premise": "Every recovered memory changes the city that contains it.",
+        "genres": ("fantasy", "mystery"),
+    }
+    with pytest.raises(ValidationError):
+        ProjectCreationConceptOptionResponse.model_validate(
+            {
+                **option.model_dump(),
+                "provider_payload": "must not cross the public boundary",
+            }
+        )

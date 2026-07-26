@@ -53,12 +53,22 @@ class ProjectCreationWaiting:
 
 
 @dataclass(frozen=True)
+class ProjectCreationConceptOptionRead:
+    id: str
+    title: str
+    logline: str
+    premise: str
+    genres: tuple[str, ...]
+
+
+@dataclass(frozen=True)
 class ProjectCreationPendingActionRead:
     id: UUID
     type: str
     status: str
     allowed_decisions: tuple[str, ...]
     review_severity: str | None = None
+    concept_options: tuple[ProjectCreationConceptOptionRead, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -707,6 +717,16 @@ class ProjectCreationService:
                 action.status,
                 decisions,
                 binding.review_severity,
+                tuple(
+                    ProjectCreationConceptOptionRead(
+                        option.id,
+                        option.title,
+                        option.logline,
+                        option.premise,
+                        tuple(option.genres),
+                    )
+                    for option in binding.concepts.options
+                ),
             )
         return ProjectCreationRunRead(
             run.id,

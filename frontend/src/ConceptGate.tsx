@@ -1,40 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { Link } from 'react-router-dom'
+import { Link, useNavigate } from 'react-router-dom'
 import {
   ApiError,
   getProjectCreationRun,
-  readDocumentContent,
+  type ProjectCreationConceptOption,
   type ProjectCreationRun,
 } from './api/client'
-
-// ── Concept parsing ────────────────────────────────────────────────
-
-interface ConceptOption {
-  id: string
-  title: string
-  logline: string
-  premise: string
-  genres: string[]
-}
-
-const CONCEPT_REGEX =
-  /^## Option `(?<id>[a-z][a-z0-9-]{0,63})`: (?<title>[^\n]+)\n\n(?<logline>[^\n]+)\n\n(?<premise>[^\n]+)\n\nGenres: (?<genres>[^\n]+)$/gm
-
-function parseConceptMarkdown(content: string): ConceptOption[] {
-  const options: ConceptOption[] = []
-  let match: RegExpExecArray | null
-  while ((match = CONCEPT_REGEX.exec(content)) !== null) {
-    const groups = match.groups as { id: string; title: string; logline: string; premise: string; genres: string }
-    options.push({
-      id: groups.id,
-      title: groups.title,
-      logline: groups.logline,
-      premise: groups.premise,
-      genres: groups.genres.split(',').map((g) => g.trim()).filter(Boolean),
-    })
-  }
-  return options
-}
+import ConceptSelection from './ConceptSelection'
 
 // ── Sub-components ─────────────────────────────────────────────────
 
@@ -52,9 +24,9 @@ function SkeletonCard() {
   )
 }
 
-function ConceptCard({ option }: { option: ConceptOption }) {
+function ConceptCard({ option }: { option: ProjectCreationConceptOption }) {
   return (
-    <article className="concept-card">
+    <article className="concept-card display">
       <h3 className="concept-title">{option.title}</h3>
       <p className="concept-logline">{option.logline}</p>
       <p className="concept-premise">{option.premise}</p>
@@ -105,7 +77,22 @@ function ErrorView({ message, onRetry }: { message: string; onRetry?: () => void
   )
 }
 
-function GateView({ concepts, severity }: { concepts: ConceptOption[]; severity: string | null }) {
+function GateView({
+  run,
+  projectId,
+  onResolved,
+}: {
+  run: ProjectCreationRun
+  projectId: string
+  onResolved: () => void
+}) {
+  const action = run.pending_action
+  const concepts = action?.concept_options ?? []
+  const canChoose = action?.type === 'project_creation_concept_selection'
+    && action.status === 'pending'
+    && (action.allowed_decisions.includes('select') || action.allowed_decisions.includes('fuse'))
+  const severity = action?.review_severity ?? null
+
   return (
     <section className="concept-gate">
       <div className="gate-header">
@@ -128,11 +115,22 @@ function GateView({ concepts, severity }: { concepts: ConceptOption[]; severity:
         </div>
       )}
 
-      <div className="concept-grid" aria-label="概念方案列表">
-        {concepts.map((option) => (
-          <ConceptCard key={option.id} option={option} />
-        ))}
-      </div>
+      {canChoose && action ? (
+        <ConceptSelection
+          projectId={projectId}
+          workflowRunId={run.id}
+          actionId={action.id}
+          allowedDecisions={action.allowed_decisions}
+          options={concepts}
+          onResolved={onResolved}
+        />
+      ) : (
+        <div className="concept-grid" aria-label="概念方案列表">
+          {concepts.map((option) => (
+            <ConceptCard key={option.id} option={option} />
+          ))}
+        </div>
+      )}
     </section>
   )
 }
@@ -143,8 +141,8 @@ const requestError = '无法加载审核关卡，请检查网络后重试。'
 const notFoundError = '工作流未找到'
 
 export default function ConceptGate({ projectId, workflowRunId }: { projectId: string; workflowRunId: string }) {
+  const navigate = useNavigate()
   const [run, setRun] = useState<ProjectCreationRun | null>(null)
-  const [concepts, setConcepts] = useState<ConceptOption[] | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [showRetry, setShowRetry] = useState(false)
@@ -172,18 +170,6 @@ export default function ConceptGate({ projectId, workflowRunId }: { projectId: s
       setLoading(false)
       setError(null)
       setShowRetry(false)
-
-      const docId = fetched.pending_action?.concept_document_id
-      if (docId) {
-        try {
-          const content = await readDocumentContent(docId)
-          if (mountedRef.current) {
-            setConcepts(parseConceptMarkdown(content.content))
-          }
-        } catch {
-          // concepts will remain null; cards won't render
-        }
-      }
 
       stopPolling()
       if (
@@ -217,7 +203,6 @@ export default function ConceptGate({ projectId, workflowRunId }: { projectId: s
     setLoading(true)
     setError(null)
     setRun(null)
-    setConcepts(null)
     stopPolling()
     void fetchGateState()
     return () => { stopPolling() }
@@ -226,12 +211,7 @@ export default function ConceptGate({ projectId, workflowRunId }: { projectId: s
   if (loading) return <LoadingView />
   if (error) return <ErrorView message={error} onRetry={showRetry ? () => { setLoading(true); void fetchGateState() } : undefined} />
 
-  const severity = run?.pending_action?.review_severity ?? null
+  if (!run) return <ErrorView message={requestError} onRetry={() => { setLoading(true); void fetchGateState() }} />
 
-  return (
-    <GateView
-      concepts={concepts ?? []}
-      severity={severity}
-    />
-  )
+  return <GateView run={run} projectId={projectId} onResolved={() => navigate(`/projects/${projectId}`)} />
 }

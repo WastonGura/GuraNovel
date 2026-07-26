@@ -2,6 +2,7 @@ import { useState } from 'react'
 import {
   ApiError,
   resolveProjectCreationAction,
+  type ProjectCreationConceptOption,
   type ResolveProjectCreationActionRequest,
 } from './api/client'
 
@@ -10,7 +11,7 @@ export interface ConceptSelectionProps {
   workflowRunId: string
   actionId: string
   allowedDecisions: string[]
-  options: string[]
+  options: ProjectCreationConceptOption[]
   onResolved: () => void
 }
 
@@ -126,14 +127,22 @@ export default function ConceptSelection({
         <div className="select-mode" role="tabpanel" aria-label="选择概念方案">
           <ul className="concept-options" aria-label="可选概念方案">
             {options.map((option) => (
-              <li key={option}>
+              <li key={option.id}>
                 <button
                   type="button"
-                  className={`concept-card${selectedOption === option ? ' selected' : ''}`}
-                  onClick={() => setSelectedOption(option)}
-                  aria-pressed={selectedOption === option}
+                  className={`concept-card${selectedOption === option.id ? ' selected' : ''}`}
+                  onClick={() => setSelectedOption(option.id)}
+                  aria-pressed={selectedOption === option.id}
+                  aria-label={option.title}
                 >
-                  <span className="concept-card-label">{option}</span>
+                  <span className="concept-card-label">{option.title}</span>
+                  <span className="concept-logline">{option.logline}</span>
+                  <span className="concept-premise">{option.premise}</span>
+                  <span className="concept-genres" aria-label="类型标签">
+                    {option.genres.map((genre) => (
+                      <span key={genre} className="genre-tag">{genre}</span>
+                    ))}
+                  </span>
                 </button>
               </li>
             ))}

@@ -176,6 +176,10 @@ describe('project workspace', () => {
     renderApp('/projects/project-1')
     expect(await screen.findByText('Chapter 12')).toBeInTheDocument()
     expect(screen.getByText('Arrival · draft')).toBeInTheDocument()
+    expect(screen.getByRole('link', { name: '开始构思' })).toHaveAttribute(
+      'href',
+      '/projects/project-1/creation/start',
+    )
     fireEvent.change(screen.getByLabelText('Chapter title'), { target: { value: 'A new beginning' } })
     fireEvent.click(screen.getByRole('button', { name: 'Create chapter' }))
     await waitFor(() => expect(mockedApi.createChapter).toHaveBeenCalledWith('project-1', { title: 'A new beginning' }))
