@@ -102,5 +102,23 @@ The following are intentionally not committed:
 - `docs/design/` private design drafts and planning notes.
 - Real `workspaces/` novel projects and version snapshots.
 - `.env` files and local caches.
+- `.codegraph/` generated local code-intelligence indexes.
 
 Use public docs such as `docs/architecture.md` later for cleaned-up design documentation.
+
+## Optional local CodeGraph
+
+GuraNovel supports [CodeGraph](https://github.com/colbymchenry/codegraph) as an
+optional local development tool. It indexes the Python/FastAPI and
+TypeScript/React code into a local SQLite graph; it is not a runtime or CI
+dependency.
+
+```text
+codegraph init
+codegraph status
+codegraph explore "How does project creation reach the concept selection UI?"
+```
+
+The index auto-syncs while the CodeGraph server is active. Run
+`codegraph sync` manually when file watching is unavailable. Set
+`CODEGRAPH_TELEMETRY=0` for automated or agent-driven commands.
