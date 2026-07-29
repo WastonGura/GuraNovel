@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { Link, useNavigate } from 'react-router-dom'
+import { useNavigate } from 'react-router-dom'
 import {
   ApiError,
   getProjectCreationRun,
@@ -73,7 +73,6 @@ function ErrorView({ message, onRetry }: { message: string; onRetry?: () => void
           重试
         </button>
       )}
-      <Link className="back-link" to="/">返回项目列表</Link>
     </section>
   )
 }
@@ -226,6 +225,56 @@ function GateView({
 const requestError = '无法加载审核关卡，请检查网络后重试。'
 const notFoundError = '工作流未找到'
 
+function hasExactDecisions(actual: readonly string[], expected: readonly string[]): boolean {
+  return actual.length === expected.length && expected.every((decision) => actual.includes(decision))
+}
+
+function hasUsableConceptOptions(options: readonly ProjectCreationConceptOption[]): boolean {
+  return options.length > 0 && new Set(options.map((option) => option.id)).size === options.length
+}
+
+function isRenderableGateState(run: ProjectCreationRun, expectedRunId: string): boolean {
+  const action = run.pending_action
+  if (
+    run.id !== expectedRunId
+    || run.type !== 'project_creation'
+    || run.next_node !== null
+    || !run.awaiting_user
+    || !action
+    || action.status !== 'pending'
+  ) {
+    return false
+  }
+
+  if (
+    run.status === 'concept_options'
+    && run.current_node === 'concept_review'
+    && action.type === 'project_creation_concept_selection'
+  ) {
+    return (
+      hasExactDecisions(action.allowed_decisions, ['select', 'fuse'])
+      && (action.review_severity === 'clean' || action.review_severity === 'warning')
+      && action.blocking_issues.length === 0
+      && hasUsableConceptOptions(action.concept_options)
+    )
+  }
+
+  if (
+    run.status === 'revision_required'
+    && run.current_node === 'concept_revision'
+    && action.type === 'project_creation_concept_regeneration'
+  ) {
+    return (
+      hasExactDecisions(action.allowed_decisions, ['regenerate', 'feedback'])
+      && action.review_severity === 'blocking'
+      && action.blocking_issues.length > 0
+      && hasUsableConceptOptions(action.concept_options)
+    )
+  }
+
+  return false
+}
+
 export default function ConceptGate({ projectId, workflowRunId }: { projectId: string; workflowRunId: string }) {
   const navigate = useNavigate()
   const [run, setRun] = useState<ProjectCreationRun | null>(null)
@@ -233,8 +282,10 @@ export default function ConceptGate({ projectId, workflowRunId }: { projectId: s
   const [error, setError] = useState<string | null>(null)
   const [showRetry, setShowRetry] = useState(false)
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null)
+  const fetchEpochRef = useRef(0)
+  const routeEpochRef = useRef(0)
   const mountedRef = useRef(false)
-  const fetchGateRef = useRef<(() => Promise<void>) | null>(null)
+  const fetchGateRef = useRef<((expectedRouteEpoch?: number) => Promise<void>) | null>(null)
 
   useEffect(() => {
     mountedRef.current = true
@@ -248,26 +299,38 @@ export default function ConceptGate({ projectId, workflowRunId }: { projectId: s
     }
   }, [])
 
-  const fetchGateState = useCallback(async () => {
+  const fetchGateState = useCallback(async (expectedRouteEpoch = routeEpochRef.current) => {
+    if (expectedRouteEpoch !== routeEpochRef.current) return
+    const fetchEpoch = ++fetchEpochRef.current
     try {
       const fetched = await getProjectCreationRun(projectId, workflowRunId)
-      if (!mountedRef.current) return
+      if (
+        !mountedRef.current
+        || expectedRouteEpoch !== routeEpochRef.current
+        || fetchEpoch !== fetchEpochRef.current
+      ) return
+      stopPolling()
+      const renderable = isRenderableGateState(fetched, workflowRunId)
       setRun(fetched)
       setLoading(false)
       setError(null)
       setShowRetry(false)
 
-      stopPolling()
       if (
-        fetched.awaiting_user &&
-        fetched.pending_action?.type === 'project_creation_concept_regeneration'
+        renderable
+        && fetched.pending_action?.type === 'project_creation_concept_regeneration'
       ) {
         pollRef.current = setInterval(() => {
-          void fetchGateRef.current?.()
+          void fetchGateRef.current?.(expectedRouteEpoch)
         }, 5000)
       }
     } catch (caught: unknown) {
-      if (!mountedRef.current) return
+      if (
+        !mountedRef.current
+        || expectedRouteEpoch !== routeEpochRef.current
+        || fetchEpoch !== fetchEpochRef.current
+      ) return
+      stopPolling()
       setLoading(false)
       if (caught instanceof ApiError && caught.status === 404) {
         setError(notFoundError)
@@ -285,26 +348,37 @@ export default function ConceptGate({ projectId, workflowRunId }: { projectId: s
   })
 
   useEffect(() => {
+    const routeEpoch = ++routeEpochRef.current
     // eslint-disable-next-line react-hooks/set-state-in-effect
     setLoading(true)
     setError(null)
     setRun(null)
     stopPolling()
-    void fetchGateState()
-    return () => { stopPolling() }
+    void fetchGateState(routeEpoch)
+    return () => {
+      routeEpochRef.current += 1
+      fetchEpochRef.current += 1
+      stopPolling()
+    }
   }, [projectId, workflowRunId]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  const renderedRouteEpoch = routeEpochRef.current
 
   if (loading) return <LoadingView />
   if (error) return <ErrorView message={error} onRetry={showRetry ? () => { setLoading(true); void fetchGateState() } : undefined} />
 
   if (!run) return <ErrorView message={requestError} onRetry={() => { setLoading(true); void fetchGateState() }} />
 
+  if (!isRenderableGateState(run, workflowRunId)) {
+    return <ErrorView message="工作流状态无法继续，请返回项目。" />
+  }
+
   return (
     <GateView
       run={run}
       projectId={projectId}
       onResolved={() => navigate(`/projects/${projectId}`)}
-      onRegenerationResolved={fetchGateState}
+      onRegenerationResolved={() => fetchGateState(renderedRouteEpoch)}
     />
   )
 }
