@@ -62,6 +62,7 @@ function gate(overrides: Partial<ProjectCreationRun> = {}): ProjectCreationRun {
       status: 'pending',
       allowed_decisions: ['select', 'fuse'],
       review_severity: 'clean',
+      blocking_issues: [],
       concept_options: CONCEPT_OPTIONS,
     },
     ...overrides,
@@ -167,6 +168,7 @@ describe('ConceptGate', () => {
         status: 'pending',
         allowed_decisions: ['select', 'fuse'],
         review_severity: 'warning',
+        blocking_issues: [],
         concept_options: [CONCEPT_OPTIONS[0]],
       },
     }))
@@ -188,6 +190,7 @@ describe('ConceptGate', () => {
         status: 'pending',
         allowed_decisions: ['regenerate', 'feedback'],
         review_severity: 'blocking',
+        blocking_issues: [],
         concept_options: CONCEPT_OPTIONS,
       },
     }))
@@ -198,6 +201,103 @@ describe('ConceptGate', () => {
     expect(screen.getByText('首席编辑认为当前概念方案存在问题，需要重新生成。')).toBeInTheDocument()
     expect(screen.getByText('赛博浪人')).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: '选择这个概念' })).not.toBeInTheDocument()
+  })
+
+  it('shows allowlisted blocking issues and regenerates through the server action', async () => {
+    const blocked = gate({
+      status: 'revision_required',
+      current_node: 'concept_regeneration',
+      pending_action: {
+        id: 'action-1',
+        type: 'project_creation_concept_regeneration',
+        status: 'pending',
+        allowed_decisions: ['regenerate', 'feedback'],
+        review_severity: 'blocking',
+        blocking_issues: [],
+        concept_options: CONCEPT_OPTIONS,
+      },
+    })
+    Object.assign(blocked.pending_action!, {
+      blocking_issues: [{ code: 'premise_conflict', message: 'The premise conflicts with the requested tone.' }],
+    })
+    mockedApi.getProjectCreationRun.mockResolvedValueOnce(blocked).mockResolvedValueOnce(gate())
+    mockedApi.resolveProjectCreationAction.mockResolvedValue({ status: 'revision_required' })
+
+    renderGate()
+
+    expect(await screen.findByText('premise_conflict')).toBeInTheDocument()
+    expect(screen.getByRole('listitem')).toHaveTextContent(
+      'premise_conflict：The premise conflicts with the requested tone.',
+    )
+    fireEvent.click(screen.getByRole('button', { name: '重新生成概念' }))
+    expect(screen.getByRole('button', { name: '重新生成概念' })).toBeDisabled()
+    expect(screen.getByText('正在生成新的概念…')).toBeInTheDocument()
+    await waitFor(() => expect(mockedApi.resolveProjectCreationAction).toHaveBeenCalledWith(
+      'project-1', 'run-1', 'action-1', { decision: 'regenerate' },
+    ))
+    expect(await screen.findByText('审查通过')).toBeInTheDocument()
+  })
+
+  it('submits trimmed feedback through the server action and refreshes the gate', async () => {
+    const blocked = gate({
+      status: 'revision_required',
+      current_node: 'concept_regeneration',
+      pending_action: {
+        id: 'action-1',
+        type: 'project_creation_concept_regeneration',
+        status: 'pending',
+        allowed_decisions: ['feedback'],
+        review_severity: 'blocking',
+        blocking_issues: [{ code: 'premise_conflict', message: 'The premise conflicts with the requested tone.' }],
+        concept_options: CONCEPT_OPTIONS,
+      },
+    })
+    mockedApi.getProjectCreationRun.mockResolvedValueOnce(blocked).mockResolvedValueOnce(gate())
+    mockedApi.resolveProjectCreationAction.mockResolvedValue({ status: 'revision_required' })
+
+    renderGate()
+
+    fireEvent.change(await screen.findByRole('textbox', { name: '给编辑的反馈' }), {
+      target: { value: '  Keep the tone quieter.  ' },
+    })
+    fireEvent.click(screen.getByRole('button', { name: '提交反馈并重新生成' }))
+
+    await waitFor(() => expect(mockedApi.resolveProjectCreationAction).toHaveBeenCalledWith(
+      'project-1', 'run-1', 'action-1', { decision: 'feedback', feedback: 'Keep the tone quieter.' },
+    ))
+    expect(await screen.findByText('审查通过')).toBeInTheDocument()
+  })
+
+  it('preserves a backend-valid Unicode-limit feedback after whitespace normalization', async () => {
+    const blocked = gate({
+      status: 'revision_required',
+      current_node: 'concept_regeneration',
+      pending_action: {
+        id: 'action-1',
+        type: 'project_creation_concept_regeneration',
+        status: 'pending',
+        allowed_decisions: ['feedback'],
+        review_severity: 'blocking',
+        blocking_issues: [{ code: 'premise_conflict', message: 'The premise conflicts with the requested tone.' }],
+        concept_options: CONCEPT_OPTIONS,
+      },
+    })
+    const feedback = '😀'.repeat(1000)
+    mockedApi.getProjectCreationRun.mockResolvedValueOnce(blocked).mockResolvedValueOnce(gate())
+    mockedApi.resolveProjectCreationAction.mockResolvedValue({ status: 'revision_required' })
+
+    renderGate()
+
+    fireEvent.change(await screen.findByRole('textbox', { name: '给编辑的反馈' }), {
+      target: { value: `  ${feedback}  ` },
+    })
+    expect(screen.getByText('1000 / 1000')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '提交反馈并重新生成' })).toBeEnabled()
+    fireEvent.click(screen.getByRole('button', { name: '提交反馈并重新生成' }))
+
+    await waitFor(() => expect(mockedApi.resolveProjectCreationAction).toHaveBeenCalledWith(
+      'project-1', 'run-1', 'action-1', { decision: 'feedback', feedback },
+    ))
   })
 
   it('renders an empty concept grid when the server returns no options', async () => {
@@ -225,6 +325,7 @@ describe('ConceptGate', () => {
         status: 'pending',
         allowed_decisions: ['regenerate', 'feedback'],
         review_severity: 'blocking',
+        blocking_issues: [],
         concept_options: CONCEPT_OPTIONS,
       },
     }))
@@ -274,6 +375,7 @@ describe('ConceptGate', () => {
           status: 'pending',
           allowed_decisions: ['regenerate', 'feedback'],
           review_severity: 'blocking',
+          blocking_issues: [],
           concept_options: CONCEPT_OPTIONS,
         },
       }))
@@ -324,6 +426,7 @@ describe('ConceptGate', () => {
         status: 'pending',
         allowed_decisions: ['select', 'fuse'],
         review_severity: 'warning',
+        blocking_issues: [],
         concept_options: [CONCEPT_OPTIONS[2]],
       },
     }))

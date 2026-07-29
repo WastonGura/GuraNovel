@@ -31,6 +31,7 @@ function creationStarted(overrides: Partial<ProjectCreationStarted> = {}): Proje
       status: 'pending',
       allowed_decisions: ['approved', 'rejected'],
       review_severity: 'standard',
+      blocking_issues: [],
       concept_options: [],
     },
     ...overrides,

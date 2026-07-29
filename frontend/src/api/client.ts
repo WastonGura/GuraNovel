@@ -569,12 +569,18 @@ export interface ProjectCreationConceptOption {
   genres: string[]
 }
 
+export interface ProjectCreationBlockingIssue {
+  code: string
+  message: string
+}
+
 export interface ProjectCreationPendingAction {
   id: string
   type: string
   status: string
   allowed_decisions: string[]
   review_severity: string | null
+  blocking_issues: ProjectCreationBlockingIssue[]
   concept_options: ProjectCreationConceptOption[]
 }
 
@@ -606,6 +612,18 @@ function unicodeCodePointLength(value: string): number {
   return Array.from(value).length
 }
 
+function decodeProjectCreationBlockingIssue(value: unknown): ProjectCreationBlockingIssue {
+  const data = object(value)
+  const code = string(data.code)
+  const message = string(data.message)
+  if (
+    !/^[a-z][a-z0-9_-]{0,63}$/.test(code)
+    || unicodeCodePointLength(message) < 1
+    || unicodeCodePointLength(message) > 500
+  ) throw invalidResponse()
+  return { code, message }
+}
+
 function decodeProjectCreationConceptOption(value: unknown): ProjectCreationConceptOption {
   const data = object(value)
   const id = string(data.id)
@@ -634,13 +652,16 @@ function decodeProjectCreationPendingAction(value: unknown): ProjectCreationPend
   const data = object(value)
   if (
     !Array.isArray(data.allowed_decisions)
+    || !Array.isArray(data.blocking_issues)
     || !Array.isArray(data.concept_options)
+    || data.blocking_issues.length > 12
     || data.concept_options.length > 5
   ) throw invalidResponse()
   return {
     id: string(data.id), type: string(data.type), status: string(data.status),
     allowed_decisions: data.allowed_decisions.map(string),
     review_severity: nullableString(data.review_severity),
+    blocking_issues: data.blocking_issues.map(decodeProjectCreationBlockingIssue),
     concept_options: data.concept_options.map(decodeProjectCreationConceptOption),
   }
 }
@@ -678,6 +699,8 @@ export function getProjectCreationRun(projectId: string, workflowRunId: string):
 export type ResolveProjectCreationActionRequest =
   | { decision: 'select'; option_id: string }
   | { decision: 'fuse'; fused_concept: string }
+  | { decision: 'regenerate' }
+  | { decision: 'feedback'; feedback: string }
 
 export interface ResolveProjectCreationActionResponse {
   status: string

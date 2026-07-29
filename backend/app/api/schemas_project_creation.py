@@ -51,6 +51,15 @@ class ProjectCreationConceptOptionResponse(BaseModel):
     genres: tuple[ConceptGenre, ...] = Field(min_length=1, max_length=6)
 
 
+class ProjectCreationBlockingIssueResponse(BaseModel):
+    """Allowlisted, user-actionable detail from a blocking chief-editor finding."""
+
+    model_config = ConfigDict(extra="forbid", strict=True, frozen=True, from_attributes=True)
+
+    code: Annotated[str, StringConstraints(min_length=1, max_length=64, pattern=r"^[a-z][a-z0-9_-]{0,63}$")]
+    message: Annotated[str, StringConstraints(min_length=1, max_length=500)]
+
+
 class ProjectCreationPendingActionResponse(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True, frozen=True, from_attributes=True)
 
@@ -59,6 +68,9 @@ class ProjectCreationPendingActionResponse(BaseModel):
     status: Literal["pending"]
     allowed_decisions: tuple[str, ...]
     review_severity: Literal["blocking", "warning", "clean"] | None = None
+    blocking_issues: tuple[ProjectCreationBlockingIssueResponse, ...] = Field(
+        default_factory=tuple, max_length=12
+    )
     concept_options: tuple[ProjectCreationConceptOptionResponse, ...] = Field(
         default_factory=tuple, max_length=5
     )

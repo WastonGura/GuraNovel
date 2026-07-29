@@ -5,6 +5,7 @@ import {
   getProjectCreationRun,
   getProject,
   listProjects,
+  resolveProjectCreationAction,
   restoreDocument,
 } from './client'
 
@@ -68,6 +69,7 @@ describe('typed API client', () => {
         status: 'pending',
         allowed_decisions: ['select', 'fuse'],
         review_severity: 'clean',
+        blocking_issues: [],
         concept_options: [{
           id: 'glass-archive',
           title: 'The Glass Archive',
@@ -93,6 +95,7 @@ describe('typed API client', () => {
         status: 'pending',
         allowed_decisions: ['select', 'fuse'],
         review_severity: 'clean',
+        blocking_issues: [],
         concept_options: [{
           id: 'glass-archive',
           title: 'The Glass Archive',
@@ -119,6 +122,7 @@ describe('typed API client', () => {
         status: 'pending',
         allowed_decisions: ['select'],
         review_severity: 'clean',
+        blocking_issues: [],
         concept_options: [{
           id: 'emoji-concept',
           title,
@@ -132,6 +136,52 @@ describe('typed API client', () => {
     await expect(getProjectCreationRun('project-1', 'run-emoji')).resolves.toMatchObject({
       pending_action: { concept_options: [{ title }] },
     })
+  })
+
+  it('decodes only allowlisted blocking issues and posts server-authorized regeneration decisions', async () => {
+    mockJsonResponse({
+      id: 'run-blocked',
+      type: 'project_creation',
+      status: 'revision_required',
+      current_node: 'concept_revision',
+      next_node: null,
+      awaiting_user: true,
+      pending_action: {
+        id: 'action-server-id',
+        type: 'project_creation_concept_regeneration',
+        status: 'pending',
+        allowed_decisions: ['regenerate', 'feedback'],
+        review_severity: 'blocking',
+        blocking_issues: [{
+          code: 'premise_conflict',
+          message: 'The premise conflicts with the requested tone.',
+          raw_report: 'must not survive decoding',
+        }],
+        concept_options: [],
+        review_report_id: 'must-not-survive',
+      },
+    })
+
+    await expect(getProjectCreationRun('project-1', 'run-blocked')).resolves.toMatchObject({
+      pending_action: {
+        blocking_issues: [{
+          code: 'premise_conflict',
+          message: 'The premise conflicts with the requested tone.',
+        }],
+      },
+    })
+
+    mockJsonResponse({ status: 'revision_required' })
+    await expect(resolveProjectCreationAction(
+      'project-1', 'run-blocked', 'action-server-id', { decision: 'regenerate' },
+    )).resolves.toEqual({ status: 'revision_required' })
+    expect(fetch).toHaveBeenLastCalledWith(
+      '/api/v1/projects/project-1/creation/run-blocked/actions/action-server-id/resolve',
+      expect.objectContaining({
+        method: 'POST',
+        body: JSON.stringify({ decision: 'regenerate' }),
+      }),
+    )
   })
 
   it('maps a backend 409 envelope to a safe ApiError without details', async () => {

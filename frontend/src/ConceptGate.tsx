@@ -3,6 +3,7 @@ import { Link, useNavigate } from 'react-router-dom'
 import {
   ApiError,
   getProjectCreationRun,
+  resolveProjectCreationAction,
   type ProjectCreationConceptOption,
   type ProjectCreationRun,
 } from './api/client'
@@ -77,14 +78,85 @@ function ErrorView({ message, onRetry }: { message: string; onRetry?: () => void
   )
 }
 
+function RegenerationControls({
+  projectId,
+  workflowRunId,
+  actionId,
+  allowedDecisions,
+  onResolved,
+}: {
+  projectId: string
+  workflowRunId: string
+  actionId: string
+  allowedDecisions: string[]
+  onResolved: () => Promise<void>
+}) {
+  const [feedback, setFeedback] = useState('')
+  const [resolving, setResolving] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const canRegenerate = allowedDecisions.includes('regenerate')
+  const canSendFeedback = allowedDecisions.includes('feedback')
+  const normalizedFeedback = feedback.trim()
+  const feedbackLength = Array.from(normalizedFeedback).length
+  const feedbackIsValid = feedbackLength >= 1 && feedbackLength <= 1000
+
+  async function resolve(body: { decision: 'regenerate' } | { decision: 'feedback'; feedback: string }) {
+    if (resolving) return
+    setResolving(true)
+    setError(null)
+    try {
+      await resolveProjectCreationAction(projectId, workflowRunId, actionId, body)
+      await onResolved()
+    } catch {
+      setError('操作未完成，请稍后重试。')
+    } finally {
+      setResolving(false)
+    }
+  }
+
+  return (
+    <div className="regeneration-controls">
+      {error && <p className="notice" role="alert">{error}</p>}
+      {resolving && <p className="muted" role="status">正在生成新的概念…</p>}
+      {canRegenerate && (
+        <button type="button" onClick={() => void resolve({ decision: 'regenerate' })} disabled={resolving}>
+          重新生成概念
+        </button>
+      )}
+      {canSendFeedback && (
+        <form onSubmit={(event) => {
+          event.preventDefault()
+          if (feedbackIsValid) void resolve({ decision: 'feedback', feedback: normalizedFeedback })
+        }}>
+          <label>
+            给编辑的反馈
+            <textarea
+              value={feedback}
+              onChange={(event) => setFeedback(event.target.value)}
+              rows={3}
+              disabled={resolving}
+            />
+          </label>
+          <span className="muted">{feedbackLength} / 1000</span>
+          <button type="submit" disabled={resolving || !feedbackIsValid}>
+            提交反馈并重新生成
+          </button>
+        </form>
+      )}
+    </div>
+  )
+}
+
 function GateView({
   run,
   projectId,
   onResolved,
+  onRegenerationResolved,
 }: {
   run: ProjectCreationRun
   projectId: string
   onResolved: () => void
+  onRegenerationResolved: () => Promise<void>
 }) {
   const action = run.pending_action
   const concepts = action?.concept_options ?? []
@@ -101,10 +173,24 @@ function GateView({
         {severity && <SeverityBadge severity={severity} />}
       </div>
 
-      {severity === 'blocking' && (
+      {severity === 'blocking' && action && (
         <div className="gate-blocking" role="alert">
           <h2>需要修改</h2>
           <p className="muted">首席编辑认为当前概念方案存在问题，需要重新生成。</p>
+          {action.blocking_issues.length > 0 && (
+            <ul aria-label="需要处理的问题">
+              {action.blocking_issues.map((issue) => (
+                <li key={issue.code}><strong>{issue.code}</strong>：{issue.message}</li>
+              ))}
+            </ul>
+          )}
+          <RegenerationControls
+            projectId={projectId}
+            workflowRunId={run.id}
+            actionId={action.id}
+            allowedDecisions={action.allowed_decisions}
+            onResolved={onRegenerationResolved}
+          />
         </div>
       )}
 
@@ -213,5 +299,12 @@ export default function ConceptGate({ projectId, workflowRunId }: { projectId: s
 
   if (!run) return <ErrorView message={requestError} onRetry={() => { setLoading(true); void fetchGateState() }} />
 
-  return <GateView run={run} projectId={projectId} onResolved={() => navigate(`/projects/${projectId}`)} />
+  return (
+    <GateView
+      run={run}
+      projectId={projectId}
+      onResolved={() => navigate(`/projects/${projectId}`)}
+      onRegenerationResolved={fetchGateState}
+    />
+  )
 }
