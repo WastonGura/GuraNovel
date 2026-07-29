@@ -1,8 +1,12 @@
+from uuid import UUID
+
 import pytest
 from pydantic import ValidationError
 
 from app.api.schemas_project_creation import (
+    ProjectCreationBlockingIssueResponse,
     ProjectCreationConceptOptionResponse,
+    ProjectCreationPendingActionResponse,
     ResolveProjectCreationActionRequest,
     StartProjectCreationRequest,
 )
@@ -93,4 +97,29 @@ def test_project_creation_concept_option_response_is_strict_and_allowlisted() ->
                 **option.model_dump(),
                 "provider_payload": "must not cross the public boundary",
             }
+        )
+
+
+def test_project_creation_blocking_issue_response_is_strict_and_allowlisted() -> None:
+    issue = ProjectCreationBlockingIssueResponse.model_validate(
+        {"code": "premise_conflict", "message": "The premise conflicts with the requested tone."}
+    )
+    pending = ProjectCreationPendingActionResponse.model_validate(
+        {
+            "id": UUID("00000000-0000-0000-0000-000000000001"),
+            "type": "project_creation_concept_regeneration",
+            "status": "pending",
+            "allowed_decisions": ("regenerate", "feedback"),
+            "review_severity": "blocking",
+            "blocking_issues": (issue,),
+            "concept_options": (),
+        }
+    )
+
+    assert pending.model_dump()["blocking_issues"] == (
+        {"code": "premise_conflict", "message": "The premise conflicts with the requested tone."},
+    )
+    with pytest.raises(ValidationError):
+        ProjectCreationBlockingIssueResponse.model_validate(
+            {**issue.model_dump(), "raw_report": "must not cross the public boundary"}
         )

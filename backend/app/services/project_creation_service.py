@@ -62,12 +62,19 @@ class ProjectCreationConceptOptionRead:
 
 
 @dataclass(frozen=True)
+class ProjectCreationBlockingIssueRead:
+    code: str
+    message: str
+
+
+@dataclass(frozen=True)
 class ProjectCreationPendingActionRead:
     id: UUID
     type: str
     status: str
     allowed_decisions: tuple[str, ...]
     review_severity: str | None = None
+    blocking_issues: tuple[ProjectCreationBlockingIssueRead, ...] = ()
     concept_options: tuple[ProjectCreationConceptOptionRead, ...] = ()
 
 
@@ -88,6 +95,7 @@ class _Issue65Binding:
     document_id: UUID
     version_id: UUID
     review_severity: str
+    blocking_issues: tuple[ProjectCreationBlockingIssueRead, ...]
     concepts: ConceptGenerationOutput
 
 
@@ -712,12 +720,16 @@ class ProjectCreationService:
                 else ("regenerate", "feedback")
             )
             pending = ProjectCreationPendingActionRead(
-                action.id,
-                action.request_type,
-                action.status,
-                decisions,
-                binding.review_severity,
-                tuple(
+                id=action.id,
+                type=action.request_type,
+                status=action.status,
+                allowed_decisions=decisions,
+                review_severity=binding.review_severity,
+                blocking_issues=tuple(
+                    ProjectCreationBlockingIssueRead(issue.code, issue.message)
+                    for issue in binding.blocking_issues
+                ),
+                concept_options=tuple(
                     ProjectCreationConceptOptionRead(
                         option.id,
                         option.title,
@@ -897,7 +909,17 @@ class ProjectCreationService:
             option.id for option in concepts.options
         ]:
             raise WorkflowStateError("Project creation workflow state is inconsistent.")
-        return _Issue65Binding(report, document_id, version_id, severity, concepts)
+        return _Issue65Binding(
+            report,
+            document_id,
+            version_id,
+            severity,
+            tuple(
+                ProjectCreationBlockingIssueRead(issue.code, issue.message)
+                for issue in reviewed.blocking_issues
+            ),
+            concepts,
+        )
 
     async def _validate_existing_runs_before_start(self, project_id: UUID) -> None:
         """Fail closed unless every earlier creation run is durably terminal."""

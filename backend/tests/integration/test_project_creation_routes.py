@@ -49,8 +49,10 @@ class Blocking:
     async def review_concepts(self, concepts, profile):
         return {
             "passed": False,
-            "summary": "private review prose",
-            "blocking_issues": [{"code": "block", "message": "private review prose"}],
+            "summary": "unsafe report summary must stay private",
+            "blocking_issues": [
+                {"code": "premise_conflict", "message": "The premise conflicts with the requested tone."}
+            ],
             "warnings": [],
             "notes": [],
         }
@@ -232,6 +234,13 @@ async def test_http_blocking_gate_rejects_illegal_decisions(
     ).json()
     action = body["pending_action"]
     assert action["allowed_decisions"] == ["regenerate", "feedback"]
+    assert action["blocking_issues"] == [
+        {"code": "premise_conflict", "message": "The premise conflicts with the requested tone."}
+    ]
+    assert set(action) == {
+        "id", "type", "status", "allowed_decisions", "review_severity", "blocking_issues", "concept_options"
+    }
+    assert "unsafe report summary must stay private" not in body.__str__()
     assert [option["id"] for option in action["concept_options"]] == ["safe-option"]
     before = tuple(
         [
@@ -296,6 +305,7 @@ async def test_http_corrupt_read_and_logs_are_safe(
         "status",
         "allowed_decisions",
         "review_severity",
+        "blocking_issues",
         "concept_options",
     }
     assert set(read.json()["pending_action"]["concept_options"][0]) == {
