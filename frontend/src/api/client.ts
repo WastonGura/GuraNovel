@@ -602,6 +602,10 @@ export interface ProjectCreationRun {
   pending_action: ProjectCreationPendingAction | null
 }
 
+function unicodeCodePointLength(value: string): number {
+  return Array.from(value).length
+}
+
 function decodeProjectCreationConceptOption(value: unknown): ProjectCreationConceptOption {
   const data = object(value)
   const id = string(data.id)
@@ -610,9 +614,9 @@ function decodeProjectCreationConceptOption(value: unknown): ProjectCreationConc
   const premise = string(data.premise)
   if (
     !/^[a-z][a-z0-9-]{0,63}$/.test(id)
-    || !title || title.length > 160 || /[\r\n]/.test(title)
-    || !logline || logline.length > 600 || /[\r\n]/.test(logline)
-    || !premise || premise.length > 2000 || /[\r\n]/.test(premise)
+    || !title || unicodeCodePointLength(title) > 160 || /[\r\n]/.test(title)
+    || !logline || unicodeCodePointLength(logline) > 600 || /[\r\n]/.test(logline)
+    || !premise || unicodeCodePointLength(premise) > 2000 || /[\r\n]/.test(premise)
     || !Array.isArray(data.genres)
     || data.genres.length < 1
     || data.genres.length > 6
@@ -620,7 +624,7 @@ function decodeProjectCreationConceptOption(value: unknown): ProjectCreationConc
     throw invalidResponse()
   }
   const genres = data.genres.map(string)
-  if (genres.some((genre) => !genre || genre.length > 256 || /[,\r\n]/.test(genre))) {
+  if (genres.some((genre) => !genre || unicodeCodePointLength(genre) > 256 || /[,\r\n]/.test(genre))) {
     throw invalidResponse()
   }
   return { id, title, logline, premise, genres }
