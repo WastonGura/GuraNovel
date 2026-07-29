@@ -36,6 +36,7 @@ docs/design/
 *.sqlite
 *.sqlite3
 pgdata/
+.codegraph/
 
 # OS / editor
 .DS_Store
