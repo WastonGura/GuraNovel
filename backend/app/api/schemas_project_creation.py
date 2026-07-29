@@ -10,6 +10,21 @@ NonBlankText = Annotated[
     str, StringConstraints(strip_whitespace=True, min_length=1, max_length=500)
 ]
 UserSeed = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=4_000)]
+ConceptOptionId = Annotated[
+    str, StringConstraints(pattern=r"^[a-z][a-z0-9-]{0,63}$")
+]
+ConceptTitle = Annotated[
+    str, StringConstraints(min_length=1, max_length=160, pattern=r"^[^\r\n]+$")
+]
+ConceptLogline = Annotated[
+    str, StringConstraints(min_length=1, max_length=600, pattern=r"^[^\r\n]+$")
+]
+ConceptPremise = Annotated[
+    str, StringConstraints(min_length=1, max_length=2_000, pattern=r"^[^\r\n]+$")
+]
+ConceptGenre = Annotated[
+    str, StringConstraints(min_length=1, max_length=256, pattern=r"^[^,\r\n]+$")
+]
 
 
 class StartProjectCreationRequest(BaseModel):
@@ -24,15 +39,34 @@ class StartProjectCreationRequest(BaseModel):
     style_preference: NonBlankText | None = None
 
 
+class ProjectCreationConceptOptionResponse(BaseModel):
+    """Allowlisted projection of one server-validated concept option."""
+
+    model_config = ConfigDict(extra="forbid", strict=True, frozen=True, from_attributes=True)
+
+    id: ConceptOptionId
+    title: ConceptTitle
+    logline: ConceptLogline
+    premise: ConceptPremise
+    genres: tuple[ConceptGenre, ...] = Field(min_length=1, max_length=6)
+
+
 class ProjectCreationPendingActionResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True, frozen=True, from_attributes=True)
+
     id: UUID
     type: str
     status: Literal["pending"]
     allowed_decisions: tuple[str, ...]
     review_severity: Literal["blocking", "warning", "clean"] | None = None
+    concept_options: tuple[ProjectCreationConceptOptionResponse, ...] = Field(
+        default_factory=tuple, max_length=5
+    )
 
 
 class ProjectCreationRunResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True, frozen=True, from_attributes=True)
+
     id: UUID
     type: str
     status: str

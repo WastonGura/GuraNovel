@@ -11,9 +11,17 @@ colors:
   primary: "#2563EB"
   accent-hover: "#1D4ED8"
   accent-soft: "#DBEAFE"
+  neutral-soft: "#E2E8F0"
   status-success: "#15803D"
+  status-success-soft: "#DCFCE7"
   status-warning: "#B45309"
+  status-warning-canvas: "#FFFBEB"
+  status-warning-soft: "#FEF3C7"
+  status-warning-border: "#FDE68A"
   status-danger: "#B91C1C"
+  status-danger-canvas: "#FEF2F2"
+  status-danger-soft: "#FEE2E2"
+  status-danger-border: "#FECACA"
 typography:
   headline-lg:
     fontFamily: 'Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif'
@@ -89,11 +97,26 @@ components:
   interactive-link:
     textColor: "{colors.primary}"
   status-approved:
+    backgroundColor: "{colors.status-success-soft}"
     textColor: "{colors.status-success}"
   status-attention:
+    backgroundColor: "{colors.status-warning-soft}"
     textColor: "{colors.status-warning}"
+  status-attention-panel:
+    backgroundColor: "{colors.status-warning-canvas}"
+    textColor: "{colors.ink}"
+  status-attention-border:
+    backgroundColor: "{colors.status-warning-border}"
   status-blocked:
+    backgroundColor: "{colors.status-danger-soft}"
     textColor: "{colors.status-danger}"
+  status-blocked-panel:
+    backgroundColor: "{colors.status-danger-canvas}"
+    textColor: "{colors.ink}"
+  status-blocked-border:
+    backgroundColor: "{colors.status-danger-border}"
+  loading-placeholder:
+    backgroundColor: "{colors.neutral-soft}"
 ---
 
 ## Overview

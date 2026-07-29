@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   ApiError,
   getChapterProduction,
+  getProjectCreationRun,
   getProject,
   listProjects,
   restoreDocument,
@@ -51,6 +52,86 @@ describe('typed API client', () => {
     mockJsonResponse(project)
 
     await expect(getProject('project-1')).resolves.toEqual(project)
+  })
+
+  it('decodes only allowlisted structured concept options from a project creation run', async () => {
+    mockJsonResponse({
+      id: 'run-1',
+      type: 'project_creation',
+      status: 'concept_options',
+      current_node: 'concept_review',
+      next_node: null,
+      awaiting_user: true,
+      pending_action: {
+        id: 'action-server-id',
+        type: 'project_creation_concept_selection',
+        status: 'pending',
+        allowed_decisions: ['select', 'fuse'],
+        review_severity: 'clean',
+        concept_options: [{
+          id: 'glass-archive',
+          title: 'The Glass Archive',
+          logline: 'An archivist discovers a city preserved in glass.',
+          premise: 'Every recovered memory changes the city that contains it.',
+          genres: ['fantasy', 'mystery'],
+          provider_payload: 'must not survive decoding',
+        }],
+        concept_document_id: 'must-not-survive',
+      },
+    })
+
+    await expect(getProjectCreationRun('project-1', 'run-1')).resolves.toEqual({
+      id: 'run-1',
+      type: 'project_creation',
+      status: 'concept_options',
+      current_node: 'concept_review',
+      next_node: null,
+      awaiting_user: true,
+      pending_action: {
+        id: 'action-server-id',
+        type: 'project_creation_concept_selection',
+        status: 'pending',
+        allowed_decisions: ['select', 'fuse'],
+        review_severity: 'clean',
+        concept_options: [{
+          id: 'glass-archive',
+          title: 'The Glass Archive',
+          logline: 'An archivist discovers a city preserved in glass.',
+          premise: 'Every recovered memory changes the city that contains it.',
+          genres: ['fantasy', 'mystery'],
+        }],
+      },
+    })
+  })
+
+  it('accepts concept option strings at the backend Unicode code-point limit', async () => {
+    const title = '😀'.repeat(160)
+    mockJsonResponse({
+      id: 'run-emoji',
+      type: 'project_creation',
+      status: 'concept_options',
+      current_node: 'concept_review',
+      next_node: null,
+      awaiting_user: true,
+      pending_action: {
+        id: 'action-server-id',
+        type: 'project_creation_concept_selection',
+        status: 'pending',
+        allowed_decisions: ['select'],
+        review_severity: 'clean',
+        concept_options: [{
+          id: 'emoji-concept',
+          title,
+          logline: 'A valid server concept option.',
+          premise: 'The frontend must apply the same Unicode length semantics as the backend.',
+          genres: ['fantasy'],
+        }],
+      },
+    })
+
+    await expect(getProjectCreationRun('project-1', 'run-emoji')).resolves.toMatchObject({
+      pending_action: { concept_options: [{ title }] },
+    })
   })
 
   it('maps a backend 409 envelope to a safe ApiError without details', async () => {

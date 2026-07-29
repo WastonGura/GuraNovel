@@ -119,8 +119,19 @@ async def test_http_start_selection_foreign_and_replay(
     assert (
         body["status"] == "concept_options"
         and action["allowed_decisions"] == ["select", "fuse"]
+        and action["concept_options"]
+        == [
+            {
+                "id": "safe-option",
+                "title": "Safe Option",
+                "logline": "A safe logline.",
+                "premise": "A safe premise.",
+                "genres": ["fiction"],
+            }
+        ]
         and "secret seed" not in started.text
     )
+    assert "concept_document_id" not in action and "concept_version_id" not in action
     assert (await project_creation_client.get(f"{url(second_id)}/{body['id']}")).status_code == 404
     assert (
         await project_creation_client.post(
@@ -221,6 +232,7 @@ async def test_http_blocking_gate_rejects_illegal_decisions(
     ).json()
     action = body["pending_action"]
     assert action["allowed_decisions"] == ["regenerate", "feedback"]
+    assert [option["id"] for option in action["concept_options"]] == ["safe-option"]
     before = tuple(
         [
             await async_session.scalar(select(func.count()).select_from(m))
@@ -284,6 +296,14 @@ async def test_http_corrupt_read_and_logs_are_safe(
         "status",
         "allowed_decisions",
         "review_severity",
+        "concept_options",
+    }
+    assert set(read.json()["pending_action"]["concept_options"][0]) == {
+        "id",
+        "title",
+        "logline",
+        "premise",
+        "genres",
     }
     run = await async_session.get(WorkflowRun, body["id"])
     run.status, run.metadata_ = "corrupt", {"secret": "corrupt-secret"}

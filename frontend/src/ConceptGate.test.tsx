@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, act } from '@testing-library/react'
+import { cleanup, fireEvent, render, screen, act, waitFor } from '@testing-library/react'
 import { MemoryRouter } from 'react-router-dom'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { ProjectCreationRun } from './api/client'
@@ -6,7 +6,7 @@ import ConceptGate from './ConceptGate'
 
 vi.mock('./api/client', () => ({
   getProjectCreationRun: vi.fn(),
-  readDocumentContent: vi.fn(),
+  resolveProjectCreationAction: vi.fn(),
   ApiError: class ApiError extends Error {
     status: number
     code: string
@@ -24,36 +24,29 @@ const mockedApi = vi.mocked(api)
 
 // ── Helpers ─────────────────────────────────────────────────
 
-const CONCEPT_MARKDOWN = `# Concept Options
-
-## Option \`cyber-ronin\`: 赛博浪人
-
-一名被遗弃在科技废土中的改造人武士，寻找最后的净土。
-
-在近未来日本，赛博改造技术已经普及，但社会崩溃后只剩下废墟和割据的军阀。主人公是一位被遗弃的军用级改造人，体内植入了禁忌的AI核心。
-
-Genres: 赛博朋克, 武侠, 冒险
-
-## Option \`silk-empire\`: 丝绸帝国
-
-一位商队少女在丝绸之路上周旋于帝国之间，用智慧和勇气开辟新的贸易路线。
-
-公元7世纪，丝绸之路最繁荣的时期，一位来自西域的少女继承父亲的商队，在各大帝国之间寻找生存之道。
-
-Genres: 历史, 冒险, 政治
-
-## Option \`void-song\`: 虚空之歌
-
-宇宙深处的音乐信号中隐藏着一个失落文明的最后讯息，一支探险队为此踏上未知旅程。
-
-23世纪，人类在太阳系外发现了第一个外星文明的遗迹——一段无法解读的音乐信号。一支由科学家和探险家组成的队伍被派往信号源头。
-
-Genres: 科幻, 探险, 悬疑
-`
-
-function conceptDoc() {
-  return { document_id: 'doc-concept', version_id: 'v1', content: CONCEPT_MARKDOWN }
-}
+const CONCEPT_OPTIONS = [
+  {
+    id: 'cyber-ronin',
+    title: '赛博浪人',
+    logline: '一名被遗弃在科技废土中的改造人武士，寻找最后的净土。',
+    premise: '在近未来日本，赛博改造技术已经普及，但社会崩溃后只剩下废墟和割据的军阀。',
+    genres: ['赛博朋克', '武侠', '冒险'],
+  },
+  {
+    id: 'silk-empire',
+    title: '丝绸帝国',
+    logline: '一位商队少女在丝绸之路上周旋于帝国之间。',
+    premise: '公元7世纪，一位来自西域的少女继承父亲的商队。',
+    genres: ['历史', '冒险', '政治'],
+  },
+  {
+    id: 'void-song',
+    title: '虚空之歌',
+    logline: '宇宙深处的音乐信号中隐藏着失落文明的讯息。',
+    premise: '23世纪，一支探险队被派往未知的信号源头。',
+    genres: ['科幻', '探险', '悬疑'],
+  },
+]
 
 function gate(overrides: Partial<ProjectCreationRun> = {}): ProjectCreationRun {
   return {
@@ -69,9 +62,7 @@ function gate(overrides: Partial<ProjectCreationRun> = {}): ProjectCreationRun {
       status: 'pending',
       allowed_decisions: ['select', 'fuse'],
       review_severity: 'clean',
-      concept_document_id: 'doc-concept',
-      concept_version_id: 'v1',
-      options: ['cyber-ronin', 'silk-empire', 'void-song'],
+      concept_options: CONCEPT_OPTIONS,
     },
     ...overrides,
   }
@@ -127,7 +118,6 @@ describe('ConceptGate', () => {
     mockedApi.getProjectCreationRun
       .mockRejectedValueOnce(new Error('Connection refused'))
       .mockResolvedValueOnce(gate())
-    mockedApi.readDocumentContent.mockResolvedValue(conceptDoc())
 
     renderGate()
     expect(await screen.findByRole('alert')).toHaveTextContent('无法加载审核关卡')
@@ -139,7 +129,6 @@ describe('ConceptGate', () => {
 
   it('renders clean gate with green badge and concept cards', async () => {
     mockedApi.getProjectCreationRun.mockResolvedValue(gate())
-    mockedApi.readDocumentContent.mockResolvedValue(conceptDoc())
 
     renderGate()
 
@@ -153,6 +142,23 @@ describe('ConceptGate', () => {
     expect(screen.getByText('科幻')).toBeInTheDocument()
   })
 
+  it('selects only a server-returned option through the server-returned action', async () => {
+    mockedApi.getProjectCreationRun.mockResolvedValue(gate())
+    mockedApi.resolveProjectCreationAction.mockResolvedValue({ status: 'concept_selected' })
+
+    renderGate()
+
+    fireEvent.click(await screen.findByRole('button', { name: /赛博浪人/ }))
+    fireEvent.click(screen.getByRole('button', { name: '选择这个概念' }))
+
+    await waitFor(() => expect(mockedApi.resolveProjectCreationAction).toHaveBeenCalledWith(
+      'project-1',
+      'run-1',
+      'action-1',
+      { decision: 'select', option_id: 'cyber-ronin' },
+    ))
+  })
+
   it('renders warning gate with yellow badge and warnings section', async () => {
     mockedApi.getProjectCreationRun.mockResolvedValue(gate({
       pending_action: {
@@ -161,12 +167,9 @@ describe('ConceptGate', () => {
         status: 'pending',
         allowed_decisions: ['select', 'fuse'],
         review_severity: 'warning',
-        concept_document_id: 'doc-concept',
-        concept_version_id: 'v1',
-        options: ['cyber-ronin'],
+        concept_options: [CONCEPT_OPTIONS[0]],
       },
     }))
-    mockedApi.readDocumentContent.mockResolvedValue(conceptDoc())
 
     renderGate()
 
@@ -185,29 +188,30 @@ describe('ConceptGate', () => {
         status: 'pending',
         allowed_decisions: ['regenerate', 'feedback'],
         review_severity: 'blocking',
-        concept_document_id: 'doc-concept',
-        concept_version_id: 'v1',
-        options: undefined,
+        concept_options: CONCEPT_OPTIONS,
       },
     }))
-    mockedApi.readDocumentContent.mockResolvedValue(conceptDoc())
 
     renderGate()
 
     expect(await screen.findByRole('status')).toHaveTextContent('需要修改')
     expect(screen.getByText('首席编辑认为当前概念方案存在问题，需要重新生成。')).toBeInTheDocument()
     expect(screen.getByText('赛博浪人')).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: '选择这个概念' })).not.toBeInTheDocument()
   })
 
-  it('renders gate without errors when document fetch fails', async () => {
-    mockedApi.getProjectCreationRun.mockResolvedValue(gate())
-    mockedApi.readDocumentContent.mockRejectedValue(new Error('Document not found'))
+  it('renders an empty concept grid when the server returns no options', async () => {
+    mockedApi.getProjectCreationRun.mockResolvedValue(gate({
+      pending_action: {
+        ...gate().pending_action!,
+        concept_options: [],
+      },
+    }))
 
     renderGate()
 
     expect(await screen.findByText('审查通过')).toBeInTheDocument()
-    const grid = document.querySelector('.concept-grid')
-    expect(grid).toBeInTheDocument()
+    expect(document.querySelector('.concept-options')).toBeInTheDocument()
   })
 
   it('polls every 5 seconds when awaiting_user and regeneration type', async () => {
@@ -221,11 +225,9 @@ describe('ConceptGate', () => {
         status: 'pending',
         allowed_decisions: ['regenerate', 'feedback'],
         review_severity: 'blocking',
-        concept_document_id: 'doc-concept',
-        concept_version_id: 'v1',
+        concept_options: CONCEPT_OPTIONS,
       },
     }))
-    mockedApi.readDocumentContent.mockResolvedValue(conceptDoc())
 
     renderGate()
 
@@ -248,7 +250,6 @@ describe('ConceptGate', () => {
     vi.useFakeTimers()
 
     mockedApi.getProjectCreationRun.mockResolvedValue(gate())
-    mockedApi.readDocumentContent.mockResolvedValue(conceptDoc())
 
     renderGate()
 
@@ -273,13 +274,10 @@ describe('ConceptGate', () => {
           status: 'pending',
           allowed_decisions: ['regenerate', 'feedback'],
           review_severity: 'blocking',
-          concept_document_id: 'doc-concept',
-          concept_version_id: 'v1',
+          concept_options: CONCEPT_OPTIONS,
         },
       }))
       .mockResolvedValueOnce(gate())
-
-    mockedApi.readDocumentContent.mockResolvedValue(conceptDoc())
 
     renderGate()
 
@@ -296,9 +294,8 @@ describe('ConceptGate', () => {
     expect(mockedApi.getProjectCreationRun).toHaveBeenCalledTimes(2)
   })
 
-  it('parses all genre tags across cards', async () => {
+  it('renders all server-returned genre tags across cards', async () => {
     mockedApi.getProjectCreationRun.mockResolvedValue(gate())
-    mockedApi.readDocumentContent.mockResolvedValue(conceptDoc())
 
     renderGate()
 
@@ -316,7 +313,6 @@ describe('ConceptGate', () => {
 
   it('refetches when projectId or workflowRunId changes', async () => {
     mockedApi.getProjectCreationRun.mockResolvedValue(gate())
-    mockedApi.readDocumentContent.mockResolvedValue(conceptDoc())
 
     const { rerender } = renderGate()
     await screen.findByText('审查通过')
@@ -328,9 +324,7 @@ describe('ConceptGate', () => {
         status: 'pending',
         allowed_decisions: ['select', 'fuse'],
         review_severity: 'warning',
-        concept_document_id: 'doc-concept-2',
-        concept_version_id: 'v2',
-        options: ['void-song'],
+        concept_options: [CONCEPT_OPTIONS[2]],
       },
     }))
 
