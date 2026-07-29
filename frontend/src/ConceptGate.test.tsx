@@ -48,6 +48,18 @@ const CONCEPT_OPTIONS = [
   },
 ]
 
+const BLOCKING_ISSUES = [{ code: 'premise_conflict', message: 'The premise conflicts with the requested tone.' }]
+
+function deferred<T>() {
+  let resolve!: (value: T) => void
+  let reject!: (reason?: unknown) => void
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise
+    reject = rejectPromise
+  })
+  return { promise, resolve, reject }
+}
+
 function gate(overrides: Partial<ProjectCreationRun> = {}): ProjectCreationRun {
   return {
     id: 'run-1',
@@ -183,14 +195,14 @@ describe('ConceptGate', () => {
   it('renders blocking gate with red badge and blocking section', async () => {
     mockedApi.getProjectCreationRun.mockResolvedValue(gate({
       status: 'revision_required',
-      current_node: 'concept_regeneration',
+      current_node: 'concept_revision',
       pending_action: {
         id: 'action-1',
         type: 'project_creation_concept_regeneration',
         status: 'pending',
         allowed_decisions: ['regenerate', 'feedback'],
         review_severity: 'blocking',
-        blocking_issues: [],
+        blocking_issues: BLOCKING_ISSUES,
         concept_options: CONCEPT_OPTIONS,
       },
     }))
@@ -206,14 +218,14 @@ describe('ConceptGate', () => {
   it('shows allowlisted blocking issues and regenerates through the server action', async () => {
     const blocked = gate({
       status: 'revision_required',
-      current_node: 'concept_regeneration',
+      current_node: 'concept_revision',
       pending_action: {
         id: 'action-1',
         type: 'project_creation_concept_regeneration',
         status: 'pending',
         allowed_decisions: ['regenerate', 'feedback'],
         review_severity: 'blocking',
-        blocking_issues: [],
+        blocking_issues: BLOCKING_ISSUES,
         concept_options: CONCEPT_OPTIONS,
       },
     })
@@ -241,12 +253,12 @@ describe('ConceptGate', () => {
   it('submits trimmed feedback through the server action and refreshes the gate', async () => {
     const blocked = gate({
       status: 'revision_required',
-      current_node: 'concept_regeneration',
+      current_node: 'concept_revision',
       pending_action: {
         id: 'action-1',
         type: 'project_creation_concept_regeneration',
         status: 'pending',
-        allowed_decisions: ['feedback'],
+        allowed_decisions: ['regenerate', 'feedback'],
         review_severity: 'blocking',
         blocking_issues: [{ code: 'premise_conflict', message: 'The premise conflicts with the requested tone.' }],
         concept_options: CONCEPT_OPTIONS,
@@ -271,12 +283,12 @@ describe('ConceptGate', () => {
   it('preserves a backend-valid Unicode-limit feedback after whitespace normalization', async () => {
     const blocked = gate({
       status: 'revision_required',
-      current_node: 'concept_regeneration',
+      current_node: 'concept_revision',
       pending_action: {
         id: 'action-1',
         type: 'project_creation_concept_regeneration',
         status: 'pending',
-        allowed_decisions: ['feedback'],
+        allowed_decisions: ['regenerate', 'feedback'],
         review_severity: 'blocking',
         blocking_issues: [{ code: 'premise_conflict', message: 'The premise conflicts with the requested tone.' }],
         concept_options: CONCEPT_OPTIONS,
@@ -300,7 +312,7 @@ describe('ConceptGate', () => {
     ))
   })
 
-  it('renders an empty concept grid when the server returns no options', async () => {
+  it('fails closed when a selection action has no concept options', async () => {
     mockedApi.getProjectCreationRun.mockResolvedValue(gate({
       pending_action: {
         ...gate().pending_action!,
@@ -310,8 +322,69 @@ describe('ConceptGate', () => {
 
     renderGate()
 
-    expect(await screen.findByText('审查通过')).toBeInTheDocument()
-    expect(document.querySelector('.concept-options')).toBeInTheDocument()
+    expect(await screen.findByRole('alert')).toHaveTextContent('工作流状态无法继续，请返回项目。')
+    expect(document.querySelector('.concept-options')).not.toBeInTheDocument()
+  })
+
+  it('shows a safe invalid-state view instead of an empty gate for an unexpected workflow status', async () => {
+    mockedApi.getProjectCreationRun.mockResolvedValue(gate({
+      status: 'completed',
+      current_node: null,
+      awaiting_user: false,
+      pending_action: null,
+    }))
+
+    renderGate()
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('工作流状态无法继续，请返回项目。')
+    expect(screen.queryByRole('link', { name: '返回项目' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: '选择这个概念' })).not.toBeInTheDocument()
+  })
+
+  it.each<[string, ProjectCreationRun]>([
+    ['a selection action is not awaiting the user', gate({ awaiting_user: false })],
+    ['a selection action uses the wrong workflow node', gate({ current_node: 'concept_revision' })],
+    ['a selection action has a non-null next node', gate({ next_node: 'concept_selected' })],
+    ['the response run ID differs from the requested run', gate({ id: 'unexpected-run' })],
+    ['a selection action omits an allowed decision', gate({ pending_action: { ...gate().pending_action!, allowed_decisions: ['select'] } })],
+    ['a selection action has blocking severity', gate({ pending_action: { ...gate().pending_action!, review_severity: 'blocking' } })],
+    ['a selection action has no concept options', gate({ pending_action: { ...gate().pending_action!, concept_options: [] } })],
+    ['a regeneration action has no blocking issues', gate({
+      status: 'revision_required',
+      current_node: 'concept_revision',
+      pending_action: {
+        id: 'action-1', type: 'project_creation_concept_regeneration', status: 'pending',
+        allowed_decisions: ['regenerate', 'feedback'], review_severity: 'blocking',
+        blocking_issues: [], concept_options: CONCEPT_OPTIONS,
+      },
+    })],
+    ['a regeneration action has no concept options', gate({
+      status: 'revision_required',
+      current_node: 'concept_revision',
+      pending_action: {
+        id: 'action-1', type: 'project_creation_concept_regeneration', status: 'pending',
+        allowed_decisions: ['regenerate', 'feedback'], review_severity: 'blocking',
+        blocking_issues: BLOCKING_ISSUES, concept_options: [],
+      },
+    })],
+    ['a regeneration action repeats a concept option ID', gate({
+      status: 'revision_required',
+      current_node: 'concept_revision',
+      pending_action: {
+        id: 'action-1', type: 'project_creation_concept_regeneration', status: 'pending',
+        allowed_decisions: ['regenerate', 'feedback'], review_severity: 'blocking',
+        blocking_issues: BLOCKING_ISSUES,
+        concept_options: [CONCEPT_OPTIONS[0], { ...CONCEPT_OPTIONS[1], id: CONCEPT_OPTIONS[0].id }],
+      },
+    })],
+  ])('fails closed when %s', async (_description, malformedRun) => {
+    mockedApi.getProjectCreationRun.mockResolvedValue(malformedRun)
+
+    renderGate()
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('工作流状态无法继续，请返回项目。')
+    expect(screen.queryByRole('button', { name: '选择这个概念' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: '重新生成概念' })).not.toBeInTheDocument()
   })
 
   it('polls every 5 seconds when awaiting_user and regeneration type', async () => {
@@ -319,13 +392,14 @@ describe('ConceptGate', () => {
 
     mockedApi.getProjectCreationRun.mockResolvedValue(gate({
       status: 'revision_required',
+      current_node: 'concept_revision',
       pending_action: {
         id: 'action-1',
         type: 'project_creation_concept_regeneration',
         status: 'pending',
         allowed_decisions: ['regenerate', 'feedback'],
         review_severity: 'blocking',
-        blocking_issues: [],
+        blocking_issues: BLOCKING_ISSUES,
         concept_options: CONCEPT_OPTIONS,
       },
     }))
@@ -369,13 +443,14 @@ describe('ConceptGate', () => {
     mockedApi.getProjectCreationRun
       .mockResolvedValueOnce(gate({
         status: 'revision_required',
+        current_node: 'concept_revision',
         pending_action: {
           id: 'action-1',
           type: 'project_creation_concept_regeneration',
           status: 'pending',
           allowed_decisions: ['regenerate', 'feedback'],
           review_severity: 'blocking',
-          blocking_issues: [],
+          blocking_issues: BLOCKING_ISSUES,
           concept_options: CONCEPT_OPTIONS,
         },
       }))
@@ -394,6 +469,93 @@ describe('ConceptGate', () => {
     // No more polling after this
     await act(() => vi.advanceTimersByTimeAsync(5000))
     expect(mockedApi.getProjectCreationRun).toHaveBeenCalledTimes(2)
+  })
+
+  it('stops polling after a transient poll failure', async () => {
+    vi.useFakeTimers()
+    mockedApi.getProjectCreationRun
+      .mockResolvedValueOnce(gate({
+        status: 'revision_required',
+        current_node: 'concept_revision',
+        pending_action: {
+          id: 'action-1', type: 'project_creation_concept_regeneration', status: 'pending',
+          allowed_decisions: ['regenerate', 'feedback'], review_severity: 'blocking',
+          blocking_issues: BLOCKING_ISSUES, concept_options: CONCEPT_OPTIONS,
+        },
+      }))
+      .mockRejectedValueOnce(new Error('network failure'))
+
+    renderGate()
+    await act(() => vi.advanceTimersByTimeAsync(0))
+    await act(() => vi.advanceTimersByTimeAsync(5000))
+    expect(screen.getByRole('alert')).toHaveTextContent('无法加载审核关卡')
+    expect(mockedApi.getProjectCreationRun).toHaveBeenCalledTimes(2)
+
+    await act(() => vi.advanceTimersByTimeAsync(5000))
+    expect(mockedApi.getProjectCreationRun).toHaveBeenCalledTimes(2)
+  })
+
+  it('ignores a late poll success after a newer poll failure', async () => {
+    vi.useFakeTimers()
+    const latePoll = deferred<ProjectCreationRun>()
+    const validRegeneration = gate({
+      status: 'revision_required',
+      current_node: 'concept_revision',
+      pending_action: {
+        id: 'action-1', type: 'project_creation_concept_regeneration', status: 'pending',
+        allowed_decisions: ['regenerate', 'feedback'], review_severity: 'blocking',
+        blocking_issues: BLOCKING_ISSUES, concept_options: CONCEPT_OPTIONS,
+      },
+    })
+    mockedApi.getProjectCreationRun
+      .mockResolvedValueOnce(validRegeneration)
+      .mockReturnValueOnce(latePoll.promise)
+      .mockRejectedValueOnce(new Error('network failure'))
+
+    renderGate()
+    await act(() => vi.advanceTimersByTimeAsync(0))
+    await act(() => vi.advanceTimersByTimeAsync(5000))
+    await act(() => vi.advanceTimersByTimeAsync(5000))
+    expect(screen.getByRole('alert')).toHaveTextContent('无法加载审核关卡')
+
+    latePoll.resolve(validRegeneration)
+    await act(async () => { await Promise.resolve() })
+
+    expect(screen.getByRole('alert')).toHaveTextContent('无法加载审核关卡')
+    await act(() => vi.advanceTimersByTimeAsync(5000))
+    expect(mockedApi.getProjectCreationRun).toHaveBeenCalledTimes(3)
+  })
+
+  it('ignores a regeneration resolution that completes after a route change', async () => {
+    const oldResolution = deferred<Awaited<ReturnType<typeof api.resolveProjectCreationAction>>>()
+    const oldRun = gate({
+      status: 'revision_required',
+      current_node: 'concept_revision',
+      pending_action: {
+        id: 'action-1', type: 'project_creation_concept_regeneration', status: 'pending',
+        allowed_decisions: ['regenerate', 'feedback'], review_severity: 'blocking',
+        blocking_issues: BLOCKING_ISSUES, concept_options: CONCEPT_OPTIONS,
+      },
+    })
+    mockedApi.getProjectCreationRun
+      .mockResolvedValueOnce(oldRun)
+      .mockResolvedValueOnce(gate({ id: 'run-2' }))
+    mockedApi.resolveProjectCreationAction.mockReturnValueOnce(oldResolution.promise)
+
+    const { rerender } = renderGate()
+    fireEvent.click(await screen.findByRole('button', { name: '重新生成概念' }))
+    rerender(
+      <MemoryRouter>
+        <ConceptGate projectId="project-2" workflowRunId="run-2" />
+      </MemoryRouter>,
+    )
+    expect(await screen.findByText('审查通过')).toBeInTheDocument()
+
+    oldResolution.resolve({ status: 'revision_required' })
+    await act(async () => { await Promise.resolve() })
+
+    expect(mockedApi.getProjectCreationRun).toHaveBeenCalledTimes(2)
+    expect(screen.getByText('审查通过')).toBeInTheDocument()
   })
 
   it('renders all server-returned genre tags across cards', async () => {
@@ -420,6 +582,7 @@ describe('ConceptGate', () => {
     await screen.findByText('审查通过')
 
     mockedApi.getProjectCreationRun.mockResolvedValue(gate({
+      id: 'run-2',
       pending_action: {
         id: 'action-2',
         type: 'project_creation_concept_selection',

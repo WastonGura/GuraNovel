@@ -24,15 +24,21 @@ const mockedApi = vi.mocked(api)
 function creationStarted(overrides: Partial<ProjectCreationStarted> = {}): ProjectCreationStarted {
   return {
     id: 'run-1',
-    status: 'pending',
+    status: 'concept_options',
     pending_action: {
       id: 'action-1',
-      type: 'review_concept',
+      type: 'project_creation_concept_selection',
       status: 'pending',
-      allowed_decisions: ['approved', 'rejected'],
-      review_severity: 'standard',
+      allowed_decisions: ['select', 'fuse'],
+      review_severity: 'clean',
       blocking_issues: [],
-      concept_options: [],
+      concept_options: [{
+        id: 'cyber-ronin',
+        title: '赛博浪人',
+        logline: '失忆剑客在霓虹都市追寻过去。',
+        premise: '一个关于身份与自由的故事。',
+        genres: ['赛博朋克', '武侠'],
+      }],
     },
     ...overrides,
   }
@@ -138,12 +144,27 @@ describe('ProjectCreationForm', () => {
     expect(await screen.findByText('项目已有活跃的创建工作流。')).toBeInTheDocument()
   })
 
-  it('shows 422 validation error message', async () => {
-    mockedApi.startProjectCreation.mockRejectedValue(new api.ApiError(422, 'validation_error', 'user_seed 不能为空'))
+  it('maps a 422 response to a fixed safe validation message without rendering server details', async () => {
+    const serverDetail = 'prompt=private seed; api_key=sk-live-secret'
+    mockedApi.startProjectCreation.mockRejectedValue(new api.ApiError(422, 'validation_error', serverDetail))
     renderForm()
     fireEvent.change(getSeedTextarea(), { target: { value: '一个故事' } })
     fireEvent.click(screen.getByRole('button', { name: '开始创作' }))
-    expect(await screen.findByText('user_seed 不能为空')).toBeInTheDocument()
+
+    expect(await screen.findByText('输入信息有误，请检查后重试。')).toBeInTheDocument()
+    expect(screen.queryByText(serverDetail)).not.toBeInTheDocument()
+  })
+
+  it('maps a 404 response to a safe project-not-found message without rendering server details', async () => {
+    const serverDetail = 'workspace=/private/project; token=secret'
+    mockedApi.startProjectCreation.mockRejectedValue(new api.ApiError(404, 'not_found', serverDetail))
+    renderForm()
+    fireEvent.change(getSeedTextarea(), { target: { value: '一个故事' } })
+    fireEvent.click(screen.getByRole('button', { name: '开始创作' }))
+
+    expect(await screen.findByText('项目未找到，请返回项目列表。')).toBeInTheDocument()
+    expect(screen.getByRole('link', { name: '返回项目列表' })).toHaveAttribute('href', '/')
+    expect(screen.queryByText(serverDetail)).not.toBeInTheDocument()
   })
 
   it('disables button and shows loading text while pending', async () => {

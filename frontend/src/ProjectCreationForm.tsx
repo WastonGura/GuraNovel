@@ -1,5 +1,5 @@
 import { useState, type FormEvent } from 'react'
-import { useNavigate } from 'react-router-dom'
+import { Link, useNavigate } from 'react-router-dom'
 import { ApiError, startProjectCreation } from './api/client'
 
 interface ProjectCreationFormProps {
@@ -42,10 +42,12 @@ export default function ProjectCreationForm({ projectId }: ProjectCreationFormPr
       navigate(`/projects/${projectId}/creation/${result.id}/gate`)
     } catch (caught: unknown) {
       if (caught instanceof ApiError) {
-        if (caught.status === 409) {
+        if (caught.status === 404) {
+          setError('项目未找到，请返回项目列表。')
+        } else if (caught.status === 409) {
           setError('项目已有活跃的创建工作流。')
         } else if (caught.status === 422) {
-          setError(caught.message || '输入信息有误，请检查后重试。')
+          setError('输入信息有误，请检查后重试。')
         } else {
           setError('创建工作流启动失败，请重试。')
         }
@@ -118,6 +120,7 @@ export default function ProjectCreationForm({ projectId }: ProjectCreationFormPr
       </div>
 
       {error && <p className="notice" role="alert">{error}</p>}
+      {error === '项目未找到，请返回项目列表。' && <Link className="back-link" to="/">返回项目列表</Link>}
 
       <button type="submit" disabled={pending}>
         {pending ? '正在启动创作…' : '开始创作'}
