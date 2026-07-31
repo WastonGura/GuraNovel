@@ -19,6 +19,11 @@ from app.services.project_creation_service import (
     ProjectCreationRunRead,
     ProjectCreationService,
 )
+from app.services.project_maintenance_foundation_service import (
+    ProjectMaintenanceCommitIndeterminateError,
+    ProjectMaintenanceFoundationService,
+    ProjectMaintenanceWaiting,
+)
 
 __all__ = [
     "DocumentService",
@@ -34,4 +39,7 @@ __all__ = [
     "ProjectCreationPendingActionRead",
     "ProjectCreationRunRead",
     "ProjectCreationService",
+    "ProjectMaintenanceCommitIndeterminateError",
+    "ProjectMaintenanceFoundationService",
+    "ProjectMaintenanceWaiting",
 ]
