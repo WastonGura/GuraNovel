@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import unicodedata
 from enum import Enum
 from typing import Annotated, Literal
 from uuid import UUID
@@ -17,7 +18,7 @@ from pydantic import (
 )
 
 from app.llm.errors import ProviderInvalidOutputError
-from app.workflows.project_maintenance import AffectedItemType, ImpactLevel
+from app.workflows.project_maintenance_types import AffectedItemType, ImpactLevel
 
 
 _MACHINE_IDENTIFIER = re.compile(r"[a-z][a-z0-9_]{0,63}")
@@ -49,7 +50,21 @@ _UUID_FIELDS = (
     "requirement_id",
     "operation_id",
     "plan_id",
+    "approval_id",
+    "change_set_id",
+    "proposed_edit_id",
+    "previous_version_id",
+    "review_id",
+    "finding_id",
+    "revision_plan_id",
+    "revision_operation_id",
+    "revision_plan_document_id",
+    "revision_plan_version_id",
+    "expected_current_version_id",
 )
+
+_MAX_PROPOSED_CONTENT_CHARACTERS = 200_000
+_MAX_PROPOSED_CONTENT_BYTES = 262_144
 
 
 def _canonical_uuid(value: object) -> UUID:
@@ -110,6 +125,23 @@ class RevisionOperationKind(str, Enum):
     RETAIN = "retain"
 
 
+class ProposedEditOperation(str, Enum):
+    """The sole provider-authored operation supported by application mediation."""
+
+    REPLACE_CONTENT = "replace_content"
+
+
+class ConsistencyFindingSeverity(str, Enum):
+    WARNING = "warning"
+    BLOCKING = "blocking"
+
+
+class ConsistencyReviewOutcome(str, Enum):
+    CLEAN = "clean"
+    WARNING = "warning"
+    BLOCKING = "blocking"
+
+
 class _StrictMaintenanceModel(BaseModel):
     model_config = ConfigDict(
         strict=True,
@@ -143,6 +175,10 @@ class _StrictMaintenanceModel(BaseModel):
         "required_rewrites",
         "warnings",
         "operations",
+        "proposed_edits",
+        "applied_changes",
+        "affected_documents",
+        "findings",
         mode="before",
         check_fields=False,
     )
@@ -515,13 +551,289 @@ class RevisionPlanOutput(_StrictMaintenanceModel):
         return self
 
 
+class ApplyChangeRequest(_StrictMaintenanceModel):
+    """Approved, content-free provenance supplied to the proposal-only Archivist."""
+
+    project_id: UUID
+    workflow_run_id: UUID
+    change_request_id: UUID
+    approval_id: UUID
+    revision_plan_id: UUID
+    revision_plan_document_id: UUID
+    revision_plan_version_id: UUID
+    operations: tuple[RevisionOperation, ...] = Field(min_length=1, max_length=128)
+
+    @model_validator(mode="after")
+    def approved_revisions_only(self) -> ApplyChangeRequest:
+        operation_ids = [item.operation_id for item in self.operations]
+        sequences = [item.sequence for item in self.operations]
+        document_ids = [item.target.document_id for item in self.operations]
+        if len(set(operation_ids)) != len(operation_ids):
+            raise ValueError("duplicate revision operation id")
+        if sequences != list(range(1, len(sequences) + 1)):
+            raise ValueError("revision operations are not in canonical sequence")
+        if len(set(document_ids)) != len(document_ids):
+            raise ValueError("multiple operations target one document")
+        if any(item.operation is RevisionOperationKind.RETIRE for item in self.operations):
+            raise ValueError("unsupported apply-change revision operation")
+        if not any(item.operation is RevisionOperationKind.REVISE for item in self.operations):
+            raise ValueError("apply-change request has no proposed edit operation")
+        return self
+
+
+class ProposedDocumentEdit(_StrictMaintenanceModel):
+    """A proposed version body, never an instruction to mutate canonical storage."""
+
+    proposed_edit_id: UUID
+    sequence: Annotated[int, Field(ge=1, le=128)]
+    project_id: UUID
+    workflow_run_id: UUID
+    change_request_id: UUID
+    approval_id: UUID
+    revision_plan_id: UUID
+    revision_plan_document_id: UUID
+    revision_plan_version_id: UUID
+    revision_operation_id: UUID
+    document_id: UUID
+    expected_current_version_id: UUID
+    operation: ProposedEditOperation
+    content: str = Field(
+        min_length=1,
+        max_length=_MAX_PROPOSED_CONTENT_CHARACTERS,
+        repr=False,
+    )
+    rationale: str = Field(min_length=1, max_length=1000)
+
+    @field_validator("operation", mode="before")
+    @classmethod
+    def typed_operation(cls, value: object) -> ProposedEditOperation:
+        if isinstance(value, ProposedEditOperation):
+            return value
+        if type(value) is str:
+            try:
+                return ProposedEditOperation(value)
+            except ValueError as error:
+                raise ValueError("unsupported proposed edit operation") from error
+        raise ValueError("unsupported proposed edit operation")
+
+    @field_validator("content")
+    @classmethod
+    def bounded_safe_content(cls, value: str) -> str:
+        if not value.strip() or any(
+            unicodedata.category(character) == "Cc" and character not in {"\t", "\n", "\r"}
+            for character in value
+        ):
+            raise ValueError("invalid proposed document content")
+        try:
+            encoded = value.encode("utf-8")
+        except UnicodeEncodeError:
+            raise ValueError("invalid proposed document content") from None
+        if len(encoded) > _MAX_PROPOSED_CONTENT_BYTES:
+            raise ValueError("proposed document content is too large")
+        return value
+
+    @field_validator("rationale")
+    @classmethod
+    def bounded_rationale(cls, value: str) -> str:
+        return _safe_planning_text(value, "proposed edit rationale")
+
+
+class ApplyChangeOutput(_StrictMaintenanceModel):
+    """A validated proposal set; it intentionally has no applied/version-written flags."""
+
+    change_set_id: UUID
+    project_id: UUID
+    workflow_run_id: UUID
+    change_request_id: UUID
+    approval_id: UUID
+    revision_plan_id: UUID
+    revision_plan_document_id: UUID
+    revision_plan_version_id: UUID
+    proposed_edits: tuple[ProposedDocumentEdit, ...] = Field(min_length=1, max_length=128)
+
+    @model_validator(mode="after")
+    def deterministic_unique_edits(self) -> ApplyChangeOutput:
+        edit_ids = [item.proposed_edit_id for item in self.proposed_edits]
+        operation_ids = [item.revision_operation_id for item in self.proposed_edits]
+        document_ids = [item.document_id for item in self.proposed_edits]
+        sequences = [item.sequence for item in self.proposed_edits]
+        if len(set(edit_ids)) != len(edit_ids):
+            raise ValueError("duplicate proposed edit id")
+        if len(set(operation_ids)) != len(operation_ids):
+            raise ValueError("duplicate proposed revision operation")
+        if len(set(document_ids)) != len(document_ids):
+            raise ValueError("multiple proposed edits target one document")
+        if sequences != list(range(1, len(sequences) + 1)):
+            raise ValueError("proposed edits are not in canonical sequence")
+        lineage = (
+            self.project_id,
+            self.workflow_run_id,
+            self.change_request_id,
+            self.approval_id,
+            self.revision_plan_id,
+            self.revision_plan_document_id,
+            self.revision_plan_version_id,
+        )
+        if any(
+            (
+                item.project_id,
+                item.workflow_run_id,
+                item.change_request_id,
+                item.approval_id,
+                item.revision_plan_id,
+                item.revision_plan_document_id,
+                item.revision_plan_version_id,
+            )
+            != lineage
+            for item in self.proposed_edits
+        ):
+            raise ValueError("proposed edit lineage is inconsistent")
+        return self
+
+
+class AppliedDocumentReference(_StrictMaintenanceModel):
+    """Server-issued result of mediating one proposed edit through canonical services."""
+
+    proposed_edit_id: UUID
+    document_id: UUID
+    previous_version_id: UUID
+    current_version_id: UUID
+
+    @model_validator(mode="after")
+    def version_advanced(self) -> AppliedDocumentReference:
+        if self.previous_version_id == self.current_version_id:
+            raise ValueError("applied document version did not advance")
+        return self
+
+
+class PostChangeRequest(_StrictMaintenanceModel):
+    project_id: UUID
+    workflow_run_id: UUID
+    change_request_id: UUID
+    approval_id: UUID
+    revision_plan_id: UUID
+    revision_plan_document_id: UUID
+    revision_plan_version_id: UUID
+    change_set_id: UUID
+    applied_changes: tuple[AppliedDocumentReference, ...] = Field(min_length=1, max_length=128)
+
+    @model_validator(mode="after")
+    def unique_applied_changes(self) -> PostChangeRequest:
+        edit_ids = [item.proposed_edit_id for item in self.applied_changes]
+        document_ids = [item.document_id for item in self.applied_changes]
+        previous_versions = [item.previous_version_id for item in self.applied_changes]
+        current_versions = [item.current_version_id for item in self.applied_changes]
+        if (
+            len(set(edit_ids)) != len(edit_ids)
+            or len(set(document_ids)) != len(document_ids)
+            or len(set(previous_versions)) != len(previous_versions)
+            or len(set(current_versions)) != len(current_versions)
+        ):
+            raise ValueError("duplicate applied change reference")
+        return self
+
+
+class ConsistencyFinding(_StrictMaintenanceModel):
+    finding_id: UUID
+    sequence: Annotated[int, Field(ge=1, le=128)]
+    code: str = Field(min_length=1, max_length=64)
+    severity: ConsistencyFindingSeverity
+    affected_documents: tuple[DocumentVersionReference, ...] = Field(
+        min_length=1, max_length=128
+    )
+    blocking: bool
+    suggested_corrective_action: str = Field(min_length=1, max_length=1000)
+
+    @field_validator("code")
+    @classmethod
+    def stable_code(cls, value: str) -> str:
+        if _MACHINE_IDENTIFIER.fullmatch(value) is None:
+            raise ValueError("invalid consistency finding code")
+        return value
+
+    @field_validator("severity", mode="before")
+    @classmethod
+    def typed_severity(cls, value: object) -> ConsistencyFindingSeverity:
+        if isinstance(value, ConsistencyFindingSeverity):
+            return value
+        if type(value) is str:
+            try:
+                return ConsistencyFindingSeverity(value)
+            except ValueError as error:
+                raise ValueError("invalid consistency finding severity") from error
+        raise ValueError("invalid consistency finding severity")
+
+    @field_validator("suggested_corrective_action")
+    @classmethod
+    def bounded_corrective_action(cls, value: str) -> str:
+        return _safe_planning_text(value, "corrective action")
+
+    @model_validator(mode="after")
+    def severity_matches_blocking_flag(self) -> ConsistencyFinding:
+        if self.blocking is not (self.severity is ConsistencyFindingSeverity.BLOCKING):
+            raise ValueError("consistency finding blocking flag contradicts severity")
+        documents = [
+            (item.document_id, item.current_version_id) for item in self.affected_documents
+        ]
+        if len(set(documents)) != len(documents):
+            raise ValueError("duplicate consistency affected document")
+        return self
+
+
+class ConsistencyReviewOutput(_StrictMaintenanceModel):
+    """Advisory routing result; canonical workflow state remains server-owned."""
+
+    review_id: UUID
+    project_id: UUID
+    workflow_run_id: UUID
+    change_request_id: UUID
+    approval_id: UUID
+    revision_plan_id: UUID
+    revision_plan_document_id: UUID
+    revision_plan_version_id: UUID
+    change_set_id: UUID
+    outcome: ConsistencyReviewOutcome
+    findings: tuple[ConsistencyFinding, ...] = Field(default=(), max_length=128)
+
+    @field_validator("outcome", mode="before")
+    @classmethod
+    def typed_outcome(cls, value: object) -> ConsistencyReviewOutcome:
+        if isinstance(value, ConsistencyReviewOutcome):
+            return value
+        if type(value) is str:
+            try:
+                return ConsistencyReviewOutcome(value)
+            except ValueError as error:
+                raise ValueError("invalid consistency review outcome") from error
+        raise ValueError("invalid consistency review outcome")
+
+    @model_validator(mode="after")
+    def consistent_outcome(self) -> ConsistencyReviewOutput:
+        sequences = [item.sequence for item in self.findings]
+        if sequences != list(range(1, len(sequences) + 1)):
+            raise ValueError("consistency findings are not in canonical sequence")
+        if len({item.finding_id for item in self.findings}) != len(self.findings):
+            raise ValueError("duplicate consistency finding id")
+        blockers = [item for item in self.findings if item.blocking]
+        if self.outcome is ConsistencyReviewOutcome.CLEAN and self.findings:
+            raise ValueError("clean consistency review cannot contain findings")
+        if self.outcome is ConsistencyReviewOutcome.WARNING and (
+            not self.findings or blockers
+        ):
+            raise ValueError("warning consistency review has contradictory findings")
+        if self.outcome is ConsistencyReviewOutcome.BLOCKING and not blockers:
+            raise ValueError("blocking consistency review requires a blocking finding")
+        return self
+
+
 def _validate_output(raw_output: object, output_type: type[_StrictMaintenanceModel]):
     try:
         if isinstance(raw_output, BaseModel):
             raw_output = raw_output.model_dump(mode="json")
         return output_type.model_validate(raw_output)
     except (TypeError, ValueError, ValidationError):
-        raise ProviderInvalidOutputError() from None
+        pass
+    raise ProviderInvalidOutputError() from None
 
 
 def validate_lore_impact_output(
@@ -588,19 +900,119 @@ def validate_revision_plan_output(
     return result
 
 
+def validate_apply_change_output(
+    raw_output: object, *, request: ApplyChangeRequest
+) -> ApplyChangeOutput:
+    result = _validate_output(raw_output, ApplyChangeOutput)
+    assert isinstance(result, ApplyChangeOutput)
+    request_lineage = (
+        request.project_id,
+        request.workflow_run_id,
+        request.change_request_id,
+        request.approval_id,
+        request.revision_plan_id,
+        request.revision_plan_document_id,
+        request.revision_plan_version_id,
+    )
+    result_lineage = (
+        result.project_id,
+        result.workflow_run_id,
+        result.change_request_id,
+        result.approval_id,
+        result.revision_plan_id,
+        result.revision_plan_document_id,
+        result.revision_plan_version_id,
+    )
+    operations = [
+        item for item in request.operations if item.operation is RevisionOperationKind.REVISE
+    ]
+    operations_by_id = {item.operation_id: item for item in operations}
+    if result_lineage != request_lineage or len(result.proposed_edits) != len(operations):
+        raise ProviderInvalidOutputError() from None
+    for sequence, edit in enumerate(result.proposed_edits, start=1):
+        operation = operations_by_id.get(edit.revision_operation_id)
+        if (
+            operation is None
+            or edit.sequence != sequence
+            or operation is not operations[sequence - 1]
+            or edit.document_id != operation.target.document_id
+            or edit.expected_current_version_id != operation.target.current_version_id
+        ):
+            raise ProviderInvalidOutputError() from None
+    return result
+
+
+def validate_consistency_review_output(
+    raw_output: object, *, request: PostChangeRequest
+) -> ConsistencyReviewOutput:
+    result = _validate_output(raw_output, ConsistencyReviewOutput)
+    assert isinstance(result, ConsistencyReviewOutput)
+    if (
+        result.project_id,
+        result.workflow_run_id,
+        result.change_request_id,
+        result.approval_id,
+        result.revision_plan_id,
+        result.revision_plan_document_id,
+        result.revision_plan_version_id,
+        result.change_set_id,
+    ) != (
+        request.project_id,
+        request.workflow_run_id,
+        request.change_request_id,
+        request.approval_id,
+        request.revision_plan_id,
+        request.revision_plan_document_id,
+        request.revision_plan_version_id,
+        request.change_set_id,
+    ):
+        raise ProviderInvalidOutputError() from None
+    known_documents = {
+        (item.document_id, item.current_version_id) for item in request.applied_changes
+    }
+    if any(
+        (document.document_id, document.current_version_id) not in known_documents
+        for finding in result.findings
+        for document in finding.affected_documents
+    ):
+        raise ProviderInvalidOutputError() from None
+    return result
+
+
+# Naming aliases retain the stage terminology used by workflow/design callers.
+ArchivistApplyChangeRequest = ApplyChangeRequest
+ArchivistApplyChangeOutput = ApplyChangeOutput
+LorePostChangeRequest = PostChangeRequest
+LorePostChangeOutput = ConsistencyReviewOutput
+
+
 __all__ = [
     "AffectedItemReference",
     "AffectedItemType",
+    "AppliedDocumentReference",
+    "ApplyChangeOutput",
+    "ApplyChangeRequest",
+    "ArchivistApplyChangeOutput",
+    "ArchivistApplyChangeRequest",
     "ChiefEditorImpactOutput",
     "ChiefEditorMaintenanceImpactOutput",
     "DocumentVersionReference",
     "ImpactAffectedItem",
     "ImpactLevel",
     "ImpactWarning",
+    "ConsistencyFinding",
+    "ConsistencyFindingSeverity",
+    "ConsistencyReviewOutcome",
+    "ConsistencyReviewOutput",
     "LoreImpactOutput",
     "LoreMaintenanceImpactOutput",
     "MaintenanceImpactOutput",
     "MaintenanceImpactRequest",
+    "LorePostChangeOutput",
+    "LorePostChangeRequest",
+    "PostChangeRequest",
+    "ProposedDocumentEdit",
+    "ProposedEditOperation",
     "RevisionOperation",
     "RevisionOperationKind",
     "RevisionPlanOutput",
@@ -610,6 +1022,8 @@ __all__ = [
     "RewriteRequirement",
     "WarningSeverity",
     "validate_chief_editor_impact_output",
+    "validate_apply_change_output",
+    "validate_consistency_review_output",
     "validate_lore_impact_output",
     "validate_revision_plan_output",
 ]

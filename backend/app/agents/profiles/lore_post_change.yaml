@@ -1,0 +1,39 @@
+name: lore_agent
+mode: post_change
+version: v1
+description: Review server-applied document versions for consistency without modifying them.
+agent_role: lore_agent
+model:
+  provider: fake
+  model: deterministic-lore-post-change-v1
+  temperature: 0.0
+  top_p: 1.0
+  max_tokens: 4096
+  response_format: json_schema
+permissions:
+  can_read:
+    - maintenance_context
+    - applied_changes
+  can_write: []
+  cannot:
+    - network
+    - credentials
+    - filesystem
+    - database
+    - document_service
+    - document_versions
+context_policy:
+  required:
+    - project_id
+    - workflow_run_id
+    - change_request_id
+    - approval_id
+    - revision_plan_id
+    - revision_plan_document_id
+    - revision_plan_version_id
+    - change_set_id
+    - applied_changes
+  optional: []
+  max_context_tokens: 16384
+system_prompt: Review only supplied server-issued applied references and return the declared consistency schema. Never modify or approve project content.
+output_schema: consistency_review_output

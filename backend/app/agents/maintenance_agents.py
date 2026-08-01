@@ -6,12 +6,18 @@ from typing import Protocol, runtime_checkable
 
 from app.agents.errors import ProfileRegistryError
 from app.agents.maintenance_contracts import (
+    ApplyChangeOutput,
+    ApplyChangeRequest,
     ChiefEditorMaintenanceImpactOutput,
+    ConsistencyReviewOutput,
     LoreImpactOutput,
     MaintenanceImpactRequest,
+    PostChangeRequest,
     RevisionPlanOutput,
     RevisionPlanRequest,
+    validate_apply_change_output,
     validate_chief_editor_impact_output,
+    validate_consistency_review_output,
     validate_lore_impact_output,
     validate_revision_plan_output,
 )
@@ -56,9 +62,25 @@ class RevisionPlanProvider(Protocol):
     ) -> object: ...
 
 
+@runtime_checkable
+class ApplyChangeProvider(Protocol):
+    async def propose_changes(
+        self, request: ApplyChangeRequest, profile: AgentProfile
+    ) -> object: ...
+
+
+@runtime_checkable
+class PostChangeProvider(Protocol):
+    async def review_consistency(
+        self, request: PostChangeRequest, profile: AgentProfile
+    ) -> object: ...
+
+
 class LoreAgent:
     def __init__(
-        self, provider: MaintenanceImpactProvider, registry: ProfileRegistry | None = None
+        self,
+        provider: MaintenanceImpactProvider | PostChangeProvider,
+        registry: ProfileRegistry | None = None,
     ) -> None:
         self._provider = provider
         self._registry = registry or ProfileRegistry()
@@ -72,6 +94,8 @@ class LoreAgent:
     async def analyze(self, request: MaintenanceImpactRequest) -> LoreImpactOutput:
         failure: type[Exception] | None = None
         try:
+            if not isinstance(self._provider, MaintenanceImpactProvider):
+                raise ProviderConfigurationError()
             profile = self._registry.load("lore_agent", mode="maintenance_impact")
             raw_output = await self._provider.analyze_maintenance_impact(request, profile)
             result = self.validate_output(raw_output, request=request)
@@ -85,6 +109,60 @@ class LoreAgent:
 
     async def maintenance_impact(self, request: MaintenanceImpactRequest) -> LoreImpactOutput:
         return await self.analyze(request)
+
+    @staticmethod
+    def validate_post_change_output(
+        raw_output: object, *, request: PostChangeRequest
+    ) -> ConsistencyReviewOutput:
+        return validate_consistency_review_output(raw_output, request=request)
+
+    async def post_change(self, request: PostChangeRequest) -> ConsistencyReviewOutput:
+        failure: type[Exception] | None = None
+        try:
+            if not isinstance(self._provider, PostChangeProvider):
+                raise ProviderConfigurationError()
+            profile = self._registry.load("lore_agent", mode="post_change")
+            raw_output = await self._provider.review_consistency(request, profile)
+            result = self.validate_post_change_output(raw_output, request=request)
+        except _SAFE_PROVIDER_ERRORS as error:
+            failure = _safe_error_type(error)
+        except Exception as error:
+            failure = _safe_error_type(error)
+        if failure is not None:
+            raise failure() from None
+        return result
+
+
+class ArchivistAgent:
+    """Produce version proposals without receiving persistence or filesystem services."""
+
+    def __init__(
+        self, provider: ApplyChangeProvider, registry: ProfileRegistry | None = None
+    ) -> None:
+        self._provider = provider
+        self._registry = registry or ProfileRegistry()
+
+    @staticmethod
+    def validate_output(
+        raw_output: object, *, request: ApplyChangeRequest
+    ) -> ApplyChangeOutput:
+        return validate_apply_change_output(raw_output, request=request)
+
+    async def apply_change(self, request: ApplyChangeRequest) -> ApplyChangeOutput:
+        failure: type[Exception] | None = None
+        try:
+            if not isinstance(self._provider, ApplyChangeProvider):
+                raise ProviderConfigurationError()
+            profile = self._registry.load("archivist_agent", mode="apply_change")
+            raw_output = await self._provider.propose_changes(request, profile)
+            result = self.validate_output(raw_output, request=request)
+        except _SAFE_PROVIDER_ERRORS as error:
+            failure = _safe_error_type(error)
+        except Exception as error:
+            failure = _safe_error_type(error)
+        if failure is not None:
+            raise failure() from None
+        return result
 
 
 class ChiefEditorImpactAgent:
@@ -170,11 +248,14 @@ ChiefEditorMaintenanceAgent = ChiefEditorImpactAgent
 
 
 __all__ = [
+    "ApplyChangeProvider",
+    "ArchivistAgent",
     "ChiefEditorImpactAgent",
     "ChiefEditorAgent",
     "ChiefEditorMaintenanceAgent",
     "LoreAgent",
     "MaintenanceImpactProvider",
+    "PostChangeProvider",
     "PlotArchitectAgent",
     "RevisionPlanProvider",
     "WorldbuildingAgent",

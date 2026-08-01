@@ -7,34 +7,11 @@ from enum import Enum
 from uuid import UUID
 
 from app.models.enums import ActionRequestStatus
-
-
-class ProjectMaintenanceStatus(str, Enum):
-    CHANGE_REQUESTED = "CHANGE_REQUESTED"
-    LORE_IMPACT_ANALYSIS = "LORE_IMPACT_ANALYSIS"
-    CHIEF_EDITOR_IMPACT_ANALYSIS = "CHIEF_EDITOR_IMPACT_ANALYSIS"
-    REVISION_PLAN = "REVISION_PLAN"
-    USER_CONFIRMATION = "USER_CONFIRMATION"
-    APPLY_CHANGE = "APPLY_CHANGE"
-    CONSISTENCY_REVIEW = "CONSISTENCY_REVIEW"
-    PROJECT_UPDATED = "PROJECT_UPDATED"
-    CANCELLED = "CANCELLED"
-
-
-class AffectedItemType(str, Enum):
-    CHAPTER = "chapter"
-    CHARACTER = "character"
-    WORLD = "world"
-    OUTLINE = "outline"
-    FORESHADOWING = "foreshadowing"
-    TIMELINE = "timeline"
-    STYLE = "style"
-
-
-class ImpactLevel(str, Enum):
-    LOW = "low"
-    MEDIUM = "medium"
-    HIGH = "high"
+from app.workflows.project_maintenance_types import (
+    AffectedItemType,
+    ImpactLevel,
+    ProjectMaintenanceStatus,
+)
 
 
 class MaintenanceConfirmationKind(str, Enum):
