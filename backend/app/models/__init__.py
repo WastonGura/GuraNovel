@@ -26,6 +26,7 @@ from app.models.enums import (
     ReviewMode,
     WorkflowType,
 )
+from app.models.maintenance import MaintenanceAffectedItem, MaintenanceChange
 
 __all__ = [
     "ActionRequest",
@@ -38,6 +39,8 @@ __all__ = [
     "DocumentType",
     "DocumentVersion",
     "IssueSeverity",
+    "MaintenanceAffectedItem",
+    "MaintenanceChange",
     "Project",
     "ReviewMode",
     "ReviewReport",

@@ -30,6 +30,11 @@ def test_initial_migration_generates_postgresql_upgrade_sql() -> None:
     assert "CREATE TABLE review_reports" in sql
     assert "ADD CONSTRAINT fk_documents_current_version" in sql
     assert "CREATE INDEX idx_document_versions_created_at" in sql
+    assert "CREATE TABLE maintenance_changes" in sql
+    assert "CREATE TABLE maintenance_affected_items" in sql
+    assert "uq_workflow_runs_project_id_id" in sql
+    assert "fk_maintenance_changes_project_run" in sql
+    assert "ck_maintenance_changes_metadata_size" in sql
 
 
 def test_initial_migration_generates_downgrade_sql() -> None:
@@ -38,3 +43,12 @@ def test_initial_migration_generates_downgrade_sql() -> None:
     assert "DROP CONSTRAINT fk_documents_current_version" in sql
     assert "DROP TABLE document_versions" in sql
     assert "DROP TABLE users" in sql
+
+
+def test_maintenance_migration_downgrades_in_dependency_order() -> None:
+    sql = run_alembic("downgrade", "0002_maintenance_persistence:0001_initial_mvp_schema", "--sql")
+
+    affected = sql.index("DROP TABLE maintenance_affected_items")
+    changes = sql.index("DROP TABLE maintenance_changes")
+    workflow_unique = sql.index("DROP CONSTRAINT uq_workflow_runs_project_id_id")
+    assert affected < changes < workflow_unique
