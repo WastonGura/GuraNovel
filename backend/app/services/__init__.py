@@ -24,6 +24,12 @@ from app.services.project_maintenance_foundation_service import (
     ProjectMaintenanceFoundationService,
     ProjectMaintenanceWaiting,
 )
+from app.services.maintenance_change_service import (
+    MaintenanceAffectedItemCreate,
+    MaintenanceChangeCommitIndeterminateError,
+    MaintenanceChangeService,
+    MaintenanceChangeValidationError,
+)
 
 __all__ = [
     "DocumentService",
@@ -42,4 +48,8 @@ __all__ = [
     "ProjectMaintenanceCommitIndeterminateError",
     "ProjectMaintenanceFoundationService",
     "ProjectMaintenanceWaiting",
+    "MaintenanceAffectedItemCreate",
+    "MaintenanceChangeCommitIndeterminateError",
+    "MaintenanceChangeService",
+    "MaintenanceChangeValidationError",
 ]

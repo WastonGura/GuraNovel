@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from decimal import Decimal
+from typing import TYPE_CHECKING
 from uuid import UUID, uuid4
 
 from sqlalchemy import Boolean, DateTime, ForeignKey, Index, Integer, Numeric, Text, UniqueConstraint, func, text
@@ -12,6 +13,9 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base
 from app.models.enums import ActionRequestStatus
+
+if TYPE_CHECKING:
+    from app.models.maintenance import MaintenanceChange
 
 
 class TimestampMixin:
@@ -62,11 +66,16 @@ class Project(TimestampMixin, Base):
 
     owner: Mapped[User | None] = relationship(back_populates="projects")
     chapters: Mapped[list[Chapter]] = relationship(back_populates="project", cascade="all, delete-orphan")
-    workflow_runs: Mapped[list[WorkflowRun]] = relationship(back_populates="project")
+    workflow_runs: Mapped[list[WorkflowRun]] = relationship(
+        back_populates="project", cascade="all, delete", passive_deletes=True
+    )
     documents: Mapped[list[Document]] = relationship(back_populates="project")
     action_requests: Mapped[list[ActionRequest]] = relationship(back_populates="project")
     conversations: Mapped[list[AgentConversation]] = relationship(back_populates="project")
     review_reports: Mapped[list[ReviewReport]] = relationship(back_populates="project")
+    maintenance_changes: Mapped[list[MaintenanceChange]] = relationship(
+        back_populates="project", cascade="all, delete", passive_deletes=True
+    )
 
 
 class Chapter(TimestampMixin, Base):
@@ -102,6 +111,7 @@ class Chapter(TimestampMixin, Base):
 class WorkflowRun(Base):
     __tablename__ = "workflow_runs"
     __table_args__ = (
+        UniqueConstraint("project_id", "id", name="uq_workflow_runs_project_id_id"),
         Index("idx_workflow_runs_project_id", "project_id"), Index("idx_workflow_runs_chapter_id", "chapter_id"),
         Index("idx_workflow_runs_type_status", "workflow_type", "status"), Index("idx_workflow_runs_awaiting_user", "awaiting_user"),
     )
@@ -130,6 +140,13 @@ class WorkflowRun(Base):
     conversations: Mapped[list[AgentConversation]] = relationship(back_populates="workflow_run")
     messages: Mapped[list[AgentMessage]] = relationship(back_populates="workflow_run")
     review_reports: Mapped[list[ReviewReport]] = relationship(back_populates="workflow_run")
+    maintenance_change: Mapped[MaintenanceChange | None] = relationship(
+        back_populates="workflow_run",
+        cascade="all, delete",
+        uselist=False,
+        passive_deletes=True,
+        overlaps="maintenance_changes,project",
+    )
 
 
 class WorkflowCheckpoint(Base):
