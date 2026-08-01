@@ -30,6 +30,11 @@ from app.services.maintenance_change_service import (
     MaintenanceChangeService,
     MaintenanceChangeValidationError,
 )
+from app.services.project_maintenance_service import (
+    ProjectMaintenanceComposition,
+    ProjectMaintenanceService,
+    ProjectMaintenanceStarted,
+)
 
 __all__ = [
     "DocumentService",
@@ -52,4 +57,7 @@ __all__ = [
     "MaintenanceChangeCommitIndeterminateError",
     "MaintenanceChangeService",
     "MaintenanceChangeValidationError",
+    "ProjectMaintenanceComposition",
+    "ProjectMaintenanceService",
+    "ProjectMaintenanceStarted",
 ]
