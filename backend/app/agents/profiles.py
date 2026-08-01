@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
@@ -70,15 +71,36 @@ class ContextPolicyProfile(_StrictProfileModel):
 
 
 class AgentProfile(_StrictProfileModel):
-    name: Literal["concept_agent", "chief_editor"]
+    name: Literal[
+        "concept_agent",
+        "chief_editor",
+        "lore_agent",
+        "plot_architect_agent",
+        "worldbuilding_agent",
+    ]
+    mode: Literal["maintenance_impact", "revision_plan"] | None = Field(
+        default=None, exclude=True
+    )
     version: str = Field(min_length=1, max_length=64)
     description: str = Field(min_length=1, max_length=512)
-    agent_role: Literal["concept_agent", "chief_editor_agent"]
+    agent_role: Literal[
+        "concept_agent",
+        "chief_editor_agent",
+        "lore_agent",
+        "plot_architect_agent",
+        "worldbuilding_agent",
+    ]
     model: ModelProfile
     permissions: PermissionsProfile
     context_policy: ContextPolicyProfile
     system_prompt: str = Field(min_length=1, max_length=4000)
-    output_schema: Literal["concept_generation_output", "chief_editor_review_output"]
+    output_schema: Literal[
+        "concept_generation_output",
+        "chief_editor_review_output",
+        "lore_maintenance_impact_output",
+        "chief_editor_maintenance_impact_output",
+        "revision_plan_output",
+    ]
 
     @field_validator("version")
     @classmethod
@@ -95,23 +117,108 @@ class AgentProfile(_StrictProfileModel):
         return value
 
 
+@dataclass(frozen=True)
+class _ProfileManifest:
+    filename: str
+    agent_role: str
+    output_schema: str
+    can_read: frozenset[str]
+    can_write: frozenset[str]
+    cannot: frozenset[str]
+
+
 class ProfileRegistry:
-    """Load the one bundled profile known to this application version.
+    """Load only exact bundled agent/mode pairs known to this application version.
 
     Profile selection is deliberately not a general filesystem API.  The caller can
-    request only ``concept_agent`` and cannot influence a provider endpoint or any
-    credential-bearing configuration.
+    never influence a path, provider endpoint, model, or credential-bearing setting.
     """
+
+    _MANIFESTS: dict[tuple[str, str | None], _ProfileManifest] = {
+        ("concept_agent", None): _ProfileManifest(
+            "concept.yaml",
+            "concept_agent",
+            "concept_generation_output",
+            frozenset({"project_creation_context"}),
+            frozenset({"pitch/concept_options.md"}),
+            frozenset({"network", "credentials"}),
+        ),
+        ("chief_editor", None): _ProfileManifest(
+            "chief_editor.yaml",
+            "chief_editor_agent",
+            "chief_editor_review_output",
+            frozenset({"pitch/concept_options.md"}),
+            frozenset(),
+            frozenset({"pitch/selected_concept.md"}),
+        ),
+        ("lore_agent", "maintenance_impact"): _ProfileManifest(
+            "lore_maintenance_impact.yaml",
+            "lore_agent",
+            "lore_maintenance_impact_output",
+            frozenset({"maintenance_context", "document_refs"}),
+            frozenset(),
+            frozenset({"network", "credentials", "document_versions"}),
+        ),
+        ("chief_editor", "maintenance_impact"): _ProfileManifest(
+            "chief_editor_maintenance_impact.yaml",
+            "chief_editor_agent",
+            "chief_editor_maintenance_impact_output",
+            frozenset({"maintenance_context", "document_refs"}),
+            frozenset(),
+            frozenset({"network", "credentials", "document_versions"}),
+        ),
+        ("plot_architect_agent", "revision_plan"): _ProfileManifest(
+            "plot_architect_revision_plan.yaml",
+            "plot_architect_agent",
+            "revision_plan_output",
+            frozenset({"maintenance_context", "document_refs"}),
+            frozenset({"revision_plan"}),
+            frozenset({"network", "credentials", "document_versions"}),
+        ),
+        ("worldbuilding_agent", "revision_plan"): _ProfileManifest(
+            "worldbuilding_revision_plan.yaml",
+            "worldbuilding_agent",
+            "revision_plan_output",
+            frozenset({"maintenance_context", "document_refs"}),
+            frozenset({"revision_plan"}),
+            frozenset({"network", "credentials", "document_versions"}),
+        ),
+    }
 
     def __init__(self, profiles_directory: Path | None = None) -> None:
         self._profiles_directory = profiles_directory or Path(__file__).with_name("profiles")
 
-    def load(self, name: str) -> AgentProfile:
-        if name not in {"concept_agent", "chief_editor"}:
+    def load(self, name: str, mode: str | None = None) -> AgentProfile:
+        manifest = self._MANIFESTS.get((name, mode))
+        if manifest is None:
             raise ProfileRegistryError()
+        profile: AgentProfile | None = None
         try:
-            filename = "concept.yaml" if name == "concept_agent" else "chief_editor.yaml"
-            raw = yaml.safe_load((self._profiles_directory / filename).read_text())
-            return AgentProfile.model_validate(raw)
+            raw = yaml.safe_load((self._profiles_directory / manifest.filename).read_text())
+            profile = AgentProfile.model_validate(raw)
         except (OSError, yaml.YAMLError, TypeError, ValueError, ValidationError):
+            pass
+        if profile is None or not self._matches_manifest(profile, name, mode, manifest):
             raise ProfileRegistryError() from None
+        return profile
+
+    @staticmethod
+    def _matches_manifest(
+        profile: AgentProfile,
+        name: str,
+        mode: str | None,
+        manifest: _ProfileManifest,
+    ) -> bool:
+        permissions = profile.permissions
+        return (
+            profile.name == name
+            and profile.mode == mode
+            and profile.agent_role == manifest.agent_role
+            and profile.output_schema == manifest.output_schema
+            and len(permissions.can_read) == len(manifest.can_read)
+            and frozenset(permissions.can_read) == manifest.can_read
+            and len(permissions.can_write) == len(manifest.can_write)
+            and frozenset(permissions.can_write) == manifest.can_write
+            and len(permissions.cannot) == len(manifest.cannot)
+            and frozenset(permissions.cannot) == manifest.cannot
+        )
