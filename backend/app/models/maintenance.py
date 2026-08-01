@@ -22,7 +22,7 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base
 from app.models.core import Chapter, Document, Project, TimestampMixin, WorkflowRun
-from app.workflows.project_maintenance import (
+from app.workflows.project_maintenance_types import (
     AffectedItemType,
     ImpactLevel,
     ProjectMaintenanceStatus,

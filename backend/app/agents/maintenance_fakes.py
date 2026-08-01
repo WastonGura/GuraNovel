@@ -7,7 +7,14 @@ from uuid import NAMESPACE_URL, UUID, uuid5
 
 from pydantic import BaseModel
 
-from app.agents.maintenance_contracts import MaintenanceImpactRequest, RevisionPlanRequest
+from app.agents.maintenance_contracts import (
+    ApplyChangeRequest,
+    ConsistencyReviewOutcome,
+    MaintenanceImpactRequest,
+    PostChangeRequest,
+    RevisionOperationKind,
+    RevisionPlanRequest,
+)
 from app.agents.profiles import AgentProfile
 
 
@@ -28,6 +35,14 @@ def canonical_json_bytes(result: BaseModel) -> bytes:
 
 class DeterministicMaintenanceProvider:
     """Generate fixed-shape results using only typed IDs and an allowlisted profile mode."""
+
+    def __init__(
+        self,
+        consistency_outcome: ConsistencyReviewOutcome = ConsistencyReviewOutcome.CLEAN,
+    ) -> None:
+        if not isinstance(consistency_outcome, ConsistencyReviewOutcome):
+            raise ValueError("consistency outcome is not typed")
+        self._consistency_outcome = consistency_outcome
 
     async def analyze_maintenance_impact(
         self, request: MaintenanceImpactRequest, profile: AgentProfile
@@ -141,5 +156,144 @@ class DeterministicMaintenanceProvider:
             "warnings": [],
         }
 
+    async def propose_changes(
+        self, request: ApplyChangeRequest, profile: AgentProfile
+    ) -> object:
+        edits = []
+        for operation in request.operations:
+            if operation.operation is RevisionOperationKind.RETAIN:
+                continue
+            edits.append(
+                {
+                    "proposed_edit_id": str(
+                        _stable_id(
+                            "proposed-edit",
+                            request.approval_id,
+                            request.revision_plan_document_id,
+                            request.revision_plan_version_id,
+                            operation.operation_id,
+                        )
+                    ),
+                    "sequence": len(edits) + 1,
+                    "project_id": str(request.project_id),
+                    "workflow_run_id": str(request.workflow_run_id),
+                    "change_request_id": str(request.change_request_id),
+                    "approval_id": str(request.approval_id),
+                    "revision_plan_id": str(request.revision_plan_id),
+                    "revision_plan_document_id": str(request.revision_plan_document_id),
+                    "revision_plan_version_id": str(request.revision_plan_version_id),
+                    "revision_operation_id": str(operation.operation_id),
+                    "document_id": str(operation.target.document_id),
+                    "expected_current_version_id": str(
+                        operation.target.current_version_id
+                    ),
+                    "operation": "replace_content",
+                    "content": (
+                        "# Proposed maintenance revision\n\n"
+                        "This deterministic proposal is linked to document "
+                        f"{operation.target.document_id} and approved operation "
+                        f"{operation.operation_id}.\n"
+                    ),
+                    "rationale": "Generate a replacement body for the approved revision operation.",
+                }
+            )
+        return {
+            "change_set_id": str(
+                _stable_id(
+                    "change-set",
+                    profile.name,
+                    request.project_id,
+                    request.change_request_id,
+                    request.approval_id,
+                    request.revision_plan_document_id,
+                    request.revision_plan_version_id,
+                )
+            ),
+            "project_id": str(request.project_id),
+            "workflow_run_id": str(request.workflow_run_id),
+            "change_request_id": str(request.change_request_id),
+            "approval_id": str(request.approval_id),
+            "revision_plan_id": str(request.revision_plan_id),
+            "revision_plan_document_id": str(request.revision_plan_document_id),
+            "revision_plan_version_id": str(request.revision_plan_version_id),
+            "proposed_edits": edits,
+        }
 
-__all__ = ["DeterministicMaintenanceProvider", "canonical_json_bytes"]
+    async def review_consistency(
+        self, request: PostChangeRequest, profile: AgentProfile
+    ) -> object:
+        outcome = self._consistency_outcome
+        findings: list[dict[str, object]] = []
+        if outcome is not ConsistencyReviewOutcome.CLEAN:
+            blocking = outcome is ConsistencyReviewOutcome.BLOCKING
+            affected_documents = [
+                {
+                    "document_id": str(item.document_id),
+                    "current_version_id": str(item.current_version_id),
+                }
+                for item in sorted(
+                    request.applied_changes, key=lambda item: str(item.document_id)
+                )
+            ]
+            findings.append(
+                {
+                    "finding_id": str(
+                        _stable_id(
+                            "consistency-finding",
+                            outcome.value,
+                            request.change_set_id,
+                        )
+                    ),
+                    "sequence": 1,
+                    "code": f"post_change_{outcome.value}",
+                    "severity": outcome.value,
+                    "affected_documents": affected_documents,
+                    "blocking": blocking,
+                    "suggested_corrective_action": (
+                        "Prepare a corrective revision plan before project completion."
+                        if blocking
+                        else "Ask the user whether to accept this consistency warning."
+                    ),
+                }
+            )
+        applied_version_ids = sorted(
+            str(item.current_version_id) for item in request.applied_changes
+        )
+        return {
+            "review_id": str(
+                _stable_id(
+                    "consistency-review",
+                    profile.name,
+                    outcome.value,
+                    request.change_set_id,
+                    *applied_version_ids,
+                )
+            ),
+            "project_id": str(request.project_id),
+            "workflow_run_id": str(request.workflow_run_id),
+            "change_request_id": str(request.change_request_id),
+            "approval_id": str(request.approval_id),
+            "revision_plan_id": str(request.revision_plan_id),
+            "revision_plan_document_id": str(request.revision_plan_document_id),
+            "revision_plan_version_id": str(request.revision_plan_version_id),
+            "change_set_id": str(request.change_set_id),
+            "outcome": outcome.value,
+            "findings": findings,
+        }
+
+
+class DeterministicApplyChangeProvider(DeterministicMaintenanceProvider):
+    pass
+
+
+class DeterministicPostChangeProvider(DeterministicMaintenanceProvider):
+    def __init__(self, outcome: ConsistencyReviewOutcome) -> None:
+        super().__init__(consistency_outcome=outcome)
+
+
+__all__ = [
+    "DeterministicApplyChangeProvider",
+    "DeterministicMaintenanceProvider",
+    "DeterministicPostChangeProvider",
+    "canonical_json_bytes",
+]

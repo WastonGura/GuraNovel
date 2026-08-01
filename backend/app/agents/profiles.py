@@ -74,11 +74,12 @@ class AgentProfile(_StrictProfileModel):
     name: Literal[
         "concept_agent",
         "chief_editor",
+        "archivist_agent",
         "lore_agent",
         "plot_architect_agent",
         "worldbuilding_agent",
     ]
-    mode: Literal["maintenance_impact", "revision_plan"] | None = Field(
+    mode: Literal["maintenance_impact", "revision_plan", "apply_change", "post_change"] | None = Field(
         default=None, exclude=True
     )
     version: str = Field(min_length=1, max_length=64)
@@ -86,6 +87,7 @@ class AgentProfile(_StrictProfileModel):
     agent_role: Literal[
         "concept_agent",
         "chief_editor_agent",
+        "archivist_agent",
         "lore_agent",
         "plot_architect_agent",
         "worldbuilding_agent",
@@ -100,6 +102,8 @@ class AgentProfile(_StrictProfileModel):
         "lore_maintenance_impact_output",
         "chief_editor_maintenance_impact_output",
         "revision_plan_output",
+        "apply_change_output",
+        "consistency_review_output",
     ]
 
     @field_validator("version")
@@ -125,6 +129,8 @@ class _ProfileManifest:
     can_read: frozenset[str]
     can_write: frozenset[str]
     cannot: frozenset[str]
+    context_required: frozenset[str] | None = None
+    context_optional: frozenset[str] | None = None
 
 
 class ProfileRegistry:
@@ -183,6 +189,53 @@ class ProfileRegistry:
             frozenset({"revision_plan"}),
             frozenset({"network", "credentials", "document_versions"}),
         ),
+        ("archivist_agent", "apply_change"): _ProfileManifest(
+            "archivist_apply_change.yaml",
+            "archivist_agent",
+            "apply_change_output",
+            frozenset({"maintenance_context", "approved_revision_plan"}),
+            frozenset({"proposed_changes"}),
+            frozenset(
+                {"network", "credentials", "filesystem", "database", "document_service", "document_versions"}
+            ),
+            frozenset(
+                {
+                    "project_id",
+                    "workflow_run_id",
+                    "change_request_id",
+                    "approval_id",
+                    "revision_plan_id",
+                    "revision_plan_document_id",
+                    "revision_plan_version_id",
+                    "operations",
+                }
+            ),
+            frozenset(),
+        ),
+        ("lore_agent", "post_change"): _ProfileManifest(
+            "lore_post_change.yaml",
+            "lore_agent",
+            "consistency_review_output",
+            frozenset({"maintenance_context", "applied_changes"}),
+            frozenset(),
+            frozenset(
+                {"network", "credentials", "filesystem", "database", "document_service", "document_versions"}
+            ),
+            frozenset(
+                {
+                    "project_id",
+                    "workflow_run_id",
+                    "change_request_id",
+                    "approval_id",
+                    "revision_plan_id",
+                    "revision_plan_document_id",
+                    "revision_plan_version_id",
+                    "change_set_id",
+                    "applied_changes",
+                }
+            ),
+            frozenset(),
+        ),
     }
 
     def __init__(self, profiles_directory: Path | None = None) -> None:
@@ -221,4 +274,18 @@ class ProfileRegistry:
             and frozenset(permissions.can_write) == manifest.can_write
             and len(permissions.cannot) == len(manifest.cannot)
             and frozenset(permissions.cannot) == manifest.cannot
+            and (
+                manifest.context_required is None
+                or (
+                    len(profile.context_policy.required) == len(manifest.context_required)
+                    and frozenset(profile.context_policy.required) == manifest.context_required
+                )
+            )
+            and (
+                manifest.context_optional is None
+                or (
+                    len(profile.context_policy.optional) == len(manifest.context_optional)
+                    and frozenset(profile.context_policy.optional) == manifest.context_optional
+                )
+            )
         )
