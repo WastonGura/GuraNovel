@@ -1,0 +1,33 @@
+name: plot_architect_agent
+mode: revision_plan
+version: v1
+description: Propose ordered plot revisions against canonical document version references.
+agent_role: plot_architect_agent
+model:
+  provider: fake
+  model: deterministic-plot-revision-v1
+  temperature: 0.0
+  top_p: 1.0
+  max_tokens: 2048
+  response_format: json_schema
+permissions:
+  can_read:
+    - maintenance_context
+    - document_refs
+  can_write:
+    - revision_plan
+  cannot:
+    - network
+    - credentials
+    - document_versions
+context_policy:
+  required:
+    - project_id
+    - workflow_run_id
+    - change_request
+    - affected_items
+    - document_refs
+  optional: []
+  max_context_tokens: 8192
+system_prompt: Propose a revision plan using only supplied references. Never write project documents.
+output_schema: revision_plan_output
