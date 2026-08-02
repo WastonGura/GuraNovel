@@ -114,16 +114,13 @@ async def set_run_phase(
     run.awaiting_user = status is ProjectMaintenanceStatus.USER_CONFIRMATION
     run.completed_at = (
         datetime.now(UTC)
-        if status
-        in {ProjectMaintenanceStatus.PROJECT_UPDATED, ProjectMaintenanceStatus.CANCELLED}
+        if status in {ProjectMaintenanceStatus.PROJECT_UPDATED, ProjectMaintenanceStatus.CANCELLED}
         else None
     )
     await session.commit()
 
 
-def affected(
-    document_id: UUID, chapter_id: UUID
-) -> tuple[MaintenanceAffectedItemCreate, ...]:
+def affected(document_id: UUID, chapter_id: UUID) -> tuple[MaintenanceAffectedItemCreate, ...]:
     return (
         MaintenanceAffectedItemCreate(
             item_type=AffectedItemType.WORLD,
@@ -219,6 +216,47 @@ async def advance_change(
         applied_at=applied_at,
         metadata={} if metadata is None else metadata,
     )
+
+
+async def change_at_apply(
+    session: AsyncSession, suffix: str
+) -> tuple[Project, WorkflowRun, Document, MaintenanceChange]:
+    project, run, document, chapter = await seed_project(session, suffix)
+    service = MaintenanceChangeService(session)
+    change = await service.create_change(
+        project_id=project.id,
+        workflow_run_id=run.id,
+        title="Staged maintenance",
+        original_change_request="Exercise the staged lifecycle boundary.",
+    )
+    change = await advance_change(
+        session,
+        change,
+        ProjectMaintenanceStatus.LORE_IMPACT_ANALYSIS,
+        revision_plan_document_id=None,
+        applied_at=None,
+    )
+    change = await service.replace_affected_items(
+        project_id=project.id,
+        change_id=change.id,
+        expected_updated_at=change.updated_at,
+        affected_items=affected(document.id, chapter.id),
+    )
+    for status, plan_id in (
+        (ProjectMaintenanceStatus.CHIEF_EDITOR_IMPACT_ANALYSIS, None),
+        (ProjectMaintenanceStatus.REVISION_PLAN, None),
+        (ProjectMaintenanceStatus.REVISION_PLAN, document.id),
+        (ProjectMaintenanceStatus.USER_CONFIRMATION, document.id),
+        (ProjectMaintenanceStatus.APPLY_CHANGE, document.id),
+    ):
+        change = await advance_change(
+            session,
+            change,
+            status,
+            revision_plan_document_id=plan_id,
+            applied_at=None,
+        )
+    return project, run, document, change
 
 
 @pytest.mark.integration
@@ -351,6 +389,153 @@ async def test_clean_create_then_legal_lifecycle_and_ordered_items_round_trip(
             assert await durable_snapshot(observer, project.id) == terminal_snapshot
     finally:
         await engine.dispose()
+
+
+@pytest.mark.integration
+@pytest.mark.anyio
+async def test_stage_update_change_flushes_without_commit_and_caller_rollback_restores(
+    async_session: AsyncSession, integration_database_url: str
+) -> None:
+    project, run = await seed_bare_project(async_session, "stage-rollback")
+    service = MaintenanceChangeService(async_session)
+    change = await service.create_change(
+        project_id=project.id,
+        workflow_run_id=run.id,
+        title="Stage only",
+        original_change_request="Do not commit from the staging boundary.",
+    )
+    change_id = change.id
+
+    staged = await service.stage_update_change(
+        project_id=project.id,
+        change_id=change.id,
+        expected_updated_at=change.updated_at,
+        expected_status=ProjectMaintenanceStatus.CHANGE_REQUESTED,
+        target_status=ProjectMaintenanceStatus.LORE_IMPACT_ANALYSIS,
+        revision_plan_document_id=None,
+        applied_at=None,
+        metadata={"staged": True},
+    )
+    assert staged.status == ProjectMaintenanceStatus.LORE_IMPACT_ANALYSIS.value
+    assert staged.metadata_ == {"staged": True}
+
+    engine = create_async_engine(integration_database_url, pool_pre_ping=True)
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    try:
+        async with sessions() as observer:
+            assert (
+                await observer.scalar(
+                    select(MaintenanceChange.status).where(MaintenanceChange.id == change.id)
+                )
+                == ProjectMaintenanceStatus.CHANGE_REQUESTED.value
+            )
+        await async_session.rollback()
+        async with sessions() as observer:
+            persisted = await observer.get(MaintenanceChange, change_id)
+            assert persisted is not None
+            assert (
+                persisted.status,
+                persisted.metadata_,
+                persisted.revision_plan_document_id,
+                persisted.applied_at,
+            ) == (ProjectMaintenanceStatus.CHANGE_REQUESTED.value, {}, None, None)
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.integration
+@pytest.mark.anyio
+async def test_staged_first_apply_timestamp_and_corrective_permission_are_explicit(
+    async_session: AsyncSession,
+) -> None:
+    project, run, document, change = await change_at_apply(async_session, "stage-apply")
+    service = MaintenanceChangeService(async_session)
+    first_applied_at = datetime.now(UTC)
+    project_id = project.id
+    run_id = run.id
+    document_id = document.id
+
+    change = await service.stage_update_change(
+        project_id=project.id,
+        change_id=change.id,
+        expected_updated_at=change.updated_at,
+        expected_status=ProjectMaintenanceStatus.APPLY_CHANGE,
+        target_status=ProjectMaintenanceStatus.CONSISTENCY_REVIEW,
+        revision_plan_document_id=document.id,
+        applied_at=first_applied_at,
+        metadata={"phase": "first-review"},
+    )
+    run = await async_session.get(WorkflowRun, run_id)
+    assert run is not None
+    run.status = ProjectMaintenanceStatus.CONSISTENCY_REVIEW.value
+    run.current_node = _NODES[ProjectMaintenanceStatus.CONSISTENCY_REVIEW]
+    await async_session.commit()
+    assert change.applied_at == first_applied_at
+
+    change = await advance_change(
+        async_session,
+        change,
+        ProjectMaintenanceStatus.REVISION_PLAN,
+        revision_plan_document_id=None,
+        applied_at=first_applied_at,
+    )
+    change_id = change.id
+    change = await advance_change(
+        async_session,
+        change,
+        ProjectMaintenanceStatus.REVISION_PLAN,
+        revision_plan_document_id=document.id,
+        applied_at=first_applied_at,
+    )
+    change = await advance_change(
+        async_session,
+        change,
+        ProjectMaintenanceStatus.USER_CONFIRMATION,
+        revision_plan_document_id=document.id,
+        applied_at=first_applied_at,
+    )
+
+    with pytest.raises(WorkflowStateError):
+        await service.stage_update_change(
+            project_id=project.id,
+            change_id=change.id,
+            expected_updated_at=change.updated_at,
+            expected_status=ProjectMaintenanceStatus.USER_CONFIRMATION,
+            target_status=ProjectMaintenanceStatus.APPLY_CHANGE,
+            revision_plan_document_id=document.id,
+            applied_at=first_applied_at,
+            metadata={"phase": "corrective-apply"},
+        )
+    await async_session.rollback()
+
+    change = await service.get_change(project_id=project_id, change_id=change_id)
+    change = await service.stage_update_change(
+        project_id=project_id,
+        change_id=change.id,
+        expected_updated_at=change.updated_at,
+        expected_status=ProjectMaintenanceStatus.USER_CONFIRMATION,
+        target_status=ProjectMaintenanceStatus.APPLY_CHANGE,
+        revision_plan_document_id=document_id,
+        applied_at=first_applied_at,
+        metadata={"phase": "corrective-apply"},
+        allow_existing_applied=True,
+    )
+    run = await async_session.get(WorkflowRun, run_id)
+    assert run is not None
+    run.status = ProjectMaintenanceStatus.APPLY_CHANGE.value
+    run.current_node = _NODES[ProjectMaintenanceStatus.APPLY_CHANGE]
+    run.awaiting_user = False
+    await async_session.commit()
+
+    assert (
+        change.status,
+        change.applied_at,
+        change.metadata_,
+    ) == (
+        ProjectMaintenanceStatus.APPLY_CHANGE.value,
+        first_applied_at,
+        {"phase": "corrective-apply"},
+    )
 
 
 @pytest.mark.integration
@@ -685,15 +870,18 @@ async def test_concurrent_creation_for_one_run_persists_exactly_one(
             with pytest.raises(ConflictError):
                 await asyncio.wait_for(second_task, timeout=5)
         async with sessions() as observer:
-            assert len(
-                list(
-                    await observer.scalars(
-                        select(MaintenanceChange).where(
-                            MaintenanceChange.workflow_run_id == run.id
+            assert (
+                len(
+                    list(
+                        await observer.scalars(
+                            select(MaintenanceChange).where(
+                                MaintenanceChange.workflow_run_id == run.id
+                            )
                         )
                     )
                 )
-            ) == 1
+                == 1
+            )
     finally:
         await engine.dispose()
 

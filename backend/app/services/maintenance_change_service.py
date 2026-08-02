@@ -132,9 +132,7 @@ class MaintenanceAffectedItemCreate:
             self.existing_document_id, UUID
         ):
             raise MaintenanceChangeValidationError("Document reference is invalid.")
-        if self.existing_chapter_id is not None and not isinstance(
-            self.existing_chapter_id, UUID
-        ):
+        if self.existing_chapter_id is not None and not isinstance(self.existing_chapter_id, UUID):
             raise MaintenanceChangeValidationError("Chapter reference is invalid.")
 
 
@@ -181,9 +179,7 @@ class MaintenanceChangeService:
             allow_terminal=False,
         )
         existing = await self.session.scalar(
-            select(MaintenanceChange.id).where(
-                MaintenanceChange.workflow_run_id == workflow_run_id
-            )
+            select(MaintenanceChange.id).where(MaintenanceChange.workflow_run_id == workflow_run_id)
         )
         if existing is not None:
             raise ConflictError("A maintenance change already exists for this workflow run.")
@@ -302,28 +298,114 @@ class MaintenanceChangeService:
             current_status = ProjectMaintenanceStatus(change.status)
         except ValueError:
             raise WorkflowStateError("Maintenance change status is invalid.") from None
-        _validate_lifecycle(
+        await self._stage_change_update(
+            change=change,
+            project_id=project_id,
             current_status=current_status,
             target_status=status,
+            revision_plan_document_id=revision_plan_document_id,
+            applied_at=applied_at,
+            metadata=normalized_metadata,
+            allow_existing_applied=False,
+        )
+        assert run.status == status.value
+        await self._commit()
+        return change
+
+    async def stage_update_change(
+        self,
+        *,
+        project_id: UUID,
+        change_id: UUID,
+        expected_updated_at: datetime,
+        expected_status: ProjectMaintenanceStatus,
+        target_status: ProjectMaintenanceStatus,
+        revision_plan_document_id: UUID | None,
+        applied_at: datetime | None,
+        metadata: object,
+        allow_existing_applied: bool = False,
+    ) -> MaintenanceChange:
+        """Stage a lifecycle update in the caller's transaction without committing."""
+
+        if not isinstance(expected_status, ProjectMaintenanceStatus) or not isinstance(
+            target_status, ProjectMaintenanceStatus
+        ):
+            raise MaintenanceChangeValidationError("Maintenance status is not typed.")
+        if type(allow_existing_applied) is not bool:
+            raise MaintenanceChangeValidationError("Corrective-apply permission is not typed.")
+        _validate_expected_updated_at(expected_updated_at)
+        if applied_at is not None and (
+            not isinstance(applied_at, datetime) or applied_at.tzinfo is None
+        ):
+            raise MaintenanceChangeValidationError("Applied time must be timezone-aware.")
+        normalized_metadata = self.normalize_metadata(metadata)
+        change, run = await self._locked_change_context(
+            project_id=project_id,
+            change_id=change_id,
+            expected_run_status=expected_status,
+            allow_terminal=False,
+        )
+        if change.updated_at != expected_updated_at:
+            raise ConflictError("The maintenance change has been updated.")
+        try:
+            current_status = ProjectMaintenanceStatus(change.status)
+        except ValueError:
+            raise WorkflowStateError("Maintenance change status is invalid.") from None
+        if current_status is not expected_status:
+            raise WorkflowStateError("Maintenance change status is stale or inconsistent.")
+        await self._stage_change_update(
+            change=change,
+            project_id=project_id,
+            current_status=current_status,
+            target_status=target_status,
+            revision_plan_document_id=revision_plan_document_id,
+            applied_at=applied_at,
+            metadata=normalized_metadata,
+            allow_existing_applied=allow_existing_applied,
+        )
+        assert run.status == expected_status.value
+        return change
+
+    async def _stage_change_update(
+        self,
+        *,
+        change: MaintenanceChange,
+        project_id: UUID,
+        current_status: ProjectMaintenanceStatus,
+        target_status: ProjectMaintenanceStatus,
+        revision_plan_document_id: UUID | None,
+        applied_at: datetime | None,
+        metadata: dict,
+        allow_existing_applied: bool,
+    ) -> None:
+        _validate_lifecycle(
+            current_status=current_status,
+            target_status=target_status,
             current_revision_plan_document_id=change.revision_plan_document_id,
             target_revision_plan_document_id=revision_plan_document_id,
             current_applied_at=change.applied_at,
             target_applied_at=applied_at,
             has_affected_items=bool(change.affected_items),
+            allow_existing_applied=allow_existing_applied,
         )
         await self._validate_reference_scope(
             project_id=project_id,
             revision_plan_document_id=revision_plan_document_id,
             affected_items=(),
         )
-        change.status = status.value
+        change.status = target_status.value
         change.revision_plan_document_id = revision_plan_document_id
         change.applied_at = applied_at
-        change.metadata_ = normalized_metadata
+        change.metadata_ = metadata
         change.updated_at = datetime.now(UTC)
-        assert run.status == status.value
-        await self._commit()
-        return change
+        try:
+            await self.session.flush()
+        except IntegrityError:
+            await self.session.rollback()
+            raise ConflictError("The maintenance change conflicts with persisted data.") from None
+        except BaseException:
+            await self.session.rollback()
+            raise
 
     async def _locked_project_run(
         self,
@@ -519,17 +601,14 @@ class MaintenanceChangeService:
             raise MaintenanceChangeCommitIndeterminateError() from None
 
 
-def _require_text(
-    value: object, label: str, *, max_length: int, allow_multiline: bool
-) -> None:
+def _require_text(value: object, label: str, *, max_length: int, allow_multiline: bool) -> None:
     if type(value) is not str or not value.strip():
         raise MaintenanceChangeValidationError(f"{label} is required.")
     if len(value) > max_length:
         raise MaintenanceChangeValidationError(f"{label} is too long.")
     allowed = {"\t", "\n", "\r"} if allow_multiline else set()
     if any(
-        unicodedata.category(character) == "Cc" and character not in allowed
-        for character in value
+        unicodedata.category(character) == "Cc" and character not in allowed for character in value
     ):
         raise MaintenanceChangeValidationError(f"{label} contains control characters.")
 
@@ -562,8 +641,15 @@ def _validate_lifecycle(
     current_applied_at: datetime | None,
     target_applied_at: datetime | None,
     has_affected_items: bool,
+    allow_existing_applied: bool = False,
 ) -> None:
+    if type(allow_existing_applied) is not bool:
+        raise MaintenanceChangeValidationError("Corrective-apply permission is not typed.")
     if current_status is None:
+        if allow_existing_applied:
+            raise MaintenanceChangeValidationError(
+                "Corrective-apply permission does not match this transition."
+            )
         if (
             target_status is not ProjectMaintenanceStatus.CHANGE_REQUESTED
             or target_revision_plan_document_id is not None
@@ -593,10 +679,14 @@ def _validate_lifecycle(
         raise MaintenanceChangeValidationError("This workflow phase cannot have a revision plan.")
     if target_status in plan_required_statuses and target_revision_plan_document_id is None:
         raise MaintenanceChangeValidationError("This workflow phase requires a revision plan.")
-    if target_status in {
-        ProjectMaintenanceStatus.CONSISTENCY_REVIEW,
-        ProjectMaintenanceStatus.PROJECT_UPDATED,
-    } and target_applied_at is None:
+    if (
+        target_status
+        in {
+            ProjectMaintenanceStatus.CONSISTENCY_REVIEW,
+            ProjectMaintenanceStatus.PROJECT_UPDATED,
+        }
+        and target_applied_at is None
+    ):
         raise MaintenanceChangeValidationError("This workflow phase requires an applied time.")
     if target_status in early_statuses | {ProjectMaintenanceStatus.CANCELLED} and (
         target_applied_at is not None
@@ -606,6 +696,19 @@ def _validate_lifecycle(
         )
 
     transition = (current_status, target_status)
+    corrective_apply = (
+        transition
+        == (
+            ProjectMaintenanceStatus.USER_CONFIRMATION,
+            ProjectMaintenanceStatus.APPLY_CHANGE,
+        )
+        and current_applied_at is not None
+        and target_applied_at == current_applied_at
+    )
+    if allow_existing_applied and not corrective_apply:
+        raise MaintenanceChangeValidationError(
+            "Corrective-apply permission does not match this transition."
+        )
     if transition == (
         ProjectMaintenanceStatus.REVISION_PLAN,
         ProjectMaintenanceStatus.REVISION_PLAN,
@@ -630,14 +733,19 @@ def _validate_lifecycle(
     ):
         if current_applied_at is not None and target_applied_at != current_applied_at:
             raise MaintenanceChangeValidationError("Applied time is immutable once recorded.")
+    elif transition == (
+        ProjectMaintenanceStatus.APPLY_CHANGE,
+        ProjectMaintenanceStatus.CONSISTENCY_REVIEW,
+    ):
+        if current_applied_at is not None and target_applied_at != current_applied_at:
+            raise MaintenanceChangeValidationError("Applied time is immutable once recorded.")
+    elif corrective_apply:
+        if not allow_existing_applied:
+            raise WorkflowStateError(
+                "A consistency-warning confirmation cannot enter apply-change."
+            )
     elif target_applied_at != current_applied_at:
         raise MaintenanceChangeValidationError("Applied time cannot change in this transition.")
-
-    if transition == (
-        ProjectMaintenanceStatus.USER_CONFIRMATION,
-        ProjectMaintenanceStatus.APPLY_CHANGE,
-    ) and current_applied_at is not None:
-        raise WorkflowStateError("A consistency-warning confirmation cannot enter apply-change.")
 
 
 def _validate_json_structure(root: dict) -> None:
