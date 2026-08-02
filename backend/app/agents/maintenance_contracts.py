@@ -23,7 +23,8 @@ from app.workflows.project_maintenance_types import AffectedItemType, ImpactLeve
 
 _MACHINE_IDENTIFIER = re.compile(r"[a-z][a-z0-9_]{0,63}")
 _STABLE_REFERENCE = re.compile(
-    r"[a-z0-9][a-z0-9:._-]{0,63}(?:/[a-z0-9][a-z0-9:._-]{0,63})?"
+    rf"(?:{'|'.join(re.escape(item.value) for item in AffectedItemType)})/"
+    r"[a-z0-9][a-z0-9_-]{0,63}"
 )
 _WINDOWS_DRIVE_PATH = re.compile(r"(?:^|[^a-z0-9])[a-z]:", re.IGNORECASE)
 _WINDOWS_DEVICE = re.compile(
@@ -38,6 +39,11 @@ _EXTERNAL_URI_SCHEME = re.compile(
 _BARE_DOTTED_TOKEN = re.compile(
     r"(?:^|[^a-z0-9])(?:[a-z0-9_-][a-z0-9_-]*(?:\.[a-z0-9_-]+)*\.[a-z]{2,63})"
     r"(?:$|[^a-z0-9])",
+    re.IGNORECASE,
+)
+_CREDENTIAL_MATERIAL = re.compile(
+    r"(?:\b(?:api[_-]?key|access[_-]?token|auth(?:orization)?|bearer|password|passwd|secret|token)\b"
+    r"\s*[:=]\s*\S+|\bsk-[a-z0-9_-]{8,}\b)",
     re.IGNORECASE,
 )
 _UUID_FIELDS = (
@@ -84,13 +90,15 @@ def _canonical_uuid(value: object) -> UUID:
     return parsed
 
 
-def _validated_stable_reference(value: object) -> str:
+def _validated_stable_reference(
+    value: object, *, item_type: AffectedItemType | None = None
+) -> str:
     if type(value) is not str:
         raise ValueError("invalid stable reference")
-    segments = value.split("/")
     if (
         _STABLE_REFERENCE.fullmatch(value) is None
-        or any(segment in {".", ".."} for segment in segments)
+        or _CREDENTIAL_MATERIAL.search(value) is not None
+        or (item_type is not None and not value.startswith(f"{item_type.value}/"))
     ):
         raise ValueError("invalid stable reference")
     return value
@@ -109,6 +117,7 @@ def _safe_planning_text(value: str, field: str) -> str:
         or _ENCODED_PATH_MATERIAL.search(value) is not None
         or _EXTERNAL_URI_SCHEME.search(value) is not None
         or _BARE_DOTTED_TOKEN.search(value) is not None
+        or _CREDENTIAL_MATERIAL.search(value) is not None
     ):
         raise ValueError(f"invalid {field}")
     return value
@@ -259,9 +268,12 @@ class _AffectedItemFields(_StrictMaintenanceModel):
     @field_validator("reason")
     @classmethod
     def bounded_reason(cls, value: str) -> str:
-        if not value.strip() or value != value.strip() or "\x00" in value:
-            raise ValueError("invalid reason")
-        return value
+        return _safe_planning_text(value, "affected-item reason")
+
+    @model_validator(mode="after")
+    def stable_reference_matches_item_type(self) -> "_AffectedItemFields":
+        _validated_stable_reference(self.stable_reference, item_type=self.item_type)
+        return self
 
 
 class ImpactAffectedItem(_AffectedItemFields):
@@ -986,6 +998,20 @@ LorePostChangeRequest = PostChangeRequest
 LorePostChangeOutput = ConsistencyReviewOutput
 
 
+def validate_maintenance_stable_reference(
+    value: object, *, item_type: AffectedItemType
+) -> str:
+    """Validate a provider-authored reference before exposing persisted data."""
+
+    return _validated_stable_reference(value, item_type=item_type)
+
+
+def validate_public_maintenance_text(value: str, field: str) -> str:
+    """Validate provider-authored text at the public projection boundary."""
+
+    return _safe_planning_text(value, field)
+
+
 __all__ = [
     "AffectedItemReference",
     "AffectedItemType",
@@ -1025,5 +1051,7 @@ __all__ = [
     "validate_apply_change_output",
     "validate_consistency_review_output",
     "validate_lore_impact_output",
+    "validate_maintenance_stable_reference",
+    "validate_public_maintenance_text",
     "validate_revision_plan_output",
 ]

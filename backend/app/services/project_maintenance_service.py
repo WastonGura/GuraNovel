@@ -11,6 +11,7 @@ from uuid import UUID, uuid4
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
 from app.agents.maintenance_agents import (
     ArchivistAgent,
@@ -25,6 +26,7 @@ from app.agents.maintenance_contracts import (
     ApplyChangeOutput,
     ApplyChangeRequest,
     ChiefEditorMaintenanceImpactOutput,
+    ConsistencyFinding,
     ConsistencyFindingSeverity,
     ConsistencyReviewOutcome,
     ConsistencyReviewOutput,
@@ -38,11 +40,14 @@ from app.agents.maintenance_contracts import (
     RevisionPlanOutput,
     RevisionPlanRequest,
     WarningSeverity,
+    validate_maintenance_stable_reference,
+    validate_public_maintenance_text,
 )
 from app.core.errors import AppError, ConflictError, NotFoundError, WorkflowStateError
 from app.models import (
     ActionRequest,
     ActionRequestStatus,
+    Chapter,
     Document,
     DocumentSource,
     DocumentType,
@@ -70,7 +75,7 @@ from app.workflows.project_maintenance import (
     ProjectMaintenanceState,
     ProjectMaintenanceStatus,
 )
-from app.workflows.project_maintenance_types import ImpactLevel
+from app.workflows.project_maintenance_types import AffectedItemType, ImpactLevel
 from app.workspace.hashing import sha256_content
 
 
@@ -100,6 +105,94 @@ class ProjectMaintenanceStarted:
     revision_plan_version_id: UUID
     action_request_id: UUID
     state: ProjectMaintenanceState
+
+
+@dataclass(frozen=True)
+class ProjectMaintenanceAffectedItemRead:
+    id: UUID
+    position: int
+    type: str
+    stable_reference: str
+    impact_level: str
+    reason: str
+    document_id: UUID | None
+    chapter_id: UUID | None
+
+
+@dataclass(frozen=True)
+class ProjectMaintenanceRevisionOperationRead:
+    id: UUID
+    sequence: int
+    operation: str
+    document_id: UUID
+    expected_version_id: UUID
+    affected_item_ids: tuple[UUID, ...]
+    instruction: str
+
+
+@dataclass(frozen=True)
+class ProjectMaintenanceRevisionPlanRead:
+    id: UUID
+    document_id: UUID
+    version_id: UUID
+    review_outcome: str
+    summary: str
+    operations: tuple[ProjectMaintenanceRevisionOperationRead, ...]
+
+
+@dataclass(frozen=True)
+class ProjectMaintenanceConsistencyDocumentRead:
+    document_id: UUID
+    version_id: UUID
+
+
+@dataclass(frozen=True)
+class ProjectMaintenanceConsistencyFindingRead:
+    id: UUID
+    sequence: int
+    code: str
+    severity: str
+    blocking: bool
+    affected_documents: tuple[ProjectMaintenanceConsistencyDocumentRead, ...]
+    suggested_corrective_action: str
+
+
+@dataclass(frozen=True)
+class ProjectMaintenanceConsistencyReviewRead:
+    id: UUID
+    outcome: str
+    findings: tuple[ProjectMaintenanceConsistencyFindingRead, ...]
+
+
+@dataclass(frozen=True)
+class ProjectMaintenancePendingActionRead:
+    id: UUID
+    type: str
+    status: str
+    confirmation_kind: str
+    review_outcome: str
+    allowed_decisions: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class ProjectMaintenanceRunRead:
+    id: UUID
+    maintenance_change_id: UUID
+    type: str
+    status: str
+    current_node: str | None
+    next_node: str | None
+    awaiting_user: bool
+    title: str
+    change_request: str
+    created_at: datetime
+    updated_at: datetime
+    completed_at: datetime | None
+    affected_items: tuple[ProjectMaintenanceAffectedItemRead, ...]
+    revision_plan: ProjectMaintenanceRevisionPlanRead | None
+    consistency_review: ProjectMaintenanceConsistencyReviewRead | None
+    applied_document_version_ids: tuple[UUID, ...]
+    pending_action: ProjectMaintenancePendingActionRead | None
 
 
 @dataclass(frozen=True)
@@ -170,6 +263,20 @@ def _safe_text(value: object, label: str, *, maximum: int, allow_multiline: bool
     ):
         raise WorkflowStateError(f"{label} is invalid.")
     return normalized
+
+
+def _validate_scope_hints(value: object) -> tuple[str, ...]:
+    """Accept advisory categories without letting clients select canonical records."""
+
+    if type(value) is not tuple or len(value) > len(AffectedItemType):
+        raise WorkflowStateError("Maintenance scope hints are invalid.")
+    allowed = {item.value for item in AffectedItemType}
+    if (
+        any(type(item) is not str or item not in allowed for item in value)
+        or len(set(value)) != len(value)
+    ):
+        raise WorkflowStateError("Maintenance scope hints are invalid.")
+    return value
 
 
 def _checkpoint(run_id: UUID, index: int, state: ProjectMaintenanceState) -> WorkflowCheckpoint:
@@ -470,6 +577,7 @@ class ProjectMaintenanceService:
         *,
         title: str,
         change_request: str,
+        scope_hints: tuple[str, ...] = (),
     ) -> ProjectMaintenanceStarted:
         if not isinstance(project_id, UUID) or project_id.int == 0:
             raise NotFoundError("Project not found.")
@@ -480,6 +588,8 @@ class ProjectMaintenanceService:
             maximum=4000,
             allow_multiline=True,
         )
+        # Hints remain advisory: the server still analyzes the full authoritative snapshot.
+        _validate_scope_hints(scope_hints)
         run_id, change_id = uuid4(), uuid4()
 
         try:
@@ -573,6 +683,509 @@ class ProjectMaintenanceService:
             raise WorkflowStateError("Project-maintenance state could not be loaded.") from None
         await self.session.rollback()
         return result
+
+    async def get_run(
+        self, project_id: UUID, workflow_run_id: UUID
+    ) -> ProjectMaintenanceRunRead:
+        """Return one strict public projection without exposing persistence metadata."""
+
+        project = await self.session.get(Project, project_id)
+        if project is None:
+            raise NotFoundError("Project not found.")
+        run = await self.session.scalar(
+            select(WorkflowRun).where(
+                WorkflowRun.id == workflow_run_id,
+                WorkflowRun.project_id == project_id,
+                WorkflowRun.chapter_id.is_(None),
+                WorkflowRun.workflow_type == WorkflowType.PROJECT_MAINTENANCE.value,
+            )
+        )
+        if run is None:
+            raise NotFoundError("Project-maintenance workflow not found.")
+        return await self._public_run(project, run)
+
+    async def list_runs(
+        self,
+        project_id: UUID,
+        *,
+        offset: int = 0,
+        limit: int = 20,
+    ) -> tuple[ProjectMaintenanceRunRead, ...]:
+        """List newest maintenance runs with deterministic, bounded pagination."""
+
+        if (
+            type(offset) is not int
+            or offset < 0
+            or type(limit) is not int
+            or not 1 <= limit <= 100
+        ):
+            raise WorkflowStateError("Maintenance pagination is invalid.")
+        project = await self.session.get(Project, project_id)
+        if project is None:
+            raise NotFoundError("Project not found.")
+        runs = list(
+            await self.session.scalars(
+                select(WorkflowRun)
+                .join(
+                    MaintenanceChange,
+                    MaintenanceChange.workflow_run_id == WorkflowRun.id,
+                )
+                .where(
+                    WorkflowRun.project_id == project_id,
+                    WorkflowRun.chapter_id.is_(None),
+                    WorkflowRun.workflow_type == WorkflowType.PROJECT_MAINTENANCE.value,
+                    MaintenanceChange.project_id == project_id,
+                )
+                .order_by(MaintenanceChange.created_at.desc(), MaintenanceChange.id.desc())
+                .offset(offset)
+                .limit(limit)
+            )
+        )
+        return tuple([await self._public_run(project, run) for run in runs])
+
+    async def _public_run(
+        self, project: Project, run: WorkflowRun
+    ) -> ProjectMaintenanceRunRead:
+        foundation = ProjectMaintenanceFoundationService(self.session)
+        state, _ = await foundation._latest_state(run)
+        if not state.is_terminal and project.current_workflow_id != run.id:
+            raise WorkflowStateError("Project-maintenance workflow state is inconsistent.")
+        change = await self.session.scalar(
+            select(MaintenanceChange)
+            .options(selectinload(MaintenanceChange.affected_items))
+            .where(
+                MaintenanceChange.project_id == project.id,
+                MaintenanceChange.workflow_run_id == run.id,
+            )
+        )
+        if change is None or change.status != state.status.value:
+            raise WorkflowStateError("Project-maintenance change binding is inconsistent.")
+
+        title = _safe_text(change.title, "Maintenance title", maximum=512, allow_multiline=False)
+        change_request = _safe_text(
+            change.original_change_request,
+            "Maintenance change request",
+            maximum=4000,
+            allow_multiline=True,
+        )
+        affected = await self._public_affected_items(project.id, change, state)
+        applied_ids, applied_documents = await self._public_applied_versions(
+            project.id, run.id, state
+        )
+        plan = await self._public_revision_plan(project.id, run, change, state, affected)
+        consistency = await self._public_consistency_review(
+            project.id,
+            run.id,
+            state,
+            applied_documents,
+        )
+        pending = await self._public_pending_action(run, state)
+        return ProjectMaintenanceRunRead(
+            id=run.id,
+            maintenance_change_id=change.id,
+            type=run.workflow_type,
+            status=state.status.value,
+            current_node=run.current_node,
+            next_node=run.next_node,
+            awaiting_user=state.awaiting_user,
+            title=title,
+            change_request=change_request,
+            created_at=change.created_at,
+            updated_at=change.updated_at,
+            completed_at=run.completed_at,
+            affected_items=affected,
+            revision_plan=plan,
+            consistency_review=consistency,
+            applied_document_version_ids=applied_ids,
+            pending_action=pending,
+        )
+
+    async def _public_affected_items(
+        self,
+        project_id: UUID,
+        change: MaintenanceChange,
+        state: ProjectMaintenanceState,
+    ) -> tuple[ProjectMaintenanceAffectedItemRead, ...]:
+        items = tuple(change.affected_items)
+        if (
+            tuple(str(item.id) for item in items) != state.affected_item_ids
+            or any(item.position != position for position, item in enumerate(items))
+        ):
+            raise WorkflowStateError("Project-maintenance affected items are inconsistent.")
+        document_ids = {
+            item.existing_document_id for item in items if item.existing_document_id is not None
+        }
+        chapter_ids = {
+            item.existing_chapter_id for item in items if item.existing_chapter_id is not None
+        }
+        owned_documents = set(
+            await self.session.scalars(
+                select(Document.id).where(
+                    Document.project_id == project_id,
+                    Document.id.in_(document_ids),
+                )
+            )
+        )
+        owned_chapters = set(
+            await self.session.scalars(
+                select(Chapter.id).where(
+                    Chapter.project_id == project_id,
+                    Chapter.id.in_(chapter_ids),
+                )
+            )
+        )
+        if owned_documents != document_ids or owned_chapters != chapter_ids:
+            raise WorkflowStateError("Project-maintenance affected-item scope is invalid.")
+        result: list[ProjectMaintenanceAffectedItemRead] = []
+        for item in items:
+            try:
+                item_type = AffectedItemType(item.item_type)
+                impact_level = ImpactLevel(item.impact_level)
+                stable_reference = validate_maintenance_stable_reference(
+                    item.stable_reference, item_type=item_type
+                )
+                reason = validate_public_maintenance_text(
+                    item.reason, "affected-item reason"
+                )
+            except ValueError:
+                raise WorkflowStateError(
+                    "Project-maintenance affected items are invalid."
+                ) from None
+            result.append(
+                ProjectMaintenanceAffectedItemRead(
+                    id=item.id,
+                    position=item.position,
+                    type=item_type.value,
+                    stable_reference=stable_reference,
+                    impact_level=impact_level.value,
+                    reason=reason,
+                    document_id=item.existing_document_id,
+                    chapter_id=item.existing_chapter_id,
+                )
+            )
+        return tuple(result)
+
+    async def _public_applied_versions(
+        self,
+        project_id: UUID,
+        workflow_run_id: UUID,
+        state: ProjectMaintenanceState,
+    ) -> tuple[tuple[UUID, ...], dict[UUID, UUID]]:
+        try:
+            version_ids = tuple(UUID(item) for item in state.applied_document_version_ids)
+        except ValueError:
+            raise WorkflowStateError("Applied maintenance references are invalid.") from None
+        if not version_ids:
+            return (), {}
+        versions = list(
+            await self.session.scalars(
+                select(DocumentVersion)
+                .join(Document, Document.id == DocumentVersion.document_id)
+                .where(
+                    DocumentVersion.id.in_(version_ids),
+                    DocumentVersion.workflow_run_id == workflow_run_id,
+                    Document.project_id == project_id,
+                )
+            )
+        )
+        by_id = {version.id: version for version in versions}
+        if set(by_id) != set(version_ids) or any(
+            version.source != DocumentSource.ARCHIVIST_AGENT.value
+            or version.agent_role != "archivist_agent"
+            for version in versions
+        ):
+            raise WorkflowStateError("Applied maintenance references are invalid.")
+        return version_ids, {version.id: version.document_id for version in versions}
+
+    async def _public_revision_plan(
+        self,
+        project_id: UUID,
+        run: WorkflowRun,
+        change: MaintenanceChange,
+        state: ProjectMaintenanceState,
+        affected: tuple[ProjectMaintenanceAffectedItemRead, ...],
+    ) -> ProjectMaintenanceRevisionPlanRead | None:
+        if state.revision_plan_document_id is None and state.revision_plan_version_id is None:
+            return None
+        try:
+            plan_id = UUID(change.metadata_["revision_plan_id"])
+            plan_document_id = UUID(state.revision_plan_document_id or "")
+            plan_version_id = UUID(state.revision_plan_version_id or "")
+            metadata_version_id = UUID(change.metadata_["revision_plan_version_id"])
+        except (KeyError, TypeError, ValueError, AttributeError):
+            raise WorkflowStateError("Project-maintenance plan binding is invalid.") from None
+        if (
+            metadata_version_id != plan_version_id
+            or change.revision_plan_document_id != plan_document_id
+        ):
+            raise WorkflowStateError("Project-maintenance plan binding is invalid.")
+        expected_outcome = (
+            state.gate_review_outcome
+            if state.confirmation_kind is MaintenanceConfirmationKind.REVISION_CONFIRMATION
+            else None
+        )
+        document = await self.session.scalar(
+            select(Document).where(
+                Document.id == plan_document_id,
+                Document.project_id == project_id,
+                Document.chapter_id.is_(None),
+                Document.type == DocumentType.MAINTENANCE_PLAN.value,
+            )
+        )
+        version = await self.session.scalar(
+            select(DocumentVersion).where(
+                DocumentVersion.id == plan_version_id,
+                DocumentVersion.document_id == plan_document_id,
+                DocumentVersion.workflow_run_id == run.id,
+            )
+        )
+        if (
+            document is None
+            or document.path != f"maintenance/{change.id}/revision_plan.md"
+            or document.current_version_id != plan_version_id
+            or version is None
+            or version.source != DocumentSource.SYSTEM.value
+            or version.agent_role != "project_maintenance_orchestrator"
+        ):
+            raise WorkflowStateError("Project-maintenance plan binding is invalid.")
+        try:
+            content = await DocumentService(self.session).read_version_content(
+                plan_document_id, plan_version_id
+            )
+        except Exception:
+            raise ProjectMaintenanceCommitIndeterminateError() from None
+        if (
+            sha256_content(content) != version.content_hash
+            or len(content.encode("utf-8")) != version.byte_size
+        ):
+            raise WorkflowStateError("Project-maintenance plan binding is invalid.")
+        decoded = []
+        for candidate in MaintenanceReviewOutcome:
+            try:
+                decoded.append(
+                    (
+                        candidate,
+                        _decode_persisted_plan(
+                            content,
+                            project_id=project_id,
+                            run_id=run.id,
+                            change_id=change.id,
+                            outcome=candidate,
+                        )[0],
+                    )
+                )
+            except WorkflowStateError:
+                continue
+        if len(decoded) != 1:
+            raise WorkflowStateError("Project-maintenance plan binding is invalid.")
+        outcome, plan = decoded[0]
+        if plan.plan_id != plan_id or (
+            expected_outcome is not None and outcome is not expected_outcome
+        ):
+            raise WorkflowStateError("Project-maintenance plan binding is invalid.")
+        target_version_ids = {operation.target.current_version_id for operation in plan.operations}
+        targets = set(
+            (
+                await self.session.execute(
+                    select(DocumentVersion.id, DocumentVersion.document_id)
+                    .join(Document, Document.id == DocumentVersion.document_id)
+                    .where(
+                        DocumentVersion.id.in_(target_version_ids),
+                        Document.project_id == project_id,
+                    )
+                )
+            ).all()
+        )
+        expected_targets = {
+            (operation.target.current_version_id, operation.target.document_id)
+            for operation in plan.operations
+        }
+        covered_ids = {
+            item_id for operation in plan.operations for item_id in operation.affected_item_ids
+        }
+        affected_by_id = {item.id: item.document_id for item in affected}
+        if (
+            targets != expected_targets
+            or covered_ids != set(affected_by_id)
+            or any(
+                affected_by_id[item_id] not in {None, operation.target.document_id}
+                for operation in plan.operations
+                for item_id in operation.affected_item_ids
+            )
+        ):
+            raise WorkflowStateError("Project-maintenance plan projection is invalid.")
+        try:
+            summary = validate_public_maintenance_text(plan.summary, "revision summary")
+            instructions = tuple(
+                validate_public_maintenance_text(
+                    operation.instruction, "revision instruction"
+                )
+                for operation in plan.operations
+            )
+        except ValueError:
+            raise WorkflowStateError(
+                "Project-maintenance plan projection is invalid."
+            ) from None
+        return ProjectMaintenanceRevisionPlanRead(
+            id=plan.plan_id,
+            document_id=plan_document_id,
+            version_id=plan_version_id,
+            review_outcome=outcome.value,
+            summary=summary,
+            operations=tuple(
+                ProjectMaintenanceRevisionOperationRead(
+                    id=operation.operation_id,
+                    sequence=operation.sequence,
+                    operation=operation.operation.value,
+                    document_id=operation.target.document_id,
+                    expected_version_id=operation.target.current_version_id,
+                    affected_item_ids=operation.affected_item_ids,
+                    instruction=instructions[index],
+                )
+                for index, operation in enumerate(plan.operations)
+            ),
+        )
+
+    async def _public_consistency_review(
+        self,
+        project_id: UUID,
+        workflow_run_id: UUID,
+        state: ProjectMaintenanceState,
+        applied_documents: dict[UUID, UUID],
+    ) -> ProjectMaintenanceConsistencyReviewRead | None:
+        if state.consistency_report_id is None:
+            return None
+        try:
+            report_id = UUID(state.consistency_report_id)
+        except ValueError:
+            raise WorkflowStateError("Maintenance consistency report is invalid.") from None
+        report = await self.session.scalar(
+            select(ReviewReport).where(
+                ReviewReport.id == report_id,
+                ReviewReport.project_id == project_id,
+                ReviewReport.workflow_run_id == workflow_run_id,
+                ReviewReport.chapter_id.is_(None),
+                ReviewReport.review_mode == ReviewMode.MAINTENANCE_CONSISTENCY.value,
+                ReviewReport.reviewer_agent_role == "lore_agent",
+            )
+        )
+        if report is None:
+            raise WorkflowStateError("Maintenance consistency report is invalid.")
+        try:
+            raw = report.raw_report
+            if type(raw) is not dict or set(raw) != {
+                "outcome",
+                "provider_review_id",
+                "change_set_id",
+            }:
+                raise ValueError
+            outcome = ConsistencyReviewOutcome(raw["outcome"])
+            UUID(raw["provider_review_id"])
+            UUID(raw["change_set_id"])
+            findings = tuple(
+                sorted(
+                    (
+                        ConsistencyFinding.model_validate(item)
+                        for item in (*report.blocking_issues, *report.warnings)
+                    ),
+                    key=lambda item: item.sequence,
+                )
+            )
+        except Exception:
+            raise WorkflowStateError("Maintenance consistency report is invalid.") from None
+        if [item.sequence for item in findings] != list(range(1, len(findings) + 1)):
+            raise WorkflowStateError("Maintenance consistency report is invalid.")
+        blocking = [item for item in findings if item.severity is ConsistencyFindingSeverity.BLOCKING]
+        warnings = [item for item in findings if item.severity is ConsistencyFindingSeverity.WARNING]
+        expected_suggestions = [
+            {
+                "finding_id": str(item.finding_id),
+                "suggested_corrective_action": item.suggested_corrective_action,
+            }
+            for item in findings
+        ]
+        valid_outcome = (
+            outcome is ConsistencyReviewOutcome.CLEAN
+            and not findings
+            or outcome is ConsistencyReviewOutcome.WARNING
+            and bool(warnings)
+            and not blocking
+            or outcome is ConsistencyReviewOutcome.BLOCKING
+            and bool(blocking)
+        )
+        applied_pairs = {(document_id, version_id) for version_id, document_id in applied_documents.items()}
+        if (
+            not valid_outcome
+            or report.passed is not (outcome is not ConsistencyReviewOutcome.BLOCKING)
+            or report.target_document_id is not None
+            or report.target_version_id is not None
+            or report.summary
+            != "Review the applied project maintenance versions for consistency."
+            or report.notes != []
+            or report.suggested_actions != expected_suggestions
+            or len(report.blocking_issues) != len(blocking)
+            or len(report.warnings) != len(warnings)
+            or any(
+                (document.document_id, document.current_version_id) not in applied_pairs
+                for finding in findings
+                for document in finding.affected_documents
+            )
+        ):
+            raise WorkflowStateError("Maintenance consistency report is invalid.")
+        try:
+            corrective_actions = tuple(
+                validate_public_maintenance_text(
+                    finding.suggested_corrective_action, "corrective action"
+                )
+                for finding in findings
+            )
+        except ValueError:
+            raise WorkflowStateError("Maintenance consistency report is invalid.") from None
+        return ProjectMaintenanceConsistencyReviewRead(
+            id=report.id,
+            outcome=outcome.value,
+            findings=tuple(
+                ProjectMaintenanceConsistencyFindingRead(
+                    id=finding.finding_id,
+                    sequence=finding.sequence,
+                    code=finding.code,
+                    severity=finding.severity.value,
+                    blocking=finding.blocking,
+                    affected_documents=tuple(
+                        ProjectMaintenanceConsistencyDocumentRead(
+                            document_id=document.document_id,
+                            version_id=document.current_version_id,
+                        )
+                        for document in finding.affected_documents
+                    ),
+                    suggested_corrective_action=corrective_actions[index],
+                )
+                for index, finding in enumerate(findings)
+            ),
+        )
+
+    async def _public_pending_action(
+        self, run: WorkflowRun, state: ProjectMaintenanceState
+    ) -> ProjectMaintenancePendingActionRead | None:
+        if not state.awaiting_user:
+            return None
+        try:
+            action_id = UUID(state.action_request_id or "")
+        except ValueError:
+            raise WorkflowStateError("Project-maintenance action binding is invalid.") from None
+        action = await self.session.get(ActionRequest, action_id)
+        if action is None:
+            raise WorkflowStateError("Project-maintenance action binding is invalid.")
+        ProjectMaintenanceFoundationService._validate_action_binding(run, state, action)
+        assert state.confirmation_kind is not None and state.gate_review_outcome is not None
+        return ProjectMaintenancePendingActionRead(
+            id=action.id,
+            type=action.request_type,
+            status=action.status,
+            confirmation_kind=state.confirmation_kind.value,
+            review_outcome=state.gate_review_outcome.value,
+            allowed_decisions=tuple(action.options),
+        )
 
     async def resolve_action(
         self,
