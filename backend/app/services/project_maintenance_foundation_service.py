@@ -52,9 +52,7 @@ class ProjectMaintenanceFoundationService:
     def __init__(self, session: AsyncSession) -> None:
         self.session = session
 
-    async def load_latest_state(
-        self, project_id: UUID, run_id: UUID
-    ) -> ProjectMaintenanceState:
+    async def load_latest_state(self, project_id: UUID, run_id: UUID) -> ProjectMaintenanceState:
         try:
             run = await self._locked_run(project_id, run_id)
             state, _ = await self._latest_state(run, for_update=True)
@@ -95,7 +93,10 @@ class ProjectMaintenanceFoundationService:
             ):
                 kind = MaintenanceConfirmationKind.CONSISTENCY_WARNING
                 request_type = self._CONSISTENCY_ACTION
-                options = [MaintenanceDecision.ACCEPT_WARNING.value, MaintenanceDecision.REVISE.value]
+                options = [
+                    MaintenanceDecision.ACCEPT_WARNING.value,
+                    MaintenanceDecision.REVISE.value,
+                ]
             else:
                 raise WorkflowStateError()
 
@@ -242,9 +243,7 @@ class ProjectMaintenanceFoundationService:
             .order_by(WorkflowCheckpoint.checkpoint_index.desc())
             .limit(1)
         )
-        checkpoint = await self.session.scalar(
-            query.with_for_update() if for_update else query
-        )
+        checkpoint = await self.session.scalar(query.with_for_update() if for_update else query)
         if checkpoint is None:
             raise WorkflowStateError("Project-maintenance checkpoint is missing.")
         try:
@@ -342,6 +341,8 @@ class ProjectMaintenanceFoundationService:
         state: ProjectMaintenanceState,
         event_type: str,
         action_id: UUID | None = None,
+        *,
+        created_at: datetime | None = None,
     ) -> None:
         run.status = state.status.value
         run.current_node = state.current_node
@@ -352,6 +353,14 @@ class ProjectMaintenanceFoundationService:
         payload = state.to_public_event_payload(
             action_request_id=str(action_id) if action_id is not None else None
         )
+        event = WorkflowEvent(
+            workflow_run_id=run.id,
+            event_type=event_type,
+            node_name=state.current_node,
+            payload=payload,
+        )
+        if created_at is not None:
+            event.created_at = created_at
         self.session.add_all(
             [
                 WorkflowCheckpoint(
@@ -360,12 +369,7 @@ class ProjectMaintenanceFoundationService:
                     node_name=state.current_node,
                     state_json=state.to_checkpoint(),
                 ),
-                WorkflowEvent(
-                    workflow_run_id=run.id,
-                    event_type=event_type,
-                    node_name=state.current_node,
-                    payload=payload,
-                ),
+                event,
             ]
         )
 

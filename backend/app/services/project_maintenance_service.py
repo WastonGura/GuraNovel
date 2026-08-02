@@ -13,6 +13,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agents.maintenance_agents import (
+    ArchivistAgent,
     ChiefEditorAgent,
     LoreAgent,
     PlotArchitectAgent,
@@ -20,11 +21,18 @@ from app.agents.maintenance_agents import (
 )
 from app.agents.maintenance_contracts import (
     AffectedItemReference,
+    AppliedDocumentReference,
+    ApplyChangeOutput,
+    ApplyChangeRequest,
     ChiefEditorMaintenanceImpactOutput,
+    ConsistencyFindingSeverity,
+    ConsistencyReviewOutcome,
+    ConsistencyReviewOutput,
     DocumentVersionReference,
     ImpactAffectedItem,
     LoreImpactOutput,
     MaintenanceImpactRequest,
+    PostChangeRequest,
     RevisionOperation,
     RevisionOperationKind,
     RevisionPlanOutput,
@@ -43,12 +51,14 @@ from app.models import (
     MaintenanceChange,
     Project,
     ReviewReport,
+    ReviewMode,
     WorkflowCheckpoint,
     WorkflowEvent,
     WorkflowRun,
     WorkflowType,
 )
-from app.services.document_service import DocumentService
+from app.services.document_service import DocumentCommitIndeterminateError, DocumentService
+from app.services.maintenance_change_service import MaintenanceChangeService
 from app.services.project_maintenance_foundation_service import (
     ProjectMaintenanceCommitIndeterminateError,
     ProjectMaintenanceFoundationService,
@@ -78,6 +88,7 @@ class ProjectMaintenanceComposition:
     chief_editor_agent: ChiefEditorAgent
     plot_architect_agent: PlotArchitectAgent
     worldbuilding_agent: WorldbuildingAgent
+    archivist_agent: ArchivistAgent | None = None
 
 
 @dataclass(frozen=True)
@@ -114,6 +125,36 @@ class _PreparedPlan:
     operations: tuple[_CanonicalOperation, ...]
     content: str
     outcome: MaintenanceReviewOutcome
+
+
+@dataclass(frozen=True)
+class _LockedMaintenanceContext:
+    run: WorkflowRun
+    state: ProjectMaintenanceState
+    checkpoint_index: int
+    change: MaintenanceChange
+
+
+@dataclass(frozen=True)
+class _RevisionCycleContext:
+    locked: _LockedMaintenanceContext
+    request: RevisionPlanRequest
+    affected: tuple[_ReconciledAffectedItem, ...]
+    plan_document_id: UUID
+    plan_version_id: UUID
+
+
+@dataclass(frozen=True)
+class _ApplyCycleContext:
+    locked: _LockedMaintenanceContext
+    approval: ActionRequest
+    request: ApplyChangeRequest
+
+
+@dataclass(frozen=True)
+class _ConsistencyCycleContext:
+    locked: _LockedMaintenanceContext
+    request: PostChangeRequest
 
 
 def _safe_text(value: object, label: str, *, maximum: int, allow_multiline: bool) -> str:
@@ -532,6 +573,1143 @@ class ProjectMaintenanceService:
             raise WorkflowStateError("Project-maintenance state could not be loaded.") from None
         await self.session.rollback()
         return result
+
+    async def resolve_action(
+        self,
+        project_id: UUID,
+        workflow_run_id: UUID,
+        action_request_id: UUID,
+        *,
+        decision: MaintenanceDecision,
+    ) -> ProjectMaintenanceState:
+        """Resolve one exact action, then drive only the resulting durable phase."""
+
+        next_state = await self._persist_action_decision(
+            project_id,
+            workflow_run_id,
+            action_request_id,
+            decision=decision,
+        )
+        if next_state.status is ProjectMaintenanceStatus.APPLY_CHANGE:
+            return await self.resume_apply(project_id, workflow_run_id)
+        if next_state.status is ProjectMaintenanceStatus.REVISION_PLAN:
+            return await self.resume_revision(project_id, workflow_run_id)
+        return next_state
+
+    async def resume_apply(
+        self, project_id: UUID, workflow_run_id: UUID
+    ) -> ProjectMaintenanceState:
+        """Resume an already-approved plan without consuming its action twice."""
+
+        archivist = self.composition.archivist_agent
+        if archivist is None:
+            raise WorkflowStateError("The maintenance apply agent is unavailable.")
+        try:
+            initial = await self._load_apply_cycle_locked(project_id, workflow_run_id)
+            request = initial.request
+        except AppError:
+            await self.session.rollback()
+            raise
+        except Exception:
+            await self.session.rollback()
+            raise WorkflowStateError("The approved maintenance plan is invalid.") from None
+        await self.session.rollback()
+        try:
+            proposal = await archivist.apply_change(request)
+        except AppError:
+            await self.session.rollback()
+            raise
+        except Exception:
+            await self.session.rollback()
+            raise WorkflowStateError(
+                "The approved maintenance change could not be proposed."
+            ) from None
+        await self._persist_applied_versions(project_id, workflow_run_id, request, proposal)
+        return await self.resume_consistency(project_id, workflow_run_id)
+
+    async def resume_consistency(
+        self, project_id: UUID, workflow_run_id: UUID
+    ) -> ProjectMaintenanceState:
+        """Review one known committed apply cycle; never reapply canonical versions."""
+
+        try:
+            initial = await self._load_consistency_cycle_locked(project_id, workflow_run_id)
+            request = initial.request
+        except DocumentCommitIndeterminateError:
+            await self.session.rollback()
+            raise
+        except AppError:
+            await self.session.rollback()
+            raise
+        except Exception:
+            await self.session.rollback()
+            raise WorkflowStateError("The applied maintenance state is invalid.") from None
+        await self.session.rollback()
+        try:
+            review = await self.composition.lore_agent.post_change(request)
+        except AppError:
+            await self.session.rollback()
+            raise
+        except Exception:
+            await self.session.rollback()
+            raise WorkflowStateError("The maintenance consistency review failed.") from None
+        next_state = await self._persist_consistency_review(
+            project_id, workflow_run_id, request, review
+        )
+        if next_state.status is ProjectMaintenanceStatus.REVISION_PLAN:
+            return await self.resume_revision(project_id, workflow_run_id)
+        return next_state
+
+    async def resume_revision(
+        self, project_id: UUID, workflow_run_id: UUID
+    ) -> ProjectMaintenanceState:
+        """Prepare a new plan version for an explicit or consistency-driven revision."""
+
+        try:
+            initial = await self._load_revision_cycle_locked(project_id, workflow_run_id)
+            request = initial.request
+        except AppError:
+            await self.session.rollback()
+            raise
+        except Exception:
+            await self.session.rollback()
+            raise WorkflowStateError("The maintenance revision context is invalid.") from None
+        await self.session.rollback()
+        try:
+            plot = await self.composition.plot_architect_agent.plan(request)
+            world = await self.composition.worldbuilding_agent.plan(request)
+            lore, chief = self._synthetic_impact_outputs(initial.affected)
+            plan = _prepare_plan(
+                project_id=project_id,
+                run_id=workflow_run_id,
+                change_id=request.change_request_id,
+                affected=initial.affected,
+                lore=lore,
+                chief=chief,
+                plot=plot,
+                world=world,
+            )
+        except AppError:
+            await self.session.rollback()
+            raise
+        except Exception:
+            await self.session.rollback()
+            raise WorkflowStateError(
+                "The maintenance revision plan could not be prepared."
+            ) from None
+        return await self._persist_revision_cycle(
+            project_id,
+            workflow_run_id,
+            request,
+            initial.plan_document_id,
+            initial.plan_version_id,
+            plan,
+        )
+
+    async def _persist_action_decision(
+        self,
+        project_id: UUID,
+        workflow_run_id: UUID,
+        action_request_id: UUID,
+        *,
+        decision: MaintenanceDecision,
+    ) -> ProjectMaintenanceState:
+        if not isinstance(decision, MaintenanceDecision):
+            raise WorkflowStateError("Maintenance decision is invalid.")
+        try:
+            locked = await self._locked_context(
+                project_id,
+                workflow_run_id,
+                expected_status=ProjectMaintenanceStatus.USER_CONFIRMATION,
+            )
+            action = await self.session.scalar(
+                select(ActionRequest)
+                .where(
+                    ActionRequest.id == action_request_id,
+                    ActionRequest.workflow_run_id == workflow_run_id,
+                    ActionRequest.project_id == project_id,
+                    ActionRequest.chapter_id.is_(None),
+                )
+                .with_for_update()
+            )
+            if action is None:
+                raise NotFoundError("Project-maintenance action not found.")
+            foundation = ProjectMaintenanceFoundationService(self.session)
+            foundation._validate_action_binding(locked.run, locked.state, action)
+            if decision.value not in action.options:
+                raise WorkflowStateError("Maintenance decision is not available.")
+            if decision is MaintenanceDecision.APPROVE:
+                await self._validate_waiting_plan_locked(locked)
+            elif decision is MaintenanceDecision.ACCEPT_WARNING:
+                await self._load_consistency_cycle_from_locked(project_id, workflow_run_id, locked)
+            next_state = locked.state.resolve_confirmation(
+                live_action_request_id=str(action.id),
+                action_status=ActionRequestStatus(action.status),
+                decision=decision,
+            )
+            metadata = dict(locked.change.metadata_)
+            if locked.state.revision_plan_document_id is not None:
+                metadata["previous_revision_plan_document_id"] = (
+                    locked.state.revision_plan_document_id
+                )
+                metadata["previous_revision_plan_version_id"] = (
+                    locked.state.revision_plan_version_id
+                )
+            metadata["approval_action_id"] = str(action.id)
+            if locked.state.gate_review_outcome is not None:
+                metadata["revision_plan_review_outcome"] = locked.state.gate_review_outcome.value
+            target_plan_id = (
+                None
+                if next_state.status is ProjectMaintenanceStatus.REVISION_PLAN
+                else locked.change.revision_plan_document_id
+            )
+            allow_existing_applied = bool(
+                locked.state.applied_document_version_ids
+                and locked.state.confirmation_kind
+                is MaintenanceConfirmationKind.REVISION_CONFIRMATION
+                and next_state.status is ProjectMaintenanceStatus.APPLY_CHANGE
+            )
+            await MaintenanceChangeService(self.session).stage_update_change(
+                project_id=project_id,
+                change_id=locked.change.id,
+                expected_updated_at=locked.change.updated_at,
+                expected_status=ProjectMaintenanceStatus.USER_CONFIRMATION,
+                target_status=next_state.status,
+                revision_plan_document_id=target_plan_id,
+                applied_at=locked.change.applied_at,
+                metadata=metadata,
+                allow_existing_applied=allow_existing_applied,
+            )
+            action.status = {
+                MaintenanceDecision.APPROVE: ActionRequestStatus.APPROVED.value,
+                MaintenanceDecision.ACCEPT_WARNING: ActionRequestStatus.FORCE_APPROVED.value,
+                MaintenanceDecision.REVISE: ActionRequestStatus.REVISED.value,
+                MaintenanceDecision.CANCEL: ActionRequestStatus.CANCELLED.value,
+            }[decision]
+            action.user_decision = decision.value
+            action.resolved_at = datetime.now(UTC)
+            foundation._persist_transition(
+                locked.run,
+                locked.checkpoint_index + 1,
+                next_state,
+                "project_maintenance_action_resolved",
+                action.id,
+            )
+            if next_state.is_terminal:
+                project = await self.session.get(Project, project_id)
+                if project is None or project.current_workflow_id != workflow_run_id:
+                    raise WorkflowStateError("Project-maintenance workflow is inconsistent.")
+                project.current_workflow_id = None
+            await self.session.flush()
+            await foundation._commit()
+            return next_state
+        except ProjectMaintenanceCommitIndeterminateError:
+            raise
+        except AppError:
+            await self.session.rollback()
+            raise
+        except Exception:
+            await self.session.rollback()
+            raise WorkflowStateError("The maintenance decision could not be resolved.") from None
+
+    async def _locked_context(
+        self,
+        project_id: UUID,
+        workflow_run_id: UUID,
+        *,
+        expected_status: ProjectMaintenanceStatus,
+    ) -> _LockedMaintenanceContext:
+        foundation = ProjectMaintenanceFoundationService(self.session)
+        run = await foundation._locked_run(project_id, workflow_run_id)
+        state, index = await foundation._latest_state(run, for_update=True)
+        change = await self.session.scalar(
+            select(MaintenanceChange)
+            .where(
+                MaintenanceChange.project_id == project_id,
+                MaintenanceChange.workflow_run_id == workflow_run_id,
+            )
+            .with_for_update()
+        )
+        if (
+            state.status is not expected_status
+            or change is None
+            or change.status != state.status.value
+        ):
+            raise WorkflowStateError("Project-maintenance phase is inconsistent.")
+        return _LockedMaintenanceContext(run, state, index, change)
+
+    async def _validate_waiting_plan_locked(self, locked: _LockedMaintenanceContext) -> None:
+        metadata = locked.change.metadata_
+        try:
+            plan_id = UUID(metadata["revision_plan_id"])
+            plan_document_id = UUID(locked.state.revision_plan_document_id or "")
+            plan_version_id = UUID(locked.state.revision_plan_version_id or "")
+            outcome = locked.state.gate_review_outcome
+        except (KeyError, TypeError, ValueError, AttributeError):
+            raise WorkflowStateError("Maintenance confirmation lineage is invalid.") from None
+        if (
+            locked.state.confirmation_kind is not MaintenanceConfirmationKind.REVISION_CONFIRMATION
+            or outcome is None
+            or locked.change.revision_plan_document_id != plan_document_id
+            or metadata.get("revision_plan_version_id") != str(plan_version_id)
+        ):
+            raise WorkflowStateError("Maintenance confirmation lineage is invalid.")
+        plan = await self._load_persisted_plan_locked(
+            project_id=locked.change.project_id,
+            workflow_run_id=locked.run.id,
+            change_id=locked.change.id,
+            plan_id=plan_id,
+            plan_document_id=plan_document_id,
+            plan_version_id=plan_version_id,
+            outcome=outcome,
+        )
+        await self._validate_plan_targets_locked(locked, plan)
+
+    async def _load_apply_cycle_locked(
+        self, project_id: UUID, workflow_run_id: UUID
+    ) -> _ApplyCycleContext:
+        locked = await self._locked_context(
+            project_id,
+            workflow_run_id,
+            expected_status=ProjectMaintenanceStatus.APPLY_CHANGE,
+        )
+        metadata = locked.change.metadata_
+        try:
+            approval_id = UUID(metadata["approval_action_id"])
+            plan_id = UUID(metadata["revision_plan_id"])
+            plan_document_id = UUID(metadata["previous_revision_plan_document_id"])
+            plan_version_id = UUID(metadata["previous_revision_plan_version_id"])
+            outcome = MaintenanceReviewOutcome(metadata["revision_plan_review_outcome"])
+        except (KeyError, TypeError, ValueError, AttributeError):
+            raise WorkflowStateError("Approved maintenance lineage is invalid.") from None
+        if (
+            locked.state.revision_plan_document_id != str(plan_document_id)
+            or locked.state.revision_plan_version_id != str(plan_version_id)
+            or locked.change.revision_plan_document_id != plan_document_id
+        ):
+            raise WorkflowStateError("Approved maintenance lineage is invalid.")
+        approval = await self.session.scalar(
+            select(ActionRequest)
+            .where(
+                ActionRequest.id == approval_id,
+                ActionRequest.project_id == project_id,
+                ActionRequest.workflow_run_id == workflow_run_id,
+                ActionRequest.chapter_id.is_(None),
+            )
+            .with_for_update()
+        )
+        if (
+            approval is None
+            or approval.request_type != self._ACTION_TYPE
+            or approval.status != ActionRequestStatus.APPROVED.value
+            or approval.user_decision != MaintenanceDecision.APPROVE.value
+            or approval.resolved_at is None
+        ):
+            raise WorkflowStateError("Approved maintenance action is invalid.")
+        plan = await self._load_persisted_plan_locked(
+            project_id=project_id,
+            workflow_run_id=workflow_run_id,
+            change_id=locked.change.id,
+            plan_id=plan_id,
+            plan_document_id=plan_document_id,
+            plan_version_id=plan_version_id,
+            outcome=outcome,
+        )
+        await self._validate_plan_targets_locked(locked, plan)
+        request = ApplyChangeRequest(
+            project_id=project_id,
+            workflow_run_id=workflow_run_id,
+            change_request_id=locked.change.id,
+            approval_id=approval.id,
+            revision_plan_id=plan.plan_id,
+            revision_plan_document_id=plan_document_id,
+            revision_plan_version_id=plan_version_id,
+            operations=plan.operations,
+        )
+        return _ApplyCycleContext(locked, approval, request)
+
+    async def _load_persisted_plan_locked(
+        self,
+        *,
+        project_id: UUID,
+        workflow_run_id: UUID,
+        change_id: UUID,
+        plan_id: UUID,
+        plan_document_id: UUID,
+        plan_version_id: UUID,
+        outcome: MaintenanceReviewOutcome,
+    ) -> RevisionPlanOutput:
+        document = await self.session.scalar(
+            select(Document)
+            .where(
+                Document.id == plan_document_id,
+                Document.project_id == project_id,
+                Document.type == DocumentType.MAINTENANCE_PLAN.value,
+                Document.chapter_id.is_(None),
+            )
+            .with_for_update()
+        )
+        version = await self.session.scalar(
+            select(DocumentVersion)
+            .where(
+                DocumentVersion.id == plan_version_id,
+                DocumentVersion.document_id == plan_document_id,
+                DocumentVersion.workflow_run_id == workflow_run_id,
+            )
+            .with_for_update()
+        )
+        if (
+            document is None
+            or version is None
+            or document.current_version_id != version.id
+            or version.source != DocumentSource.SYSTEM.value
+            or version.agent_role != "project_maintenance_orchestrator"
+        ):
+            raise WorkflowStateError("Maintenance plan binding is invalid.")
+        try:
+            current = await DocumentService(self.session).read_current_content(document.id)
+        except Exception:
+            raise DocumentCommitIndeterminateError() from None
+        if (
+            current.version_id != version.id
+            or sha256_content(current.content) != version.content_hash
+            or len(current.content.encode("utf-8")) != version.byte_size
+        ):
+            raise WorkflowStateError("Maintenance plan binding is invalid.")
+        plan, _ = _decode_persisted_plan(
+            current.content,
+            project_id=project_id,
+            run_id=workflow_run_id,
+            change_id=change_id,
+            outcome=outcome,
+        )
+        if plan.plan_id != plan_id:
+            raise WorkflowStateError("Maintenance plan binding is invalid.")
+        return plan
+
+    async def _validate_plan_targets_locked(
+        self,
+        locked: _LockedMaintenanceContext,
+        plan: RevisionPlanOutput,
+    ) -> dict[UUID, Document]:
+        target_versions = {
+            operation.target.document_id: operation.target.current_version_id
+            for operation in plan.operations
+        }
+        documents = list(
+            await self.session.scalars(
+                select(Document)
+                .where(
+                    Document.project_id == locked.run.project_id,
+                    Document.id.in_(target_versions),
+                    Document.type.not_in(
+                        [
+                            DocumentType.MAINTENANCE_PLAN.value,
+                            DocumentType.MAINTENANCE_REPORT.value,
+                        ]
+                    ),
+                )
+                .order_by(Document.id)
+                .with_for_update()
+            )
+        )
+        by_id = {document.id: document for document in documents}
+        if set(by_id) != set(target_versions) or any(
+            by_id[document_id].current_version_id != version_id
+            for document_id, version_id in target_versions.items()
+        ):
+            raise ConflictError("A maintenance target version is stale.")
+        affected_items = list(
+            await self.session.scalars(
+                select(MaintenanceAffectedItem)
+                .where(MaintenanceAffectedItem.maintenance_change_id == locked.change.id)
+                .order_by(MaintenanceAffectedItem.position)
+                .with_for_update()
+            )
+        )
+        if tuple(str(item.id) for item in affected_items) != locked.state.affected_item_ids:
+            raise WorkflowStateError("Maintenance affected-item binding is invalid.")
+        bindings = {item.id: item.existing_document_id for item in affected_items}
+        if any(
+            affected_id not in bindings
+            or bindings[affected_id] not in {None, operation.target.document_id}
+            for operation in plan.operations
+            for affected_id in operation.affected_item_ids
+        ):
+            raise WorkflowStateError("Maintenance target mapping is invalid.")
+        return by_id
+
+    async def _persist_applied_versions(
+        self,
+        project_id: UUID,
+        workflow_run_id: UUID,
+        original_request: ApplyChangeRequest,
+        proposal: ApplyChangeOutput,
+    ) -> ProjectMaintenanceState:
+        document_writes: list[tuple[Document, tuple[tuple[str, str], ...]]] = []
+        try:
+            current = await self._load_apply_cycle_locked(project_id, workflow_run_id)
+            if current.request != original_request:
+                raise ConflictError("The approved maintenance plan changed.")
+            documents = await self._validate_plan_targets_locked(
+                current.locked,
+                RevisionPlanOutput(
+                    plan_id=current.request.revision_plan_id,
+                    summary="Apply approved maintenance revisions.",
+                    operations=current.request.operations,
+                    safety={
+                        "requires_user_confirmation": True,
+                        "preserve_existing_versions": True,
+                        "direct_write_authority": False,
+                    },
+                ),
+            )
+            document_service = DocumentService(self.session)
+            applied: list[AppliedDocumentReference] = []
+            for edit in proposal.proposed_edits:
+                document = documents.get(edit.document_id)
+                if document is None:
+                    raise WorkflowStateError("A proposed maintenance target is invalid.")
+                version, *writes = await document_service.stage_write_document(
+                    document_id=edit.document_id,
+                    content=edit.content,
+                    source=DocumentSource.ARCHIVIST_AGENT,
+                    expected_current_version_id=edit.expected_current_version_id,
+                    agent_role="archivist_agent",
+                    workflow_run_id=workflow_run_id,
+                    change_summary="Apply an approved project maintenance revision.",
+                )
+                if version.parent_version_id != edit.expected_current_version_id:
+                    raise WorkflowStateError("An applied maintenance version is invalid.")
+                previous = await self.session.get(DocumentVersion, edit.expected_current_version_id)
+                if previous is None or previous.document_id != edit.document_id:
+                    raise WorkflowStateError("An applied maintenance parent is invalid.")
+                if version.content_hash == previous.content_hash:
+                    raise WorkflowStateError("A maintenance edit must change its document.")
+                version.metadata_ = {
+                    "maintenance_change_id": str(current.locked.change.id),
+                    "approval_action_id": str(current.approval.id),
+                    "revision_plan_id": str(current.request.revision_plan_id),
+                    "revision_plan_document_id": str(current.request.revision_plan_document_id),
+                    "revision_plan_version_id": str(current.request.revision_plan_version_id),
+                    "change_set_id": str(proposal.change_set_id),
+                    "revision_operation_id": str(edit.revision_operation_id),
+                    "proposed_edit_id": str(edit.proposed_edit_id),
+                }
+                applied.append(
+                    AppliedDocumentReference(
+                        proposed_edit_id=edit.proposed_edit_id,
+                        document_id=edit.document_id,
+                        previous_version_id=edit.expected_current_version_id,
+                        current_version_id=version.id,
+                    )
+                )
+                document_writes.append((document, tuple(writes)))
+            new_version_ids = tuple(str(item.current_version_id) for item in applied)
+            cumulative_ids = (
+                *current.locked.state.applied_document_version_ids,
+                *new_version_ids,
+            )
+            if len(set(cumulative_ids)) != len(cumulative_ids):
+                raise WorkflowStateError("Applied maintenance history is invalid.")
+            next_state = current.locked.state.record_consistency_review(
+                applied_document_version_ids=cumulative_ids
+            )
+            applied_at = current.locked.change.applied_at or datetime.now(UTC)
+            metadata = dict(current.locked.change.metadata_)
+            metadata.update(
+                {
+                    "change_set_id": str(proposal.change_set_id),
+                    "cycle_applied_version_ids": list(new_version_ids),
+                }
+            )
+            await MaintenanceChangeService(self.session).stage_update_change(
+                project_id=project_id,
+                change_id=current.locked.change.id,
+                expected_updated_at=current.locked.change.updated_at,
+                expected_status=ProjectMaintenanceStatus.APPLY_CHANGE,
+                target_status=ProjectMaintenanceStatus.CONSISTENCY_REVIEW,
+                revision_plan_document_id=current.locked.change.revision_plan_document_id,
+                applied_at=applied_at,
+                metadata=metadata,
+            )
+            foundation = ProjectMaintenanceFoundationService(self.session)
+            foundation._persist_transition(
+                current.locked.run,
+                current.locked.checkpoint_index + 1,
+                next_state,
+                "project_maintenance_documents_applied",
+            )
+            await self.session.flush()
+            await foundation._commit()
+        except ProjectMaintenanceCommitIndeterminateError:
+            raise
+        except AppError:
+            await self.session.rollback()
+            raise
+        except Exception:
+            await self.session.rollback()
+            raise WorkflowStateError(
+                "The approved maintenance change could not be applied."
+            ) from None
+        materialization_failed = False
+        for document, writes in document_writes:
+            try:
+                DocumentService(self.session).write_staged_files(document, writes)
+            except Exception:
+                materialization_failed = True
+        if materialization_failed:
+            raise DocumentCommitIndeterminateError()
+        return next_state
+
+    async def _load_consistency_cycle_locked(
+        self, project_id: UUID, workflow_run_id: UUID
+    ) -> _ConsistencyCycleContext:
+        locked = await self._locked_context(
+            project_id,
+            workflow_run_id,
+            expected_status=ProjectMaintenanceStatus.CONSISTENCY_REVIEW,
+        )
+        return await self._load_consistency_cycle_from_locked(project_id, workflow_run_id, locked)
+
+    async def _load_consistency_cycle_from_locked(
+        self,
+        project_id: UUID,
+        workflow_run_id: UUID,
+        locked: _LockedMaintenanceContext,
+    ) -> _ConsistencyCycleContext:
+        metadata = locked.change.metadata_
+        try:
+            approval_id = UUID(metadata["approval_action_id"])
+            plan_id = UUID(metadata["revision_plan_id"])
+            plan_document_id = UUID(metadata["previous_revision_plan_document_id"])
+            plan_version_id = UUID(metadata["previous_revision_plan_version_id"])
+            change_set_id = UUID(metadata["change_set_id"])
+            cycle_ids = tuple(UUID(item) for item in metadata["cycle_applied_version_ids"])
+        except (KeyError, TypeError, ValueError, AttributeError):
+            raise WorkflowStateError("Applied maintenance lineage is invalid.") from None
+        if (
+            not cycle_ids
+            or tuple(str(item) for item in cycle_ids)
+            != locked.state.applied_document_version_ids[-len(cycle_ids) :]
+            or locked.state.revision_plan_document_id != str(plan_document_id)
+            or locked.state.revision_plan_version_id != str(plan_version_id)
+        ):
+            raise WorkflowStateError("Applied maintenance lineage is invalid.")
+        approval = await self.session.scalar(
+            select(ActionRequest)
+            .where(
+                ActionRequest.id == approval_id,
+                ActionRequest.project_id == project_id,
+                ActionRequest.workflow_run_id == workflow_run_id,
+                ActionRequest.status == ActionRequestStatus.APPROVED.value,
+                ActionRequest.user_decision == MaintenanceDecision.APPROVE.value,
+            )
+            .with_for_update()
+        )
+        versions = list(
+            await self.session.scalars(
+                select(DocumentVersion).where(DocumentVersion.id.in_(cycle_ids)).with_for_update()
+            )
+        )
+        versions_by_id = {version.id: version for version in versions}
+        documents = list(
+            await self.session.scalars(
+                select(Document)
+                .where(
+                    Document.project_id == project_id,
+                    Document.current_version_id.in_(cycle_ids),
+                )
+                .with_for_update()
+            )
+        )
+        documents_by_version = {document.current_version_id: document for document in documents}
+        if approval is None or set(versions_by_id) != set(cycle_ids):
+            raise WorkflowStateError("Applied maintenance lineage is invalid.")
+        applied: list[AppliedDocumentReference] = []
+        expected_metadata_keys = {
+            "maintenance_change_id",
+            "approval_action_id",
+            "revision_plan_id",
+            "revision_plan_document_id",
+            "revision_plan_version_id",
+            "change_set_id",
+            "revision_operation_id",
+            "proposed_edit_id",
+        }
+        for version_id in cycle_ids:
+            version = versions_by_id[version_id]
+            document = documents_by_version.get(version_id)
+            lineage = version.metadata_
+            try:
+                proposed_edit_id = UUID(lineage["proposed_edit_id"])
+            except (KeyError, TypeError, ValueError, AttributeError):
+                raise WorkflowStateError("Applied maintenance lineage is invalid.") from None
+            if (
+                document is None
+                or version.document_id != document.id
+                or version.parent_version_id is None
+                or version.source != DocumentSource.ARCHIVIST_AGENT.value
+                or version.agent_role != "archivist_agent"
+                or version.workflow_run_id != workflow_run_id
+                or set(lineage) != expected_metadata_keys
+                or lineage["maintenance_change_id"] != str(locked.change.id)
+                or lineage["approval_action_id"] != str(approval_id)
+                or lineage["revision_plan_id"] != str(plan_id)
+                or lineage["revision_plan_document_id"] != str(plan_document_id)
+                or lineage["revision_plan_version_id"] != str(plan_version_id)
+                or lineage["change_set_id"] != str(change_set_id)
+            ):
+                raise WorkflowStateError("Applied maintenance lineage is invalid.")
+            try:
+                content = await DocumentService(self.session).read_version_content(
+                    document.id, version.id
+                )
+            except Exception:
+                raise DocumentCommitIndeterminateError() from None
+            if (
+                sha256_content(content) != version.content_hash
+                or len(content.encode("utf-8")) != version.byte_size
+            ):
+                raise DocumentCommitIndeterminateError()
+            applied.append(
+                AppliedDocumentReference(
+                    proposed_edit_id=proposed_edit_id,
+                    document_id=document.id,
+                    previous_version_id=version.parent_version_id,
+                    current_version_id=version.id,
+                )
+            )
+        request = PostChangeRequest(
+            project_id=project_id,
+            workflow_run_id=workflow_run_id,
+            change_request_id=locked.change.id,
+            approval_id=approval_id,
+            revision_plan_id=plan_id,
+            revision_plan_document_id=plan_document_id,
+            revision_plan_version_id=plan_version_id,
+            change_set_id=change_set_id,
+            applied_changes=tuple(applied),
+        )
+        return _ConsistencyCycleContext(locked, request)
+
+    async def _persist_consistency_review(
+        self,
+        project_id: UUID,
+        workflow_run_id: UUID,
+        original_request: PostChangeRequest,
+        review: ConsistencyReviewOutput,
+    ) -> ProjectMaintenanceState:
+        try:
+            current = await self._load_consistency_cycle_locked(project_id, workflow_run_id)
+            if current.request != original_request:
+                raise ConflictError("The applied maintenance state changed.")
+            outcome = {
+                ConsistencyReviewOutcome.CLEAN: MaintenanceReviewOutcome.PASSED,
+                ConsistencyReviewOutcome.WARNING: MaintenanceReviewOutcome.WARNING,
+                ConsistencyReviewOutcome.BLOCKING: MaintenanceReviewOutcome.BLOCKING,
+            }[review.outcome]
+            report = self._consistency_report(
+                project_id=project_id,
+                workflow_run_id=workflow_run_id,
+                output=review,
+            )
+            self.session.add(report)
+            action: ActionRequest | None = None
+            if outcome is MaintenanceReviewOutcome.WARNING:
+                action = ActionRequest(
+                    workflow_run_id=workflow_run_id,
+                    project_id=project_id,
+                    chapter_id=None,
+                    request_type=ProjectMaintenanceFoundationService._CONSISTENCY_ACTION,
+                    status=ActionRequestStatus.PENDING.value,
+                    prompt="",
+                    options=[
+                        MaintenanceDecision.ACCEPT_WARNING.value,
+                        MaintenanceDecision.REVISE.value,
+                    ],
+                    default_option=None,
+                    metadata_={
+                        "confirmation_kind": MaintenanceConfirmationKind.CONSISTENCY_WARNING.value,
+                        "review_outcome": MaintenanceReviewOutcome.WARNING.value,
+                    },
+                )
+                self.session.add(action)
+                await self.session.flush()
+                next_state = current.locked.state.route_consistency_review(
+                    review_outcome=outcome,
+                    consistency_report_id=str(report.id),
+                    action_request_id=str(action.id),
+                )
+            else:
+                next_state = current.locked.state.route_consistency_review(
+                    review_outcome=outcome,
+                    consistency_report_id=str(report.id),
+                )
+            metadata = dict(current.locked.change.metadata_)
+            metadata.update(
+                {
+                    "consistency_report_id": str(report.id),
+                    "consistency_outcome": review.outcome.value,
+                    "provider_review_id": str(review.review_id),
+                }
+            )
+            if next_state.status is ProjectMaintenanceStatus.REVISION_PLAN:
+                metadata["previous_revision_plan_document_id"] = (
+                    current.locked.state.revision_plan_document_id
+                )
+                metadata["previous_revision_plan_version_id"] = (
+                    current.locked.state.revision_plan_version_id
+                )
+            target_plan_id = (
+                None
+                if next_state.status is ProjectMaintenanceStatus.REVISION_PLAN
+                else current.locked.change.revision_plan_document_id
+            )
+            await MaintenanceChangeService(self.session).stage_update_change(
+                project_id=project_id,
+                change_id=current.locked.change.id,
+                expected_updated_at=current.locked.change.updated_at,
+                expected_status=ProjectMaintenanceStatus.CONSISTENCY_REVIEW,
+                target_status=next_state.status,
+                revision_plan_document_id=target_plan_id,
+                applied_at=current.locked.change.applied_at,
+                metadata=metadata,
+            )
+            foundation = ProjectMaintenanceFoundationService(self.session)
+            foundation._persist_transition(
+                current.locked.run,
+                current.locked.checkpoint_index + 1,
+                next_state,
+                "project_maintenance_consistency_reviewed",
+                action.id if action is not None else None,
+            )
+            if next_state.is_terminal:
+                project = await self.session.get(Project, project_id)
+                if project is None or project.current_workflow_id != workflow_run_id:
+                    raise WorkflowStateError("Project-maintenance workflow is inconsistent.")
+                project.current_workflow_id = None
+            await self.session.flush()
+            await foundation._commit()
+            return next_state
+        except ProjectMaintenanceCommitIndeterminateError:
+            raise
+        except AppError:
+            await self.session.rollback()
+            raise
+        except Exception:
+            await self.session.rollback()
+            raise WorkflowStateError("The consistency review could not be persisted.") from None
+
+    @staticmethod
+    def _consistency_report(
+        *,
+        project_id: UUID,
+        workflow_run_id: UUID,
+        output: ConsistencyReviewOutput,
+    ) -> ReviewReport:
+        blocking = [
+            finding.model_dump(mode="json")
+            for finding in output.findings
+            if finding.severity is ConsistencyFindingSeverity.BLOCKING
+        ]
+        warnings = [
+            finding.model_dump(mode="json")
+            for finding in output.findings
+            if finding.severity is ConsistencyFindingSeverity.WARNING
+        ]
+        return ReviewReport(
+            id=uuid4(),
+            project_id=project_id,
+            chapter_id=None,
+            workflow_run_id=workflow_run_id,
+            review_mode=ReviewMode.MAINTENANCE_CONSISTENCY.value,
+            reviewer_agent_role="lore_agent",
+            target_document_id=None,
+            target_version_id=None,
+            passed=output.outcome is not ConsistencyReviewOutcome.BLOCKING,
+            summary="Review the applied project maintenance versions for consistency.",
+            blocking_issues=blocking,
+            warnings=warnings,
+            notes=[],
+            suggested_actions=[
+                {
+                    "finding_id": str(finding.finding_id),
+                    "suggested_corrective_action": finding.suggested_corrective_action,
+                }
+                for finding in output.findings
+            ],
+            raw_report={
+                "outcome": output.outcome.value,
+                "provider_review_id": str(output.review_id),
+                "change_set_id": str(output.change_set_id),
+            },
+            report_document_id=None,
+        )
+
+    async def _load_revision_cycle_locked(
+        self, project_id: UUID, workflow_run_id: UUID
+    ) -> _RevisionCycleContext:
+        locked = await self._locked_context(
+            project_id,
+            workflow_run_id,
+            expected_status=ProjectMaintenanceStatus.REVISION_PLAN,
+        )
+        metadata = locked.change.metadata_
+        try:
+            plan_document_id = UUID(metadata["previous_revision_plan_document_id"])
+            plan_version_id = UUID(metadata["previous_revision_plan_version_id"])
+        except (KeyError, TypeError, ValueError, AttributeError):
+            raise WorkflowStateError("Maintenance revision lineage is invalid.") from None
+        plan_document = await self.session.scalar(
+            select(Document)
+            .where(
+                Document.id == plan_document_id,
+                Document.project_id == project_id,
+                Document.type == DocumentType.MAINTENANCE_PLAN.value,
+                Document.chapter_id.is_(None),
+            )
+            .with_for_update()
+        )
+        plan_version = await self.session.scalar(
+            select(DocumentVersion)
+            .where(
+                DocumentVersion.id == plan_version_id,
+                DocumentVersion.document_id == plan_document_id,
+                DocumentVersion.workflow_run_id == workflow_run_id,
+            )
+            .with_for_update()
+        )
+        if (
+            plan_document is None
+            or plan_version is None
+            or plan_document.current_version_id != plan_version.id
+            or locked.change.revision_plan_document_id is not None
+            or locked.state.revision_plan_document_id is not None
+        ):
+            raise WorkflowStateError("Maintenance revision lineage is invalid.")
+        document_rows = list(
+            (
+                await self.session.execute(
+                    select(Document.id, Document.current_version_id)
+                    .where(
+                        Document.project_id == project_id,
+                        Document.current_version_id.is_not(None),
+                        Document.type.not_in(
+                            [
+                                DocumentType.MAINTENANCE_PLAN.value,
+                                DocumentType.MAINTENANCE_REPORT.value,
+                            ]
+                        ),
+                    )
+                    .order_by(Document.id)
+                    .with_for_update()
+                )
+            ).all()
+        )
+        if not document_rows or len(document_rows) > _MAX_DOCUMENTS:
+            raise WorkflowStateError("Maintenance revision documents are invalid.")
+        refs = tuple(
+            DocumentVersionReference(document_id=document_id, current_version_id=version_id)
+            for document_id, version_id in document_rows
+        )
+        refs_by_document = {item.document_id: item for item in refs}
+        affected_rows = list(
+            await self.session.scalars(
+                select(MaintenanceAffectedItem)
+                .where(MaintenanceAffectedItem.maintenance_change_id == locked.change.id)
+                .order_by(MaintenanceAffectedItem.position)
+                .with_for_update()
+            )
+        )
+        if tuple(str(item.id) for item in affected_rows) != locked.state.affected_item_ids:
+            raise WorkflowStateError("Maintenance affected-item binding is invalid.")
+        affected: list[_ReconciledAffectedItem] = []
+        request_items: list[AffectedItemReference] = []
+        for row in affected_rows:
+            document_ref = (
+                refs_by_document.get(row.existing_document_id)
+                if row.existing_document_id is not None
+                else None
+            )
+            if row.existing_document_id is not None and document_ref is None:
+                raise WorkflowStateError("Maintenance affected document is invalid.")
+            item = ImpactAffectedItem(
+                stable_reference=row.stable_reference,
+                item_type=row.item_type,
+                impact_level=row.impact_level,
+                document=document_ref,
+                reason=row.reason,
+            )
+            affected.append(_ReconciledAffectedItem(row.id, item))
+            request_items.append(
+                AffectedItemReference(
+                    affected_item_id=row.id,
+                    stable_reference=row.stable_reference,
+                    item_type=row.item_type,
+                    impact_level=row.impact_level,
+                    document=document_ref,
+                    reason=row.reason,
+                )
+            )
+        request = RevisionPlanRequest(
+            project_id=project_id,
+            workflow_run_id=workflow_run_id,
+            change_request_id=locked.change.id,
+            change_request=locked.change.original_change_request,
+            affected_items=tuple(request_items),
+            document_refs=refs,
+        )
+        return _RevisionCycleContext(
+            locked,
+            request,
+            tuple(affected),
+            plan_document_id,
+            plan_version_id,
+        )
+
+    @staticmethod
+    def _synthetic_impact_outputs(
+        affected: tuple[_ReconciledAffectedItem, ...],
+    ) -> tuple[LoreImpactOutput, ChiefEditorMaintenanceImpactOutput]:
+        items = tuple(item.item for item in affected)
+        lore = LoreImpactOutput(
+            affected_items=items,
+            impact_summary="Replan the persisted maintenance impact set.",
+            safe_to_change=True,
+        )
+        chief = ChiefEditorMaintenanceImpactOutput(
+            affected_items=items,
+            impact_summary="Replan the persisted maintenance impact set.",
+            safe_to_change=True,
+            reader_expectation_impact="medium",
+            commercial_impact="medium",
+        )
+        return lore, chief
+
+    async def _persist_revision_cycle(
+        self,
+        project_id: UUID,
+        workflow_run_id: UUID,
+        original_request: RevisionPlanRequest,
+        plan_document_id: UUID,
+        plan_version_id: UUID,
+        plan: _PreparedPlan,
+    ) -> ProjectMaintenanceState:
+        try:
+            current = await self._load_revision_cycle_locked(project_id, workflow_run_id)
+            if (
+                current.request != original_request
+                or current.plan_document_id != plan_document_id
+                or current.plan_version_id != plan_version_id
+            ):
+                raise ConflictError("The maintenance revision context changed.")
+            plan_document = await self.session.scalar(
+                select(Document)
+                .where(
+                    Document.id == plan_document_id,
+                    Document.project_id == project_id,
+                    Document.current_version_id == plan_version_id,
+                )
+                .with_for_update()
+            )
+            if plan_document is None:
+                raise ConflictError("The maintenance plan version changed.")
+            document_service = DocumentService(self.session)
+            version, *writes = await document_service.stage_write_document(
+                document_id=plan_document_id,
+                content=plan.content,
+                source=DocumentSource.SYSTEM,
+                expected_current_version_id=plan_version_id,
+                agent_role="project_maintenance_orchestrator",
+                workflow_run_id=workflow_run_id,
+                change_summary="Prepare a revised project maintenance plan.",
+            )
+            action = ActionRequest(
+                workflow_run_id=workflow_run_id,
+                project_id=project_id,
+                chapter_id=None,
+                request_type=self._ACTION_TYPE,
+                status=ActionRequestStatus.PENDING.value,
+                prompt="",
+                options=ProjectMaintenanceFoundationService._revision_options(
+                    plan.outcome,
+                    corrective=bool(current.locked.state.applied_document_version_ids),
+                ),
+                default_option=None,
+                metadata_={
+                    "confirmation_kind": MaintenanceConfirmationKind.REVISION_CONFIRMATION.value,
+                    "review_outcome": plan.outcome.value,
+                },
+            )
+            self.session.add(action)
+            await self.session.flush()
+            planned_state = current.locked.state.record_revision_plan(
+                revision_plan_document_id=str(plan_document_id),
+                revision_plan_version_id=str(version.id),
+            )
+            waiting_state = planned_state.request_revision_confirmation(
+                action_request_id=str(action.id),
+                review_outcome=plan.outcome,
+            )
+            change_service = MaintenanceChangeService(self.session)
+            change = await change_service.stage_update_change(
+                project_id=project_id,
+                change_id=current.locked.change.id,
+                expected_updated_at=current.locked.change.updated_at,
+                expected_status=ProjectMaintenanceStatus.REVISION_PLAN,
+                target_status=ProjectMaintenanceStatus.REVISION_PLAN,
+                revision_plan_document_id=plan_document_id,
+                applied_at=current.locked.change.applied_at,
+                metadata={
+                    "revision_plan_id": str(plan.plan_id),
+                    "revision_plan_version_id": str(version.id),
+                },
+            )
+            await change_service.stage_update_change(
+                project_id=project_id,
+                change_id=change.id,
+                expected_updated_at=change.updated_at,
+                expected_status=ProjectMaintenanceStatus.REVISION_PLAN,
+                target_status=ProjectMaintenanceStatus.USER_CONFIRMATION,
+                revision_plan_document_id=plan_document_id,
+                applied_at=change.applied_at,
+                metadata=change.metadata_,
+            )
+            foundation = ProjectMaintenanceFoundationService(self.session)
+            event_time = datetime.now(UTC)
+            foundation._persist_transition(
+                current.locked.run,
+                current.locked.checkpoint_index + 1,
+                planned_state,
+                "project_maintenance_revision_plan_created",
+                created_at=event_time,
+            )
+            foundation._persist_transition(
+                current.locked.run,
+                current.locked.checkpoint_index + 2,
+                waiting_state,
+                "project_maintenance_confirmation_requested",
+                action.id,
+                created_at=event_time + timedelta(microseconds=1),
+            )
+            await self.session.flush()
+            await foundation._commit()
+        except ProjectMaintenanceCommitIndeterminateError:
+            raise
+        except AppError:
+            await self.session.rollback()
+            raise
+        except Exception:
+            await self.session.rollback()
+            raise WorkflowStateError(
+                "The maintenance revision plan could not be persisted."
+            ) from None
+        try:
+            document_service.write_staged_files(plan_document, tuple(writes))
+        except Exception:
+            raise DocumentCommitIndeterminateError() from None
+        return waiting_state
 
     async def _load_waiting_locked(
         self, project_id: UUID, workflow_run_id: UUID
