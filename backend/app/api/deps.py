@@ -8,7 +8,16 @@ from app.llm import (
     ProviderConfigurationError,
 )
 from app.workspace import ProjectWorkspace
+from app.agents import (
+    ArchivistAgent,
+    ChiefEditorAgent,
+    DeterministicMaintenanceProvider,
+    LoreAgent,
+    PlotArchitectAgent,
+    WorldbuildingAgent,
+)
 from app.agents.composition import ProjectCreationComposition
+from app.services.project_maintenance_service import ProjectMaintenanceComposition
 
 
 class ChapterGenerationComposition:
@@ -61,10 +70,24 @@ def get_project_creation_composition() -> ProjectCreationComposition:
     """The route owns a local-only composition; clients cannot select providers."""
     return ProjectCreationComposition()
 
+
+def get_project_maintenance_composition() -> ProjectMaintenanceComposition:
+    """Provide a credential-free server-owned composition for maintenance routes."""
+
+    provider = DeterministicMaintenanceProvider()
+    return ProjectMaintenanceComposition(
+        LoreAgent(provider),
+        ChiefEditorAgent(provider),
+        PlotArchitectAgent(provider),
+        WorldbuildingAgent(provider),
+        ArchivistAgent(provider),
+    )
+
 __all__ = [
     "ChapterGenerationComposition",
     "get_chapter_generation_composition",
     "get_db_session",
     "get_project_workspace",
     "get_project_creation_composition",
+    "get_project_maintenance_composition",
 ]
