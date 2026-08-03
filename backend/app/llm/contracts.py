@@ -2,41 +2,27 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-import re
+from dataclasses import dataclass, field
 from typing import Protocol, runtime_checkable
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field
 
 from app.llm.errors import ProviderInvalidOutputError
+from app.llm.gateway import (
+    MAX_PROVENANCE_TOKEN_COUNT,
+    StructuredOutputGateway,
+    StructuredOutputProfile,
+    StructuredOutputProvenance,
+    StructuredOutputRequest,
+    validate_model_identifier as _validate_model_identifier,
+)
 
 
 # One billion is well above a chapter-generation request while preventing a provider
 # from storing unbounded accounting values in the public workflow event stream.
-MAX_PROVENANCE_TOKEN_COUNT = 1_000_000_000
-_MACHINE_IDENTIFIER_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
-_MODEL_IDENTIFIER_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}")
-_MODEL_SENSITIVE_PREFIXES = ("sk-", "sk_")
-_MODEL_SENSITIVE_MATERIAL_PATTERN = re.compile(
-    r"(?:^|[-_:/])(?:api[-_]?key|apikey|authorization|bearer|token|secret|redacted)(?=$|[-_:])",
-    re.IGNORECASE,
-)
-
-
 def validate_model_identifier(value: object) -> str:
-    """Return a safe, bounded model identifier suitable for persisted provenance."""
-    has_sensitive_prefix = isinstance(value, str) and value.lower().startswith(
-        _MODEL_SENSITIVE_PREFIXES
-    )
-    if (
-        not isinstance(value, str)
-        or _MODEL_IDENTIFIER_PATTERN.fullmatch(value) is None
-        or "://" in value
-        or has_sensitive_prefix
-        or _MODEL_SENSITIVE_MATERIAL_PATTERN.search(value) is not None
-    ):
-        raise ValueError("model identifier must be a safe bounded identifier")
-    return value
+    """Compatibility export for server-owned model identifier validation."""
+    return _validate_model_identifier(value)
 
 
 @dataclass(frozen=True)
@@ -75,59 +61,52 @@ class RawChapterGenerationOutput(BaseModel):
     summary: str = Field(min_length=1)
 
 
-@dataclass(frozen=True)
-class ChapterGenerationProvenance:
-    """Trusted, server-owned metadata retained for a generation run.
+ChapterGenerationProvenance = StructuredOutputProvenance
 
-    This value is deliberately not part of ``ChapterGenerationResponse``.  Server
-    composition selects it when constructing ``ChapterProductionService``; provider
-    responses are untrusted and can supply only artifacts and integer accounting.
-    """
+CHAPTER_GENERATION_SYSTEM_PROMPT = (
+    "Generate chapter artifacts. Return a JSON object exactly with the string keys "
+    "outline, draft, and summary. Do not include any other keys or prose."
+)
 
-    provider_kind: str
-    model_identifier: str
-    prompt_template_version: str
 
-    def __post_init__(self) -> None:
-        for value in (self.provider_kind, self.prompt_template_version):
-            if (
-                not isinstance(value, str)
-                or _MACHINE_IDENTIFIER_PATTERN.fullmatch(value) is None
-                or value.lower().startswith("sk-")
-            ):
-                raise ValueError("provenance text values must be bounded machine identifiers")
-        validate_model_identifier(self.model_identifier)
-    def to_payload(
-        self, *, input_tokens: int | None = None, output_tokens: int | None = None
-    ) -> dict[str, str | int]:
-        """Return precisely the persistence-safe provenance fields."""
-        payload: dict[str, str | int] = {
-            "provider_kind": self.provider_kind,
-            "model_identifier": self.model_identifier,
-            "prompt_template_version": self.prompt_template_version,
-        }
-        if input_tokens is not None:
-            payload["input_tokens"] = input_tokens
-        if output_tokens is not None:
-            payload["output_tokens"] = output_tokens
-        return payload
+def chapter_generation_profile(
+    provider_kind: str,
+    model_identifier: str,
+    *,
+    timeout_seconds: float = 30.0,
+) -> StructuredOutputProfile[RawChapterGenerationOutput]:
+    """Build the server-owned chapter-generation structured-output profile."""
+    return StructuredOutputProfile(
+        profile_id="chapter_generation_v1",
+        provider_kind=provider_kind,
+        model_identifier=model_identifier,
+        prompt_template_version="chapter-production-v1",
+        system_prompt=CHAPTER_GENERATION_SYSTEM_PROMPT,
+        output_schema_name="chapter_generation_output",
+        output_schema=RawChapterGenerationOutput,
+        timeout_seconds=timeout_seconds,
+        max_input_chars=131_072,
+        max_output_bytes=8_000_000,
+    )
 
 
 @dataclass(frozen=True)
 class ChapterGenerationResponse:
     """Untrusted provider response containing artifacts and bounded accounting only."""
 
-    result: ChapterGenerationResult
-    input_tokens: int | None = None
-    output_tokens: int | None = None
+    result: ChapterGenerationResult = field(repr=False)
+    input_tokens: int | None = field(default=None, repr=False)
+    output_tokens: int | None = field(default=None, repr=False)
 
 
 def validate_chapter_generation_output(raw_payload: object) -> ChapterGenerationResult:
     """Convert arbitrary provider output into typed artifacts without exposing details."""
     try:
         output = RawChapterGenerationOutput.model_validate(raw_payload)
-    except (TypeError, ValueError, ValidationError) as error:
-        raise ProviderInvalidOutputError() from error
+    except Exception:
+        output = None
+    if output is None:
+        raise ProviderInvalidOutputError() from None
     return ChapterGenerationResult(
         outline=output.outline,
         draft=output.draft,
@@ -137,34 +116,70 @@ def validate_chapter_generation_output(raw_payload: object) -> ChapterGeneration
 
 def validate_chapter_generation_response(raw_response: object) -> ChapterGenerationResponse:
     """Defend the persistence boundary against malformed injected providers."""
+    validated: tuple[ChapterGenerationResult, int | None, int | None] | None = None
     try:
-        if not isinstance(raw_response, ChapterGenerationResponse):
+        if type(raw_response) is not ChapterGenerationResponse:
             raise TypeError("provider response must use the chapter response envelope")
-        if not isinstance(raw_response.result, ChapterGenerationResult):
+        raw_result = raw_response.result
+        if type(raw_result) is not ChapterGenerationResult:
             raise TypeError("provider result must use the chapter result value object")
         result = validate_chapter_generation_output(
             {
-                "outline": raw_response.result.outline,
-                "draft": raw_response.result.draft,
-                "summary": raw_response.result.summary,
+                "outline": raw_result.outline,
+                "draft": raw_result.draft,
+                "summary": raw_result.summary,
             }
         )
-        for value in (raw_response.input_tokens, raw_response.output_tokens):
+        input_tokens = raw_response.input_tokens
+        output_tokens = raw_response.output_tokens
+        for value in (input_tokens, output_tokens):
             if value is not None and (
-                isinstance(value, bool)
-                or not isinstance(value, int)
+                type(value) is not int
                 or not 0 <= value <= MAX_PROVENANCE_TOKEN_COUNT
             ):
                 raise ValueError("provider token counters must be bounded integers")
-    except ProviderInvalidOutputError:
-        raise
-    except (AttributeError, TypeError, ValueError) as error:
-        raise ProviderInvalidOutputError() from error
+        validated = (result, input_tokens, output_tokens)
+    except Exception:
+        pass
+    if validated is None:
+        raise ProviderInvalidOutputError() from None
+    result, input_tokens, output_tokens = validated
     return ChapterGenerationResponse(
         result=result,
-        input_tokens=raw_response.input_tokens,
-        output_tokens=raw_response.output_tokens,
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
     )
+
+
+class GatewayChapterGenerationProvider:
+    """Capability-specific adapter over the reusable structured-output gateway."""
+
+    __slots__ = ("__gateway",)
+
+    def __init__(
+        self, gateway: StructuredOutputGateway[RawChapterGenerationOutput]
+    ) -> None:
+        self.__gateway = gateway
+
+    async def generate(self, request: ChapterGenerationRequest) -> ChapterGenerationResponse:
+        response = await self.__gateway.call(
+            StructuredOutputRequest(
+                profile_id=self.__gateway.profile_id,
+                user_prompt=(
+                    f"Project: {request.project_title}\nChapter: {request.chapter_number}\n"
+                    f"Title: {request.title or 'Untitled Chapter'}"
+                ),
+            )
+        )
+        return ChapterGenerationResponse(
+            result=ChapterGenerationResult(
+                outline=response.result.outline,
+                draft=response.result.draft,
+                summary=response.result.summary,
+            ),
+            input_tokens=response.input_tokens,
+            output_tokens=response.output_tokens,
+        )
 
 
 @runtime_checkable

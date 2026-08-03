@@ -414,8 +414,9 @@ async def test_provider_failure_remains_primary_when_rollback_fails(
             generation_provenance=ChapterGenerationProvenance("test_provider", "test-model", "v1"),
         ).start_production(project.id, chapter.id)
 
-    assert isinstance(error.value.__cause__, RuntimeError)
-    assert str(error.value.__cause__) == "database rollback failed"
+    assert error.value.__cause__ is None
+    assert error.value.__context__ is None
+    assert "database rollback failed" not in repr(error.value)
     monkeypatch.setattr(async_session, "rollback", original_rollback)
     await async_session.rollback()
 

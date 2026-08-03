@@ -1,17 +1,17 @@
-"""Safe adapter for OpenAI-compatible chat-completions services."""
+"""Safe OpenAI-compatible transport and chapter adapter."""
 
 from __future__ import annotations
 
-import json
-from dataclasses import dataclass, field
+import logging
 
 import httpx
 
 from app.llm.contracts import (
-    MAX_PROVENANCE_TOKEN_COUNT,
+    CHAPTER_GENERATION_SYSTEM_PROMPT,
     ChapterGenerationRequest,
     ChapterGenerationResponse,
-    validate_chapter_generation_output,
+    GatewayChapterGenerationProvider,
+    chapter_generation_profile,
 )
 from app.llm.errors import (
     ProviderInvalidOutputError,
@@ -19,84 +19,174 @@ from app.llm.errors import (
     ProviderTimeoutError,
     ProviderUnavailableError,
 )
+from app.llm.gateway import (
+    StructuredOutputGateway,
+    StructuredTransportRequest,
+    StructuredTransportResponse,
+    _decode_strict_json,
+)
 
 
-@dataclass
-class OpenAICompatibleChapterGenerationProvider:
-    """Generate chapters without retaining prompts, responses, or credentials."""
+_MAX_STRUCTURED_ENVELOPE_OVERHEAD_BYTES = 65_536
+_MAX_JSON_STRING_ESCAPE_EXPANSION = 6
 
-    base_url: str
-    api_key: str = field(repr=False)
-    model: str
-    timeout_seconds: float = 30.0
-    client: httpx.AsyncClient | None = field(default=None, repr=False)
 
-    SYSTEM_PROMPT = (
-        "Generate chapter artifacts. Return a JSON object exactly with the string keys "
-        "outline, draft, and summary. Do not include any other keys or prose."
+class _MinimumWarningFilter(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:
+        return record.levelno >= logging.WARNING
+
+
+for _logger_name in ("httpx", "httpcore"):
+    _logger = logging.getLogger(_logger_name)
+    if _logger.level < logging.WARNING:
+        _logger.setLevel(logging.WARNING)
+    if not any(isinstance(item, _MinimumWarningFilter) for item in _logger.filters):
+        _logger.addFilter(_MinimumWarningFilter())
+
+
+class OpenAICompatibleStructuredOutputTransport:
+    """Perform only HTTP transport; profile authority remains in the gateway."""
+
+    __slots__ = (
+        "__api_key",
+        "__base_url",
+        "__client",
+        "__owns_client",
     )
 
-    def __post_init__(self) -> None:
-        self._owns_client = self.client is None
-        if self.client is None:
-            self.client = httpx.AsyncClient(
-                base_url=f"{self.base_url.rstrip('/')}/",
-                timeout=self.timeout_seconds,
+    def __init__(
+        self,
+        *,
+        base_url: str,
+        api_key: str,
+        timeout_seconds: float = 30.0,
+        client: httpx.AsyncClient | None = None,
+    ) -> None:
+        self.__base_url = base_url.rstrip("/")
+        self.__api_key = api_key
+        self.__owns_client = client is None
+        self.__client = client
+        if self.__client is None:
+            self.__client = httpx.AsyncClient(
+                base_url=f"{self.__base_url}/",
+                timeout=timeout_seconds,
                 trust_env=False,
             )
 
     async def aclose(self) -> None:
-        """Close only the client this provider created itself."""
-        if self._owns_client and self.client is not None:
-            await self.client.aclose()
+        if self.__owns_client:
+            await self.__client.aclose()
 
-    async def generate(self, request: ChapterGenerationRequest) -> ChapterGenerationResponse:
+    async def call(self, request: StructuredTransportRequest) -> StructuredTransportResponse:
         payload = {
-            "model": self.model,
-            "response_format": {"type": "json_object"},
-            "messages": [
-                {"role": "system", "content": self.SYSTEM_PROMPT},
-                {
-                    "role": "user",
-                    "content": (
-                        f"Project: {request.project_title}\nChapter: {request.chapter_number}\n"
-                        f"Title: {request.title or 'Untitled Chapter'}"
-                    ),
+            "model": request.model_identifier,
+            "response_format": {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": request.output_schema_name,
+                    "strict": True,
+                    "schema": request.output_schema,
                 },
+            },
+            "messages": [
+                {"role": "system", "content": request.system_prompt},
+                {"role": "user", "content": request.user_prompt},
             ],
         }
+        envelope: bytes | None = None
+        transport_error: Exception | None = None
         try:
-            response = await self.client.post(  # type: ignore[union-attr]
-                f"{self.base_url.rstrip('/')}/chat/completions",
-                headers={"Authorization": f"Bearer {self.api_key}"},
+            async with self.__client.stream(
+                "POST",
+                f"{self.__base_url}/chat/completions",
+                headers={"Authorization": f"Bearer {self.__api_key}"},
                 json=payload,
-            )
-        except httpx.TimeoutException as error:
-            raise ProviderTimeoutError() from error
-        except httpx.RequestError as error:
-            raise ProviderUnavailableError() from error
-        if response.status_code == 429:
-            raise ProviderRateLimitedError()
-        if not response.is_success:
-            raise ProviderUnavailableError()
+                timeout=request.timeout_seconds,
+                follow_redirects=False,
+            ) as response:
+                if response.status_code == 429:
+                    transport_error = ProviderRateLimitedError()
+                elif not response.is_success:
+                    transport_error = ProviderUnavailableError()
+                elif response.headers.get("Content-Encoding", "identity").strip().lower() != "identity":
+                    transport_error = ProviderInvalidOutputError()
+                else:
+                    limit = (
+                        _MAX_JSON_STRING_ESCAPE_EXPANSION * request.max_output_bytes
+                        + _MAX_STRUCTURED_ENVELOPE_OVERHEAD_BYTES
+                    )
+                    collected = bytearray()
+                    async for chunk in response.aiter_raw():
+                        if len(collected) + len(chunk) > limit:
+                            transport_error = ProviderInvalidOutputError()
+                            break
+                        collected.extend(chunk)
+                    if transport_error is None:
+                        envelope = bytes(collected)
+        except httpx.TimeoutException:
+            transport_error = ProviderTimeoutError()
+        except httpx.RequestError:
+            transport_error = ProviderUnavailableError()
+        except Exception:
+            transport_error = ProviderUnavailableError()
+        if transport_error is not None:
+            raise transport_error from None
+        invalid_response = False
         try:
-            body = response.json()
+            if envelope is None:
+                raise TypeError("provider response envelope is missing")
+            body = _decode_strict_json(envelope)
+            if not isinstance(body, dict):
+                raise TypeError("provider response envelope must be an object")
             content = body["choices"][0]["message"]["content"]
             if not isinstance(content, str):
                 raise TypeError("content must be text")
-            result = validate_chapter_generation_output(json.loads(content))
-        except ProviderInvalidOutputError:
-            raise
-        except (IndexError, KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
-            raise ProviderInvalidOutputError() from error
-        usage = body.get("usage") if isinstance(body, dict) else None
-        input_tokens = self._bounded_usage(usage, "prompt_tokens")
-        output_tokens = self._bounded_usage(usage, "completion_tokens")
-        return ChapterGenerationResponse(result, input_tokens, output_tokens)
+            usage = body.get("usage") if isinstance(body, dict) else None
+        except Exception:
+            invalid_response = True
+        if invalid_response:
+            raise ProviderInvalidOutputError() from None
+        return StructuredTransportResponse(
+            payload=content,
+            input_tokens=usage.get("prompt_tokens") if isinstance(usage, dict) else None,
+            output_tokens=(
+                usage.get("completion_tokens") if isinstance(usage, dict) else None
+            ),
+        )
 
-    @staticmethod
-    def _bounded_usage(usage: object, name: str) -> int | None:
-        value = usage.get(name) if isinstance(usage, dict) else None
-        if isinstance(value, bool) or not isinstance(value, int):
-            return None
-        return value if 0 <= value <= MAX_PROVENANCE_TOKEN_COUNT else None
+
+class OpenAICompatibleChapterGenerationProvider:
+    """Backward-compatible chapter capability implemented through the shared gateway."""
+
+    SYSTEM_PROMPT = CHAPTER_GENERATION_SYSTEM_PROMPT
+    __slots__ = ("__adapter", "__transport", "model", "provenance")
+
+    def __init__(
+        self,
+        *,
+        base_url: str,
+        api_key: str,
+        model: str,
+        timeout_seconds: float = 30.0,
+        client: httpx.AsyncClient | None = None,
+    ) -> None:
+        self.model = model
+        profile = chapter_generation_profile(
+            "openai_compatible", model, timeout_seconds=timeout_seconds
+        )
+        self.provenance = profile.provenance
+        self.__transport = OpenAICompatibleStructuredOutputTransport(
+            base_url=base_url,
+            api_key=api_key,
+            timeout_seconds=timeout_seconds,
+            client=client,
+        )
+        self.__adapter = GatewayChapterGenerationProvider(
+            StructuredOutputGateway(profile, self.__transport)
+        )
+
+    async def aclose(self) -> None:
+        await self.__transport.aclose()
+
+    async def generate(self, request: ChapterGenerationRequest) -> ChapterGenerationResponse:
+        return await self.__adapter.generate(request)
