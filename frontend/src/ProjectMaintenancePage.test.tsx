@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { Link, MemoryRouter, useLocation } from 'react-router-dom'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { Project, ProjectMaintenanceRun } from './api/client'
@@ -21,6 +21,7 @@ vi.mock('./api/client', () => ({
   resolveChapterProductionAction: vi.fn(),
   startProjectMaintenance: vi.fn(),
   getProjectMaintenanceRun: vi.fn(),
+  listProjectMaintenanceRuns: vi.fn(),
   resolveProjectMaintenanceAction: vi.fn(),
   ApiError: class ApiError extends Error {
     status: number
@@ -51,6 +52,9 @@ const ids = {
   styleVersion: 'cccccccc-cccc-4ccc-8ccc-cccccccccccc',
   operationChapter: 'dddddddd-dddd-4ddd-8ddd-dddddddddddd',
   operationStyle: 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee',
+  review: 'f1111111-1111-4111-8111-111111111111',
+  finding: 'f2222222-2222-4222-8222-222222222222',
+  applied: 'f3333333-3333-4333-8333-333333333333',
 }
 
 function project(overrides: Partial<Project> = {}): Project {
@@ -122,6 +126,20 @@ function run(overrides: Partial<ProjectMaintenanceRun> = {}): ProjectMaintenance
 
 function consistencyWarningRun(overrides: Partial<ProjectMaintenanceRun> = {}): ProjectMaintenanceRun {
   return run({
+    applied_document_version_ids: [ids.applied],
+    consistency_review: {
+      id: ids.review,
+      outcome: 'warning',
+      findings: [{
+        id: ids.finding,
+        sequence: 1,
+        code: 'timeline_warning',
+        severity: 'warning',
+        blocking: false,
+        affected_documents: [{ document_id: ids.chapterDocument, version_id: ids.applied }],
+        suggested_corrective_action: 'Review the chapter timeline before publishing.',
+      }],
+    },
     pending_action: {
       ...run().pending_action!,
       type: 'project_maintenance_consistency_warning',
@@ -150,6 +168,7 @@ function renderApp(path: string, extra?: React.ReactNode) {
 
 afterEach(() => {
   cleanup()
+  vi.useRealTimers()
   vi.resetAllMocks()
 })
 
@@ -161,6 +180,9 @@ describe('project maintenance entry and start', () => {
 
     const entry = await screen.findByRole('link', { name: 'Project maintenance' })
     expect(entry).toHaveAttribute('href', '/projects/project-1/maintenance/start')
+    expect(screen.getByRole('link', { name: 'Maintenance history' })).toHaveAttribute(
+      'href', '/projects/project-1/maintenance',
+    )
     fireEvent.click(entry)
 
     expect(await screen.findByRole('heading', { name: 'Plan a project change' })).toBeInTheDocument()
@@ -330,10 +352,10 @@ describe('project maintenance analysis and confirmation', () => {
     )
     expect(screen.queryByRole('button', { name: 'Approve plan' })).not.toBeInTheDocument()
 
-    resolveDecision(run({ status: 'APPLY_CHANGE', current_node: 'apply_revision_plan', awaiting_user: false, pending_action: null }))
-    expect(await screen.findByRole('heading', { name: 'Decision recorded' })).toBeInTheDocument()
+    resolveDecision(run({ status: 'APPLY_CHANGE', current_node: 'apply_revision', awaiting_user: false, pending_action: null }))
+    expect(await screen.findByRole('heading', { name: 'Applying approved changes' })).toBeInTheDocument()
     expect(screen.getByTestId('location')).toHaveTextContent(`/projects/project-1/maintenance/${ids.run}/status`)
-    expect(screen.getByText(/This gate does not report apply progress or claim that project documents changed/)).toBeInTheDocument()
+    expect(screen.getByText(/Completion has not been confirmed/)).toBeInTheDocument()
     expect(screen.queryByText(/project updated/i)).not.toBeInTheDocument()
   })
 
@@ -359,9 +381,9 @@ describe('project maintenance analysis and confirmation', () => {
 
     renderApp(`/projects/project-1/maintenance/${ids.run}/status`)
 
-    expect(await screen.findByRole('heading', { name: 'Additional review is required' })).toHaveFocus()
+    expect(await screen.findByRole('heading', { name: 'Consistency warning requires a decision' })).toHaveFocus()
     expect(screen.getByTestId('location')).toHaveTextContent(`/projects/project-1/maintenance/${ids.run}/status`)
-    expect(screen.queryByRole('button', { name: 'Request revision' })).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Request revision' })).toBeInTheDocument()
     expect(screen.queryByRole('heading', { name: 'Revision plan' })).not.toBeInTheDocument()
   })
 
@@ -380,11 +402,11 @@ describe('project maintenance analysis and confirmation', () => {
       <Link to={`/projects/project-2/maintenance/${nextRunId}/status`}>Switch status</Link>,
     )
 
-    expect(await screen.findByRole('heading', { name: 'Decision recorded' })).toBeInTheDocument()
+    expect(await screen.findByRole('heading', { name: 'Applying approved changes' })).toBeInTheDocument()
     fireEvent.click(screen.getByRole('link', { name: 'Switch status' }))
 
     expect(await screen.findByRole('alert')).toHaveFocus()
-    expect(screen.queryByRole('heading', { name: 'Decision recorded' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('heading', { name: 'Applying approved changes' })).not.toBeInTheDocument()
     expect(screen.getByTestId('location')).toHaveTextContent(`/projects/project-2/maintenance/${nextRunId}/status`)
   })
 
@@ -450,7 +472,7 @@ describe('project maintenance safe failures and stale work', () => {
     fireEvent.click(await screen.findByRole('button', { name: 'Approve plan' }))
     fireEvent.click(await screen.findByRole('button', { name: 'Try again' }))
 
-    expect(await screen.findByRole('heading', { name: 'Additional review is required' })).toBeInTheDocument()
+    expect(await screen.findByRole('heading', { name: 'Consistency warning requires a decision' })).toBeInTheDocument()
     expect(screen.getByTestId('location')).toHaveTextContent(`/projects/project-1/maintenance/${ids.run}/status`)
     expect(screen.queryByRole('heading', { name: 'Revision plan' })).not.toBeInTheDocument()
   })
@@ -476,5 +498,231 @@ describe('project maintenance safe failures and stale work', () => {
     resolveOld(run({ title: 'Stale route title' }))
     await waitFor(() => expect(screen.queryByText('Stale route title')).not.toBeInTheDocument())
     view.unmount()
+  })
+})
+
+describe('project maintenance apply, consistency, and history', () => {
+  it('polls apply through consistency and claims success only after PROJECT_UPDATED', async () => {
+    vi.useFakeTimers()
+    mockedApi.getProjectMaintenanceRun
+      .mockResolvedValueOnce(run({ status: 'APPLY_CHANGE', current_node: 'apply_revision', awaiting_user: false, pending_action: null }))
+      .mockResolvedValueOnce(run({
+        status: 'CONSISTENCY_REVIEW', current_node: 'consistency_review', awaiting_user: false,
+        pending_action: null, applied_document_version_ids: [ids.applied],
+      }))
+      .mockResolvedValueOnce(run({
+        status: 'PROJECT_UPDATED', current_node: 'project_updated', awaiting_user: false, pending_action: null,
+        completed_at: '2026-08-03T00:03:00Z', applied_document_version_ids: [ids.applied],
+        consistency_review: { id: ids.review, outcome: 'clean', findings: [] },
+      }))
+    renderApp(`/projects/project-1/maintenance/${ids.run}/status`)
+
+    await act(async () => { await vi.advanceTimersByTimeAsync(0) })
+    expect(screen.getByRole('heading', { name: 'Applying approved changes' })).toBeInTheDocument()
+    expect(screen.queryByText('Project updated')).not.toBeInTheDocument()
+    await act(async () => { await vi.advanceTimersByTimeAsync(1_500) })
+    expect(screen.getByRole('heading', { name: 'Reviewing project consistency' })).toBeInTheDocument()
+    expect(screen.queryByText('Project updated')).not.toBeInTheDocument()
+    await act(async () => { await vi.advanceTimersByTimeAsync(1_500) })
+    expect(screen.getByRole('heading', { name: 'Project updated' })).toBeInTheDocument()
+    expect(mockedApi.getProjectMaintenanceRun).toHaveBeenCalledTimes(3)
+  })
+
+  it('reports bounded polling exhaustion as indeterminate and retryable', async () => {
+    vi.useFakeTimers()
+    mockedApi.getProjectMaintenanceRun.mockResolvedValue(run({
+      status: 'APPLY_CHANGE', current_node: 'apply_revision', awaiting_user: false, pending_action: null,
+    }))
+    renderApp(`/projects/project-1/maintenance/${ids.run}/status`)
+
+    await act(async () => { await vi.advanceTimersByTimeAsync(0) })
+    for (let attempt = 1; attempt < 30; attempt += 1) {
+      await act(async () => { await vi.advanceTimersByTimeAsync(1_500) })
+    }
+    const alert = screen.getByRole('alert')
+    expect(alert).toHaveTextContent('automatic checking paused')
+    expect(alert).toHaveFocus()
+    expect(screen.getByRole('button', { name: 'Try again' })).toBeInTheDocument()
+    expect(screen.queryByText('Project updated')).not.toBeInTheDocument()
+    expect(mockedApi.getProjectMaintenanceRun).toHaveBeenCalledTimes(30)
+  })
+
+  it.each([
+    ['APPLY_CHANGE', 'Applying approved changes', 'Applying approved document changes'],
+    ['CONSISTENCY_REVIEW', 'Reviewing project consistency', 'Checking applied changes for consistency'],
+  ] as const)('shows non-successful %s progress with applied references', async (status, heading, progress) => {
+    mockedApi.getProjectMaintenanceRun.mockResolvedValue(run({
+      status,
+      current_node: status === 'APPLY_CHANGE' ? 'apply_revision' : 'consistency_review',
+      awaiting_user: false,
+      pending_action: null,
+      applied_document_version_ids: status === 'CONSISTENCY_REVIEW' ? [ids.applied] : [],
+    }))
+
+    renderApp(`/projects/project-1/maintenance/${ids.run}/status`)
+
+    expect(await screen.findByRole('heading', { name: heading })).toHaveFocus()
+    expect(screen.getByText(progress)).toBeInTheDocument()
+    expect(screen.queryByText('Project updated')).not.toBeInTheDocument()
+    if (status === 'CONSISTENCY_REVIEW') expect(screen.getByText(ids.applied)).toBeInTheDocument()
+  })
+
+  it('claims success only for PROJECT_UPDATED and renders a clean report', async () => {
+    mockedApi.getProjectMaintenanceRun.mockResolvedValue(run({
+      status: 'PROJECT_UPDATED', current_node: 'project_updated', awaiting_user: false,
+      pending_action: null, completed_at: '2026-08-03T00:03:00Z',
+      applied_document_version_ids: [ids.applied],
+      consistency_review: { id: ids.review, outcome: 'clean', findings: [] },
+    }))
+
+    renderApp(`/projects/project-1/maintenance/${ids.run}/status`)
+
+    expect(await screen.findByRole('heading', { name: 'Project updated' })).toHaveFocus()
+    expect(screen.getByText('No consistency findings were reported.')).toBeInTheDocument()
+    expect(screen.getByText(ids.applied)).toBeInTheDocument()
+  })
+
+  it('renders a warning report and submits only the exact live decision once', async () => {
+    const warning = consistencyWarningRun()
+    let resolveDecision!: (value: ProjectMaintenanceRun) => void
+    mockedApi.getProjectMaintenanceRun.mockResolvedValue(warning)
+    mockedApi.resolveProjectMaintenanceAction.mockReturnValue(new Promise((resolve) => { resolveDecision = resolve }))
+    renderApp(`/projects/project-1/maintenance/${ids.run}/status`)
+
+    expect(await screen.findByText('timeline_warning')).toBeInTheDocument()
+    expect(screen.getByText(`Document ${ids.chapterDocument}`)).toBeInTheDocument()
+    expect(screen.getByText(`Version ${ids.applied}`)).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Approve plan' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Cancel change' })).not.toBeInTheDocument()
+    const accept = screen.getByRole('button', { name: 'Accept warning' })
+    fireEvent.click(accept)
+    fireEvent.click(accept)
+
+    expect(mockedApi.resolveProjectMaintenanceAction).toHaveBeenCalledTimes(1)
+    expect(mockedApi.resolveProjectMaintenanceAction).toHaveBeenCalledWith(
+      'project-1', warning, 'accept_warning', expect.any(AbortSignal),
+    )
+    expect(screen.queryByRole('button', { name: 'Accept warning' })).not.toBeInTheDocument()
+    resolveDecision(run({
+      status: 'PROJECT_UPDATED', current_node: 'project_updated', awaiting_user: false, pending_action: null,
+      completed_at: '2026-08-03T00:03:00Z', applied_document_version_ids: [ids.applied],
+      consistency_review: warning.consistency_review,
+    }))
+  })
+
+  it('keeps a blocking report and applied history visible in the corrective confirmation loop', async () => {
+    const blocking = consistencyWarningRun({
+      revision_plan: { ...run().revision_plan!, review_outcome: 'blocking' },
+      consistency_review: {
+        id: ids.review,
+        outcome: 'blocking',
+        findings: [{
+          id: ids.finding, sequence: 1, code: 'timeline_blocker', severity: 'blocking', blocking: true,
+          affected_documents: [{ document_id: ids.chapterDocument, version_id: ids.applied }],
+          suggested_corrective_action: 'Revise the affected chapter.',
+        }],
+      },
+      pending_action: {
+        ...run().pending_action!, review_outcome: 'blocking', allowed_decisions: ['revise'],
+      },
+    })
+    mockedApi.getProjectMaintenanceRun.mockResolvedValue(blocking)
+    renderApp(`/projects/project-1/maintenance/${ids.run}/status`)
+
+    expect(await screen.findByRole('heading', { name: 'Corrective revision required' })).toHaveFocus()
+    expect(screen.getByText('timeline_blocker')).toBeInTheDocument()
+    expect(screen.getByText(ids.applied)).toBeInTheDocument()
+    expect(screen.getByRole('heading', { name: 'Revision plan' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Request revision' })).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /complete|dismiss/i })).not.toBeInTheDocument()
+  })
+
+  it('shows cancelled as terminal non-success', async () => {
+    mockedApi.getProjectMaintenanceRun.mockResolvedValue(run({
+      status: 'CANCELLED', current_node: 'cancelled', awaiting_user: false, pending_action: null,
+      completed_at: '2026-08-03T00:03:00Z',
+    }))
+    renderApp(`/projects/project-1/maintenance/${ids.run}/status`)
+
+    expect(await screen.findByRole('heading', { name: 'Maintenance cancelled' })).toHaveFocus()
+    expect(screen.queryByText('Project updated')).not.toBeInTheDocument()
+  })
+
+  it('keeps an indeterminate warning decision consumed until a fresh GET restores it', async () => {
+    const warning = consistencyWarningRun()
+    mockedApi.getProjectMaintenanceRun.mockResolvedValue(warning)
+    mockedApi.resolveProjectMaintenanceAction.mockRejectedValue(
+      new api.ApiError(0, 'request_failed', 'private timeout after commit'),
+    )
+    renderApp(`/projects/project-1/maintenance/${ids.run}/status`)
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Accept warning' }))
+    expect(await screen.findByRole('alert')).toHaveTextContent('could not be loaded')
+    expect(screen.queryByRole('button', { name: 'Accept warning' })).not.toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'Try again' }))
+    expect(await screen.findByRole('button', { name: 'Accept warning' })).toBeInTheDocument()
+    expect(screen.getByRole('heading', { name: 'Consistency warning requires a decision' })).toHaveFocus()
+    expect(mockedApi.resolveProjectMaintenanceAction).toHaveBeenCalledTimes(1)
+  })
+
+  it('restores a new confirmation capability only after a fresh GET', async () => {
+    const warning = consistencyWarningRun()
+    const corrective = run({
+      applied_document_version_ids: [ids.applied],
+      consistency_review: warning.consistency_review,
+      pending_action: {
+        ...run().pending_action!,
+        allowed_decisions: ['approve', 'revise'],
+      },
+    })
+    mockedApi.getProjectMaintenanceRun
+      .mockResolvedValueOnce(warning)
+      .mockResolvedValueOnce(corrective)
+    mockedApi.resolveProjectMaintenanceAction.mockResolvedValue(corrective)
+    renderApp(`/projects/project-1/maintenance/${ids.run}/status`)
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Request revision' }))
+
+    expect(await screen.findByRole('heading', { name: 'Revision confirmation required' })).toBeInTheDocument()
+    expect(await screen.findByRole('button', { name: 'Approve plan' })).toBeInTheDocument()
+    expect(mockedApi.getProjectMaintenanceRun).toHaveBeenCalledTimes(2)
+  })
+
+  it('loads the bounded server-ordered history and deep-links to status', async () => {
+    mockedApi.listProjectMaintenanceRuns.mockResolvedValue([
+      { id: ids.run, maintenance_change_id: ids.change, status: 'PROJECT_UPDATED', title: 'Newest change', awaiting_user: false, created_at: '2026-08-03T00:00:00Z', updated_at: '2026-08-03T00:03:00Z', completed_at: '2026-08-03T00:03:00Z' },
+      { id: 'a1111111-1111-4111-8111-111111111111', maintenance_change_id: 'a2222222-2222-4222-8222-222222222222', status: 'CANCELLED', title: 'Older change', awaiting_user: false, created_at: '2026-08-02T00:00:00Z', updated_at: '2026-08-02T00:01:00Z', completed_at: '2026-08-02T00:01:00Z' },
+    ])
+    renderApp('/projects/project-1/maintenance')
+
+    expect(await screen.findByRole('heading', { name: 'Maintenance history' })).toHaveFocus()
+    expect(mockedApi.listProjectMaintenanceRuns).toHaveBeenCalledWith(
+      'project-1', { offset: 0, limit: 20 }, expect.any(AbortSignal),
+    )
+    const links = screen.getAllByRole('link', { name: /change/i })
+    expect(links[0]).toHaveTextContent('Newest change')
+    expect(links[0]).toHaveAttribute('href', `/projects/project-1/maintenance/${ids.run}/status`)
+    expect(links[1]).toHaveTextContent('Older change')
+  })
+
+  it('renders an accessible empty history without fabricating runs', async () => {
+    mockedApi.listProjectMaintenanceRuns.mockResolvedValue([])
+    renderApp('/projects/project-1/maintenance')
+
+    expect(await screen.findByRole('heading', { name: 'Maintenance history' })).toHaveFocus()
+    expect(screen.getByText('No maintenance runs yet.')).toBeInTheDocument()
+  })
+
+  it('returns focus to the history heading when a failed load is retried', async () => {
+    mockedApi.listProjectMaintenanceRuns
+      .mockRejectedValueOnce(new api.ApiError(0, 'request_failed', 'private network detail'))
+      .mockResolvedValueOnce([])
+    renderApp('/projects/project-1/maintenance')
+
+    expect(await screen.findByRole('alert')).toHaveFocus()
+    fireEvent.click(screen.getByRole('button', { name: 'Try again' }))
+
+    expect(await screen.findByText('No maintenance runs yet.')).toBeInTheDocument()
+    expect(screen.getByRole('heading', { name: 'Maintenance history' })).toHaveFocus()
   })
 })

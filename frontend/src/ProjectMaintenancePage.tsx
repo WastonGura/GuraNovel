@@ -2,9 +2,11 @@ import { useEffect, useLayoutEffect, useRef, useState, type FormEvent } from 're
 import { Link, useNavigate, useParams } from 'react-router-dom'
 import {
   ApiError,
+  listProjectMaintenanceRuns,
   resolveProjectMaintenanceAction,
   startProjectMaintenance,
   type ProjectMaintenanceDecision,
+  type ProjectMaintenanceHistorySummary,
   type ProjectMaintenanceRun,
   type ProjectMaintenanceScopeHint,
 } from './api/client'
@@ -25,6 +27,8 @@ const analysisLabels: Partial<Record<ProjectMaintenanceRun['status'], string>> =
   LORE_IMPACT_ANALYSIS: 'Reviewing story-world impact',
   CHIEF_EDITOR_IMPACT_ANALYSIS: 'Reviewing editorial impact',
   REVISION_PLAN: 'Building a safe revision plan',
+  APPLY_CHANGE: 'Applying approved document changes',
+  CONSISTENCY_REVIEW: 'Checking applied changes for consistency',
 }
 
 type MaintenanceError = { message: string, retry: boolean }
@@ -251,10 +255,11 @@ function RevisionPlan({ run }: { run: ProjectMaintenanceRun }) {
   )
 }
 
-const decisionLabels: Record<'approve' | 'revise' | 'cancel', string> = {
+const decisionLabels: Record<ProjectMaintenanceDecision, string> = {
   approve: 'Approve plan',
   revise: 'Request revision',
   cancel: 'Cancel change',
+  accept_warning: 'Accept warning',
 }
 
 function ConfirmationActions({
@@ -268,13 +273,13 @@ function ConfirmationActions({
 }) {
   const pending = run.status === 'USER_CONFIRMATION' && run.awaiting_user ? run.pending_action : null
   if (!pending) return null
-  const decisions = pending.allowed_decisions.filter(
-    (decision): decision is 'approve' | 'revise' | 'cancel' => (
-      decision === 'revise'
-      || decision === 'cancel'
-      || (decision === 'approve' && pending.review_outcome !== 'blocking')
-    ),
-  )
+  const decisions = pending.allowed_decisions.filter((decision) => (
+    pending.confirmation_kind === 'consistency_warning'
+      ? decision === 'accept_warning' || decision === 'revise'
+      : decision === 'revise'
+        || decision === 'cancel'
+        || (decision === 'approve' && pending.review_outcome !== 'blocking')
+  ))
   return (
     <section className="decision-panel" aria-labelledby="decision-title">
       <h2 id="decision-title">Your decision</h2>
@@ -384,70 +389,225 @@ function MaintenanceGate() {
   )
 }
 
-function MaintenanceHandoff() {
+function AppliedVersions({ run }: { run: ProjectMaintenanceRun }) {
+  if (run.applied_document_version_ids.length === 0) return null
+  return (
+    <section className="maintenance-section" aria-labelledby="applied-versions-title">
+      <div className="section-heading">
+        <h2 id="applied-versions-title">Applied document versions</h2>
+        <span>{run.applied_document_version_ids.length} recorded</span>
+      </div>
+      <ul className="reference-list">
+        {run.applied_document_version_ids.map((versionId) => <li key={versionId}><code>{versionId}</code></li>)}
+      </ul>
+    </section>
+  )
+}
+
+function ConsistencyReport({ run }: { run: ProjectMaintenanceRun }) {
+  const report = run.consistency_review
+  if (!report) return null
+  const label = report.outcome === 'clean' ? 'Clean' : report.outcome === 'warning' ? 'Warnings found' : 'Blocking findings'
+  return (
+    <section className="maintenance-section consistency-report" aria-labelledby="consistency-report-title">
+      <div className="section-heading">
+        <h2 id="consistency-report-title">Consistency report</h2>
+        <span className={`outcome-badge outcome-${report.outcome === 'clean' ? 'passed' : report.outcome}`}>{label}</span>
+      </div>
+      {report.findings.length === 0
+        ? <p className="empty-state">No consistency findings were reported.</p>
+        : <ol className="finding-list">
+          {report.findings.map((finding) => (
+            <li key={finding.id}>
+              <div className="finding-heading">
+                <code>{finding.code}</code>
+                <span className={`outcome-badge outcome-${finding.severity}`}>{finding.severity}</span>
+              </div>
+              <p>{finding.suggested_corrective_action}</p>
+              <dl className="finding-references">
+                {finding.affected_documents.map((reference) => (
+                  <div key={`${reference.document_id}:${reference.version_id}`}>
+                    <dt>Document {reference.document_id}</dt>
+                    <dd>Version {reference.version_id}</dd>
+                  </div>
+                ))}
+              </dl>
+            </li>
+          ))}
+        </ol>}
+    </section>
+  )
+}
+
+function statusHeading(run: ProjectMaintenanceRun): string {
+  if (run.status === 'PROJECT_UPDATED') return 'Project updated'
+  if (run.status === 'CANCELLED') return 'Maintenance cancelled'
+  if (run.status === 'APPLY_CHANGE') return 'Applying approved changes'
+  if (run.status === 'CONSISTENCY_REVIEW') return 'Reviewing project consistency'
+  if (run.status === 'USER_CONFIRMATION') {
+    if (run.pending_action?.confirmation_kind === 'consistency_warning') return 'Consistency warning requires a decision'
+    if (run.consistency_review?.outcome === 'blocking') return 'Corrective revision required'
+    return 'Revision confirmation required'
+  }
+  return 'Maintenance analysis continues'
+}
+
+function statusDescription(run: ProjectMaintenanceRun): string {
+  if (run.status === 'PROJECT_UPDATED') return 'The maintenance workflow completed and the recorded project versions are available below.'
+  if (run.status === 'CANCELLED') return 'This maintenance run ended without reporting a project update.'
+  if (run.status === 'APPLY_CHANGE') return 'The approved plan is being applied. Completion has not been confirmed.'
+  if (run.status === 'CONSISTENCY_REVIEW') return 'Applied versions are under consistency review. Completion has not been confirmed.'
+  if (run.status === 'USER_CONFIRMATION') return 'Review the durable report and choose only from the actions currently allowed by the server.'
+  return 'The durable workflow is still preparing the next maintenance state.'
+}
+
+function MaintenanceStatus() {
   const { projectId = '', workflowRunId = '' } = useParams()
-  const navigate = useNavigate()
   const [run, setRun] = useState<ProjectMaintenanceRun | null>(null)
   const [error, setError] = useState<MaintenanceError | null>(null)
+  const [retryGeneration, setRetryGeneration] = useState(0)
+  const [resolving, setResolving] = useState(false)
+  const [capabilityConsumed, setCapabilityConsumed] = useState(false)
+  const resolvingRef = useRef(false)
+  const mountedRef = useRef(true)
+  const resolveControllerRef = useRef<AbortController | null>(null)
   const headingRef = useRef<HTMLHeadingElement>(null)
+  const heading = run ? statusHeading(run) : null
+
+  useEffect(() => {
+    mountedRef.current = true
+    return () => {
+      mountedRef.current = false
+      resolveControllerRef.current?.abort()
+    }
+  }, [])
 
   useEffect(() => {
     const query = new ProjectMaintenanceQuery()
     void query.poll(
       { projectId, workflowRunId },
       {
-        maxAttempts: 1,
-        intervalMs: 0,
+        maxAttempts: 30,
+        intervalMs: 1_500,
         onUpdate: (updatedRun) => {
-          if (
-            updatedRun.status === 'USER_CONFIRMATION'
-            && updatedRun.pending_action?.confirmation_kind === 'revision_confirmation'
-          ) {
-            query.cancel()
-            navigate(`/projects/${projectId}/maintenance/${updatedRun.id}`, { replace: true })
-            return
-          }
           setRun(updatedRun)
           setError(null)
+          setCapabilityConsumed(false)
         },
         onError: (caught) => setError(safeError(caught)),
       },
-    ).catch((caught: unknown) => setError(safeError(caught)))
+    ).then((result) => {
+      if (result === 'max_attempts') {
+        setError({
+          message: 'Maintenance is still in progress, but automatic checking paused. Refresh the durable run before making any completion decision.',
+          retry: true,
+        })
+      }
+    }).catch((caught: unknown) => setError(safeError(caught)))
     return () => query.cancel()
-  }, [navigate, projectId, workflowRunId])
+  }, [projectId, retryGeneration, workflowRunId])
 
   useLayoutEffect(() => {
-    if (run) headingRef.current?.focus()
-  }, [run])
+    if (heading) headingRef.current?.focus()
+  }, [heading, retryGeneration])
 
-  const consistencyWarning = run?.status === 'USER_CONFIRMATION'
-    && run.pending_action?.confirmation_kind === 'consistency_warning'
-  const decisionRecorded = run && ['APPLY_CHANGE', 'CONSISTENCY_REVIEW', 'PROJECT_UPDATED', 'CANCELLED'].includes(run.status)
+  async function decide(decision: ProjectMaintenanceDecision) {
+    if (!run || resolvingRef.current || capabilityConsumed) return
+    const decisionRun = run
+    resolvingRef.current = true
+    setResolving(true)
+    setCapabilityConsumed(true)
+    setError(null)
+    const controller = new AbortController()
+    resolveControllerRef.current = controller
+    try {
+      const resolved = await resolveProjectMaintenanceAction(projectId, decisionRun, decision, controller.signal)
+      if (mountedRef.current && !controller.signal.aborted) {
+        setRun(resolved)
+        if (!['PROJECT_UPDATED', 'CANCELLED'].includes(resolved.status)) {
+          setRetryGeneration((value) => value + 1)
+        }
+      }
+    } catch (caught: unknown) {
+      if (mountedRef.current && !controller.signal.aborted) setError(safeError(caught))
+    } finally {
+      if (mountedRef.current) {
+        resolvingRef.current = false
+        setResolving(false)
+      }
+    }
+  }
+
   return (
-    <section className="page maintenance-page handoff-page" aria-labelledby="route-title">
+    <section className="page maintenance-page status-page" aria-labelledby="route-title">
+      <Link className="back-link" to={`/projects/${projectId}/maintenance`}>Back to maintenance history</Link>
       <p className="eyebrow">Project maintenance</p>
       {!run && !error && <><h1 id="route-title">Checking maintenance status</h1><p className="lede" role="status">Verifying the current workflow state.</p></>}
-      {error && <><h1 id="route-title">Maintenance status unavailable</h1><FocusedError error={error} /></>}
-      {run && <>
-        <h1 id="route-title" ref={headingRef} tabIndex={-1}>{consistencyWarning
-          ? 'Additional review is required'
-          : decisionRecorded ? 'Decision recorded' : 'Maintenance analysis continues'}</h1>
-        <p className="lede">{consistencyWarning
-          ? 'The workflow reached a later consistency review gate.'
-          : decisionRecorded
-            ? 'Your decision was accepted and control has returned to the maintenance workflow.'
-            : 'The workflow has not reached a confirmed post-decision state.'}</p>
-        <div className="handoff-notice" role="status">
-          <strong>{consistencyWarning ? 'Later workflow step' : decisionRecorded ? 'Confirmation complete' : 'Confirmation not verified'}</strong>
-          <p>{consistencyWarning
-            ? 'This confirmation screen does not offer later consistency decisions. Continue from the maintenance status experience when available.'
-            : decisionRecorded
-              ? 'This gate does not report apply progress or claim that project documents changed.'
-              : 'No decision completion is claimed from this link. Return to the live gate to continue.'}</p>
-        </div>
+      {error && !run && <>
+        <h1 id="route-title">Maintenance status unavailable</h1>
+        <FocusedError error={error} onRetry={() => {
+          setError(null)
+          setRetryGeneration((value) => value + 1)
+        }} />
       </>}
-      {run && !decisionRecorded && !consistencyWarning && <Link className="back-link" to={`/projects/${projectId}/maintenance/${workflowRunId}`}>Return to live gate</Link>}
+      {run && <>
+        <h1 id="route-title" ref={headingRef} tabIndex={-1}>{heading}</h1>
+        <p className="lede">{statusDescription(run)}</p>
+        {error && <FocusedError error={error} onRetry={() => {
+          setError(null)
+          setRetryGeneration((value) => value + 1)
+        }} />}
+        {['APPLY_CHANGE', 'CONSISTENCY_REVIEW'].includes(run.status) && <AnalysisProgress run={run} />}
+        <AppliedVersions run={run} />
+        <ConsistencyReport run={run} />
+        {run.status === 'USER_CONFIRMATION' && run.pending_action?.confirmation_kind === 'revision_confirmation' && <RevisionPlan run={run} />}
+        {!capabilityConsumed && <ConfirmationActions run={run} resolving={resolving} onDecision={(decision) => void decide(decision)} />}
+      </>}
       <Link className="back-link" to={`/projects/${projectId}`}>Return to project workspace</Link>
+    </section>
+  )
+}
+
+function MaintenanceHistory() {
+  const { projectId = '' } = useParams()
+  const [runs, setRuns] = useState<ProjectMaintenanceHistorySummary[] | null>(null)
+  const [error, setError] = useState<MaintenanceError | null>(null)
+  const [retryGeneration, setRetryGeneration] = useState(0)
+  const headingRef = useRef<HTMLHeadingElement>(null)
+
+  useLayoutEffect(() => { headingRef.current?.focus() }, [retryGeneration])
+  useEffect(() => {
+    const controller = new AbortController()
+    listProjectMaintenanceRuns(projectId, { offset: 0, limit: 20 }, controller.signal).then(
+      (loaded) => { if (!controller.signal.aborted) setRuns(loaded) },
+      (caught: unknown) => { if (!controller.signal.aborted) setError(safeError(caught)) },
+    )
+    return () => controller.abort()
+  }, [projectId, retryGeneration])
+
+  return (
+    <section className="page maintenance-page history-page" aria-labelledby="route-title">
+      <Link className="back-link" to={`/projects/${projectId}`}>Back to project workspace</Link>
+      <p className="eyebrow">Project maintenance</p>
+      <h1 id="route-title" ref={headingRef} tabIndex={-1}>Maintenance history</h1>
+      <p className="lede">Review the 20 most recent durable maintenance runs in server-provided order.</p>
+      {error && <FocusedError error={error} onRetry={() => {
+        setRuns(null)
+        setError(null)
+        setRetryGeneration((value) => value + 1)
+      }} />}
+      {!error && runs === null && <p className="muted" role="status">Loading maintenance history…</p>}
+      {runs?.length === 0 && <p className="empty-state">No maintenance runs yet.</p>}
+      {runs && runs.length > 0 && <ol className="maintenance-history-list">
+        {runs.map((historyRun) => (
+          <li key={historyRun.id}>
+            <Link to={`/projects/${projectId}/maintenance/${historyRun.id}/status`}>{historyRun.title}</Link>
+            <span className="history-status">{historyRun.status.replaceAll('_', ' ')}</span>
+            <p>Updated <time dateTime={historyRun.updated_at}>{historyRun.updated_at}</time></p>
+          </li>
+        ))}
+      </ol>}
+      <Link to={`/projects/${projectId}/maintenance/start`}>Plan another project change</Link>
     </section>
   )
 }
@@ -464,11 +624,17 @@ function MaintenanceStartRoute() {
 
 function MaintenanceHandoffRoute() {
   const { projectId = '', workflowRunId = '' } = useParams()
-  return <MaintenanceHandoff key={`${projectId}:${workflowRunId}`} />
+  return <MaintenanceStatus key={`${projectId}:${workflowRunId}`} />
 }
 
-export default function ProjectMaintenancePage({ mode }: { mode: 'start' | 'gate' | 'handoff' }) {
+function MaintenanceHistoryRoute() {
+  const { projectId = '' } = useParams()
+  return <MaintenanceHistory key={projectId} />
+}
+
+export default function ProjectMaintenancePage({ mode }: { mode: 'start' | 'gate' | 'handoff' | 'history' }) {
   if (mode === 'start') return <MaintenanceStartRoute />
   if (mode === 'handoff') return <MaintenanceHandoffRoute />
+  if (mode === 'history') return <MaintenanceHistoryRoute />
   return <MaintenanceGateRoute />
 }
