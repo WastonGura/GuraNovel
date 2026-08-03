@@ -53,8 +53,15 @@ from app.workflows.project_maintenance import MaintenanceDecision
 
 
 class _ExecutionLoreAgent:
-    def __init__(self, *, outcome: str = "clean", fail_post_change: bool = False) -> None:
+    def __init__(
+        self,
+        *,
+        outcome: str = "clean",
+        outcomes: tuple[str, ...] | None = None,
+        fail_post_change: bool = False,
+    ) -> None:
         self.outcome = outcome
+        self.outcomes = outcomes
         self.fail_post_change = fail_post_change
         self.post_change_calls: list[PostChangeRequest] = []
 
@@ -79,15 +86,20 @@ class _ExecutionLoreAgent:
         self.post_change_calls.append(request)
         if self.fail_post_change:
             raise RuntimeError("sk-private post-change provider payload")
+        outcome = (
+            self.outcomes[len(self.post_change_calls) - 1]
+            if self.outcomes is not None and len(self.post_change_calls) <= len(self.outcomes)
+            else self.outcome
+        )
         findings: tuple[ConsistencyFinding, ...] = ()
-        if self.outcome != "clean":
-            blocking = self.outcome == "blocking"
+        if outcome != "clean":
+            blocking = outcome == "blocking"
             findings = (
                 ConsistencyFinding(
                     finding_id=uuid4(),
                     sequence=1,
-                    code=f"maintenance_{self.outcome}",
-                    severity=self.outcome,
+                    code=f"maintenance_{outcome}",
+                    severity=outcome,
                     affected_documents=tuple(
                         DocumentVersionReference(
                             document_id=item.document_id,
@@ -111,7 +123,7 @@ class _ExecutionLoreAgent:
             revision_plan_document_id=request.revision_plan_document_id,
             revision_plan_version_id=request.revision_plan_version_id,
             change_set_id=request.change_set_id,
-            outcome=self.outcome,
+            outcome=outcome,
             findings=findings,
         )
 
@@ -189,7 +201,8 @@ class _ExecutionArchivistAgent:
                 expected_current_version_id=operation.target.current_version_id,
                 operation="replace_content",
                 content=(
-                    f"# Revised canonical rule\n\nApproved maintenance replacement {sequence}.\n"
+                    "# Revised canonical rule\n\n"
+                    f"Approved maintenance replacement {len(self.calls)}-{sequence}.\n"
                 ),
                 rationale="Apply the exact approved revision operation.",
             )
@@ -214,10 +227,15 @@ class _ExecutionArchivistAgent:
 def _composition(
     *,
     outcome: str = "clean",
+    outcomes: tuple[str, ...] | None = None,
     fail_archivist: bool = False,
     fail_lore: bool = False,
 ) -> tuple[ProjectMaintenanceComposition, _ExecutionArchivistAgent, _ExecutionLoreAgent]:
-    lore = _ExecutionLoreAgent(outcome=outcome, fail_post_change=fail_lore)
+    lore = _ExecutionLoreAgent(
+        outcome=outcome,
+        outcomes=outcomes,
+        fail_post_change=fail_lore,
+    )
     archivist = _ExecutionArchivistAgent(fail=fail_archivist)
     composition = ProjectMaintenanceComposition(
         lore,  # type: ignore[arg-type]
@@ -735,6 +753,231 @@ async def test_nonclean_revision_preserves_applied_history_and_creates_correctiv
         assert revised_plan is not None
         assert revised_plan.parent_version_id == corrective_plan_version_id
         assert await _canonical_versions(async_session, project_id) == applied
+
+
+@pytest.mark.integration
+@pytest.mark.anyio
+async def test_blocking_corrective_cycle_restarts_at_same_gate_and_finishes_once_when_clean(
+    async_session: AsyncSession,
+    integration_database_url: str,
+    tmp_path: Path,
+) -> None:
+    composition, _, lore = _composition(outcomes=("blocking", "clean"))
+    project, documents, started, _ = await _start(
+        async_session, tmp_path, "blocking-restart", composition=composition, count=1
+    )
+    project_id = project.id
+    run_id = started.workflow_run_id  # type: ignore[attr-defined]
+    document_id = documents[0].id
+    original_version_id = documents[0].current_version_id
+    assert original_version_id is not None
+
+    await ProjectMaintenanceService(async_session, composition).resolve_action(
+        project_id,
+        run_id,
+        started.action_request_id,  # type: ignore[attr-defined]
+        decision=MaintenanceDecision.APPROVE,
+    )
+    await async_session.rollback()
+
+    first_applied = await _canonical_versions(async_session, project_id)
+    first_applied_version_id = first_applied[document_id]
+    assert first_applied_version_id != original_version_id
+    corrective_action = await _pending_action(async_session, run_id)
+    corrective_action_id = corrective_action.id
+    assert corrective_action.options == ["approve", "revise"]
+    state = await _latest_state_json(async_session, run_id)
+    assert state["status"] == "USER_CONFIRMATION"
+    blocking_report = await async_session.get(
+        ReviewReport, UUID(state["consistency_report_id"])
+    )
+    assert blocking_report is not None
+    assert not blocking_report.passed and blocking_report.blocking_issues
+    project_before_restart = await async_session.get(Project, project_id)
+    assert project_before_restart is not None
+    assert project_before_restart.current_workflow_id == run_id
+    assert not [
+        event
+        for event in await async_session.scalars(
+            select(WorkflowEvent).where(WorkflowEvent.workflow_run_id == run_id)
+        )
+        if event.payload.get("status") == "PROJECT_UPDATED"
+    ]
+
+    async def count_rows(session: AsyncSession, model: type, *criteria: object) -> int:
+        statement = select(func.count()).select_from(model)
+        for criterion in criteria:
+            statement = statement.where(criterion)  # type: ignore[arg-type]
+        return int(await session.scalar(statement) or 0)
+
+    counts_before_restart = {
+        "versions": await count_rows(
+            async_session,
+            DocumentVersion,
+            DocumentVersion.workflow_run_id == run_id,
+        ),
+        "actions": await count_rows(
+            async_session, ActionRequest, ActionRequest.workflow_run_id == run_id
+        ),
+        "checkpoints": await count_rows(
+            async_session, WorkflowCheckpoint, WorkflowCheckpoint.workflow_run_id == run_id
+        ),
+        "reports": await count_rows(
+            async_session,
+            ReviewReport,
+            ReviewReport.workflow_run_id == run_id,
+            ReviewReport.review_mode == "maintenance_consistency",
+        ),
+    }
+
+    await async_session.rollback()
+    engine = create_async_engine(integration_database_url, pool_pre_ping=True)
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    try:
+        async with sessions() as restarted:
+            assert (await _pending_action(restarted, run_id)).id == corrective_action_id
+            assert await _canonical_versions(restarted, project_id) == first_applied
+            assert {
+                "versions": await count_rows(
+                    restarted,
+                    DocumentVersion,
+                    DocumentVersion.workflow_run_id == run_id,
+                ),
+                "actions": await count_rows(
+                    restarted, ActionRequest, ActionRequest.workflow_run_id == run_id
+                ),
+                "checkpoints": await count_rows(
+                    restarted,
+                    WorkflowCheckpoint,
+                    WorkflowCheckpoint.workflow_run_id == run_id,
+                ),
+                "reports": await count_rows(
+                    restarted,
+                    ReviewReport,
+                    ReviewReport.workflow_run_id == run_id,
+                    ReviewReport.review_mode == "maintenance_consistency",
+                ),
+            } == counts_before_restart
+
+        async with sessions() as resumed:
+            await ProjectMaintenanceService(resumed, composition).resolve_action(
+                project_id,
+                run_id,
+                corrective_action_id,
+                decision=MaintenanceDecision.APPROVE,
+            )
+
+        async with sessions() as verify:
+            final_versions = await _canonical_versions(verify, project_id)
+            final_version_id = final_versions[document_id]
+            final_version = await verify.get(DocumentVersion, final_version_id)
+            assert final_version is not None
+            assert final_version.parent_version_id == first_applied_version_id
+
+            reports = list(
+                await verify.scalars(
+                    select(ReviewReport)
+                    .where(
+                        ReviewReport.workflow_run_id == run_id,
+                        ReviewReport.review_mode == "maintenance_consistency",
+                    )
+                    .order_by(ReviewReport.created_at, ReviewReport.id)
+                )
+            )
+            assert [
+                "blocking" if report.blocking_issues else "clean" for report in reports
+            ] == ["blocking", "clean"]
+            run = await verify.get(WorkflowRun, run_id)
+            finished_project = await verify.get(Project, project_id)
+            assert run is not None and run.status == "PROJECT_UPDATED"
+            assert finished_project is not None and finished_project.current_workflow_id is None
+            terminal_event_count = len(
+                [
+                    event
+                    for event in await verify.scalars(
+                        select(WorkflowEvent).where(WorkflowEvent.workflow_run_id == run_id)
+                    )
+                    if event.payload.get("status") == "PROJECT_UPDATED"
+                ]
+            )
+            assert terminal_event_count == 1
+            version_count = await count_rows(
+                verify,
+                DocumentVersion,
+                DocumentVersion.workflow_run_id == run_id,
+            )
+            action_count = await count_rows(
+                verify,
+                ActionRequest,
+                ActionRequest.workflow_run_id == run_id,
+            )
+            checkpoint_count = await count_rows(
+                verify,
+                WorkflowCheckpoint,
+                WorkflowCheckpoint.workflow_run_id == run_id,
+            )
+            report_count = await count_rows(
+                verify,
+                ReviewReport,
+                ReviewReport.workflow_run_id == run_id,
+                ReviewReport.review_mode == "maintenance_consistency",
+            )
+
+        async with sessions() as replay:
+            with pytest.raises((ConflictError, WorkflowStateError)):
+                await ProjectMaintenanceService(replay, composition).resolve_action(
+                    project_id,
+                    run_id,
+                    corrective_action_id,
+                    decision=MaintenanceDecision.APPROVE,
+                )
+            await replay.rollback()
+            assert (
+                await count_rows(
+                    replay,
+                    DocumentVersion,
+                    DocumentVersion.workflow_run_id == run_id,
+                )
+                == version_count
+            )
+            assert (
+                await count_rows(
+                    replay,
+                    ActionRequest,
+                    ActionRequest.workflow_run_id == run_id,
+                )
+                == action_count
+            )
+            assert (
+                await count_rows(
+                    replay,
+                    WorkflowCheckpoint,
+                    WorkflowCheckpoint.workflow_run_id == run_id,
+                )
+                == checkpoint_count
+            )
+            assert (
+                await count_rows(
+                    replay,
+                    ReviewReport,
+                    ReviewReport.workflow_run_id == run_id,
+                    ReviewReport.review_mode == "maintenance_consistency",
+                )
+                == report_count
+            )
+            assert len(
+                [
+                    event
+                    for event in await replay.scalars(
+                        select(WorkflowEvent).where(WorkflowEvent.workflow_run_id == run_id)
+                    )
+                    if event.payload.get("status") == "PROJECT_UPDATED"
+                ]
+            ) == terminal_event_count
+    finally:
+        await engine.dispose()
+
+    assert len(lore.post_change_calls) == 2
 
 
 @pytest.mark.integration

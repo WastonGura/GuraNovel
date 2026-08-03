@@ -106,6 +106,27 @@ The following are intentionally not committed:
 
 Use public docs such as `docs/architecture.md` later for cleaned-up design documentation.
 
+## Canonical v0.8 verification
+
+Run the release gates from a clean checkout. Backend integration tests must use an explicit dedicated
+`_test` PostgreSQL database and run once, serially; never point them at a development or production database.
+
+```text
+cd backend
+uv run ruff check .
+uv run pytest -m "not integration"
+TEST_DATABASE_URL=postgresql+asyncpg://<test-user>:<test-password>@<test-host>/<database>_test uv run pytest -m integration
+
+cd ../frontend
+npm ci
+npm run lint
+npm run test -- --run
+npm run build
+npx --no-install @google/design.md lint DESIGN.md
+npx playwright install chromium
+npm run test:e2e
+```
+
 ## Optional local CodeGraph
 
 GuraNovel supports [CodeGraph](https://github.com/colbymchenry/codegraph) as an

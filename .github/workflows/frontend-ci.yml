@@ -41,3 +41,9 @@ jobs:
 
       - name: Lint design document
         run: npx --no-install @google/design.md lint DESIGN.md
+
+      - name: Install Playwright Chromium
+        run: npx playwright install --with-deps chromium
+
+      - name: Run Playwright smoke test
+        run: npm run test:e2e

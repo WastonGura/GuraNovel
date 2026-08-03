@@ -150,7 +150,6 @@ class ProjectMaintenanceRunResponse(BaseModel):
     next_node: None
     awaiting_user: bool
     title: str
-    change_request: str
     created_at: datetime
     updated_at: datetime
     completed_at: datetime | None

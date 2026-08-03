@@ -26,7 +26,6 @@ function run(id: string, status: ProjectMaintenanceRun['status']): ProjectMainte
     next_node: null,
     awaiting_user: status === 'USER_CONFIRMATION',
     title: 'Retcon the rule',
-    change_request: 'Preserve the timeline.',
     created_at: '2026-08-03T00:00:00Z',
     updated_at: '2026-08-03T00:01:00Z',
     completed_at: null,

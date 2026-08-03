@@ -98,7 +98,6 @@ def test_maintenance_openapi_is_project_scoped_and_allowlisted() -> None:
         "next_node",
         "awaiting_user",
         "title",
-        "change_request",
         "created_at",
         "updated_at",
         "completed_at",

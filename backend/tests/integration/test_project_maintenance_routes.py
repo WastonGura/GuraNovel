@@ -134,7 +134,6 @@ def _assert_public_run_shape(body: dict) -> None:
         "next_node",
         "awaiting_user",
         "title",
-        "change_request",
         "created_at",
         "updated_at",
         "completed_at",
@@ -154,6 +153,7 @@ def _assert_public_run_shape(body: dict) -> None:
             "snapshot_path",
             "workspace_root",
             "raw_report",
+            "change_request",
         )
     )
 
@@ -183,7 +183,8 @@ async def test_http_start_read_list_approve_and_replay(
     body = started.json()
     _assert_public_run_shape(body)
     assert body["status"] == "USER_CONFIRMATION"
-    assert body["title"] == title and body["change_request"] == change_request
+    assert body["title"] == title
+    assert "change_request" not in body
     assert body["pending_action"]["allowed_decisions"] == ["approve", "revise", "cancel"]
     assert set(body["pending_action"]) == {
         "id",
