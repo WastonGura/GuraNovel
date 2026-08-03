@@ -36,7 +36,6 @@ function confirmationRun(): Record<string, unknown> {
     next_node: null,
     awaiting_user: true,
     title: 'Retcon the world rule',
-    change_request: 'Preserve history while changing the rule.',
     created_at: '2026-08-03T00:00:00Z',
     updated_at: '2026-08-03T00:01:00Z',
     completed_at: null,
@@ -164,6 +163,18 @@ describe('project maintenance API client', () => {
     const pending = run.pending_action as Record<string, unknown>
     pending.raw_model_output = 'private provider output'
     mockJsonResponse(run)
+
+    await expect(getProjectMaintenanceRun('project-1', ids.run)).rejects.toMatchObject({
+      code: 'invalid_response',
+      message: 'The server returned an invalid response.',
+    })
+  })
+
+  it('fails closed when a public run echoes the private change request', async () => {
+    mockJsonResponse({
+      ...confirmationRun(),
+      change_request: 'private-change-request-never-return',
+    })
 
     await expect(getProjectMaintenanceRun('project-1', ids.run)).rejects.toMatchObject({
       code: 'invalid_response',

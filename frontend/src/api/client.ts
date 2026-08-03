@@ -309,7 +309,6 @@ export interface ProjectMaintenanceRun {
   next_node: null
   awaiting_user: boolean
   title: string
-  change_request: string
   created_at: string
   updated_at: string
   completed_at: string | null
@@ -1184,7 +1183,7 @@ function validateMaintenanceLifecycle(run: ProjectMaintenanceRun): void {
 function decodeProjectMaintenanceRun(value: unknown): ProjectMaintenanceRun {
   const data = exactObject(value, [
     'id', 'maintenance_change_id', 'type', 'status', 'current_node', 'next_node', 'awaiting_user', 'title',
-    'change_request', 'created_at', 'updated_at', 'completed_at', 'affected_items', 'revision_plan',
+    'created_at', 'updated_at', 'completed_at', 'affected_items', 'revision_plan',
     'consistency_review', 'applied_document_version_ids', 'pending_action',
   ])
   const status = maintenanceEnum(data.status, maintenanceStatuses)
@@ -1199,7 +1198,6 @@ function decodeProjectMaintenanceRun(value: unknown): ProjectMaintenanceRun {
     next_node: data.next_node === null ? null : (() => { throw invalidResponse() })(),
     awaiting_user: boolean(data.awaiting_user),
     title: maintenanceString(data.title, 1, 512, false),
-    change_request: maintenanceString(data.change_request, 1, 4000),
     created_at: maintenanceDate(data.created_at),
     updated_at: maintenanceDate(data.updated_at),
     completed_at: data.completed_at === null ? null : maintenanceDate(data.completed_at),
