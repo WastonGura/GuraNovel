@@ -46,6 +46,38 @@ _CREDENTIAL_MATERIAL = re.compile(
     r"\s*[:=]\s*\S+|\bsk-[a-z0-9_-]{8,}\b)",
     re.IGNORECASE,
 )
+_PUBLIC_HEADER_MATERIAL = re.compile(
+    r"\b(?:x-[a-z0-9-]+|authorization|set-cookie|content-type|referer|user-agent)\s*:",
+    re.IGNORECASE,
+)
+_AMBIGUOUS_HEADER_LINE = re.compile(r"(?:^|[\r\n])\s*cookie\s*:", re.IGNORECASE)
+_SERVER_METADATA = re.compile(
+    r"(?:\bServer\s*:\s*\S+|(?:^|[\r\n])\s*server\s*:\s*\S+)"
+)
+_DETAILS_DIAGNOSTIC = re.compile(
+    r"\b(?:provider\s+)?details\s+(?:error|exception|server)\s*:", re.IGNORECASE
+)
+_RAW_EXCEPTION_MATERIAL = re.compile(
+    r"(?:\b(?:Error|ERROR|Exception|EXCEPTION|Traceback|TRACEBACK)\s*:"
+    r"|(?:^|[\r\n])\s*(?:error|exception|traceback)\s*:)"
+)
+_EXCEPTION_CLASS_MATERIAL = re.compile(r"\b[A-Z][A-Za-z0-9_]*(?:Error|Exception)\s*:")
+_CLOUD_REGION = (
+    r"(?:(?:[a-z]{2}|us-gov)(?:-[a-z0-9]+)+-\d+"
+    r"|(?:[a-z]{2}|africa|asia|australia|europe|northamerica|southamerica)(?:-[a-z]+)+\d+)"
+)
+_PROVIDER_METADATA = re.compile(
+    rf"(?:\bmodel\s*[:=]?\s*\S+\s+in\s+region\s*[:=]?\s*{_CLOUD_REGION}"
+    rf"|\bprovider\s*[:=]?\s*\S+\s+model\s*[:=]?\s*\S+\s+region\s*[:=]?\s*{_CLOUD_REGION}"
+    rf"|\bprovider\s*[:=]\s*\S+|\bendpoint\s*[:=]\s*\S+|\bregion\s*[:=]\s*{_CLOUD_REGION}"
+    r"|\bmodel\s*=\s*[a-z0-9][a-z0-9._-]*"
+    r"|\b(?:provider\s+)?details\s+model\s*[:=]\s*[a-z0-9][a-z0-9._-]*"
+    r"|\bregion\s*=\s*[a-z0-9][a-z0-9._-]*"
+    r"|\bserving\s+model\s+\S+\s+in\s+region\s+\S+"
+    r"|(?:^|[\r\n])\s*model\s*[:=]\s*(?:gpt|claude|gemini|llama|mistral|command|qwen)"
+    r"[a-z0-9._-]*\s*(?:$|[\r\n]))",
+    re.IGNORECASE,
+)
 _UUID_FIELDS = (
     "project_id",
     "workflow_run_id",
@@ -118,6 +150,13 @@ def _safe_planning_text(value: str, field: str) -> str:
         or _EXTERNAL_URI_SCHEME.search(value) is not None
         or _BARE_DOTTED_TOKEN.search(value) is not None
         or _CREDENTIAL_MATERIAL.search(value) is not None
+        or _PUBLIC_HEADER_MATERIAL.search(value) is not None
+        or _AMBIGUOUS_HEADER_LINE.search(value) is not None
+        or _SERVER_METADATA.search(value) is not None
+        or _DETAILS_DIAGNOSTIC.search(value) is not None
+        or _RAW_EXCEPTION_MATERIAL.search(value) is not None
+        or _EXCEPTION_CLASS_MATERIAL.search(value) is not None
+        or _PROVIDER_METADATA.search(value) is not None
     ):
         raise ValueError(f"invalid {field}")
     return value
