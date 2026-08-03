@@ -501,11 +501,126 @@ async def test_ready_lineage_failure_restart_requires_full_live_reconciliation_b
 
 @pytest.mark.integration
 @pytest.mark.anyio
+@pytest.mark.parametrize("canonical_edit", [False, True])
+async def test_ordinary_finalized_failure_recovery_is_live_bound_after_restart(
+    async_session: AsyncSession,
+    integration_database_url: str,
+    canonical_edit: bool,
+) -> None:
+    run_id, _, document_id, version_id, ready = await seed_ready_checkpoint(
+        async_session
+    )
+    run = await async_session.get(WorkflowRun, run_id)
+    assert run is not None
+    failed = ready.fail(ChapterFailureCode.ARCHIVE_UNAVAILABLE)
+    run.status = failed.status.value
+    run.current_node = failed.current_node
+    run.awaiting_user = failed.awaiting_user
+    async_session.add(
+        WorkflowCheckpoint(
+            workflow_run_id=run.id,
+            checkpoint_index=1,
+            node_name=failed.current_node,
+            state_json=failed.to_checkpoint(),
+        )
+    )
+    await async_session.commit()
+
+    async with fresh_session(integration_database_url) as restarted:
+        reloaded_run = await restarted.get(WorkflowRun, run_id)
+        document = await restarted.get(Document, document_id)
+        version_v1 = await restarted.get(DocumentVersion, version_id)
+        checkpoint = await latest_checkpoint(restarted, run_id)
+        reports = {
+            report.review_mode: report
+            for report in await restarted.scalars(
+                select(ReviewReport).where(ReviewReport.workflow_run_id == run_id)
+            )
+        }
+        assert (
+            reloaded_run is not None
+            and document is not None
+            and version_v1 is not None
+        )
+        editor = report_binding(
+            reports[ReviewMode.CHAPTER_EDITOR.value], ChapterReviewStage.EDITOR
+        )
+        chief = report_binding(
+            reports[ReviewMode.CHAPTER_CHIEF_FINAL.value],
+            ChapterReviewStage.CHIEF_EDITOR,
+        )
+        lore = report_binding(
+            reports[ReviewMode.CHAPTER_FINAL_LORE.value], ChapterReviewStage.LORE
+        )
+        restored_failed = ChapterProductionState.from_revision_ready_checkpoint(
+            checkpoint.state_json,
+            workflow_run_id=str(reloaded_run.id),
+            chapter_id=str(reloaded_run.chapter_id),
+            run_workflow_type=reloaded_run.workflow_type,
+            run_status=reloaded_run.status,
+            run_current_node=reloaded_run.current_node,
+            run_awaiting_user=reloaded_run.awaiting_user,
+            checkpoint_workflow_run_id=str(checkpoint.workflow_run_id),
+            checkpoint_node_name=checkpoint.node_name,
+            document_id=str(document.id),
+            current_document_version_id=str(document.current_version_id),
+            version_content_hash=version_v1.content_hash,
+            editor_report=editor,
+            chief_editor_report=chief,
+            lore_report=lore,
+        )
+        with pytest.raises(ChapterProductionValidationError, match="live readiness"):
+            restored_failed.recover()
+
+        current_version = version_v1
+        if canonical_edit:
+            version_v2 = DocumentVersion(
+                document_id=document.id,
+                version_number=2,
+                parent_version_id=version_v1.id,
+                source=DocumentSource.USER.value,
+                content_hash=NEW_CONTENT_HASH,
+                byte_size=11,
+                word_count=2,
+                file_path=version_v1.file_path,
+            )
+            restarted.add(version_v2)
+            await restarted.flush()
+            document.current_version_id = version_v2.id
+            current_version = version_v2
+
+        if canonical_edit:
+            with pytest.raises(ChapterProductionValidationError):
+                restored_failed.recover_finalized(
+                    document_id=str(document.id),
+                    current_document_version_id=str(document.current_version_id),
+                    version_content_hash=current_version.content_hash,
+                    editor_report=editor,
+                    chief_editor_report=chief,
+                    lore_report=lore,
+                )
+            assert reloaded_run.status == ChapterProductionStatus.FAILED.value
+            assert checkpoint.state_json == failed.to_checkpoint()
+        else:
+            recovered = restored_failed.recover_finalized(
+                document_id=str(document.id),
+                current_document_version_id=str(document.current_version_id),
+                version_content_hash=current_version.content_hash,
+                editor_report=editor,
+                chief_editor_report=chief,
+                lore_report=lore,
+            )
+            assert recovered == ready
+
+
+@pytest.mark.integration
+@pytest.mark.anyio
 @pytest.mark.parametrize(
     "scenario",
     [
         "pending_author_action",
         "review_revision",
+        "failed_drafting_committed_author_gate",
         "failed_provider_unavailable",
         "failed_document_commit_indeterminate",
         "failed_persistence_unavailable",
@@ -593,7 +708,14 @@ async def test_non_finalized_checkpoint_restart_round_trip_preserves_live_state(
         action=live_author,
     )
 
-    if scenario != "pending_author_action":
+    if scenario == "failed_drafting_committed_author_gate":
+        state = state.resolve_action(
+            action=live_author,
+            decision=ChapterActionDecision.REQUEST_REVISION,
+        )
+        author_action.status = ActionRequestStatus.REVISED.value
+        author_action.user_decision = ChapterActionDecision.REQUEST_REVISION.value
+    elif scenario != "pending_author_action":
         state = state.resolve_action(
             action=live_author,
             decision=ChapterActionDecision.ACCEPT,
@@ -639,6 +761,37 @@ async def test_non_finalized_checkpoint_restart_round_trip_preserves_live_state(
                 current_version=version,
             ),
         )
+    elif scenario == "failed_drafting_committed_author_gate":
+        state = state.fail(ChapterFailureCode.DOCUMENT_COMMIT_INDETERMINATE)
+        committed_version = DocumentVersion(
+            document_id=document.id,
+            version_number=2,
+            parent_version_id=version.id,
+            source=DocumentSource.USER.value,
+            content_hash=CONTENT_HASH,
+            byte_size=11,
+            word_count=2,
+            file_path=version.file_path,
+        )
+        async_session.add(committed_version)
+        await async_session.flush()
+        document.current_version_id = committed_version.id
+        reconciliation_action = ActionRequest(
+            workflow_run_id=run.id,
+            project_id=project.id,
+            chapter_id=chapter.id,
+            request_type="chapter_author_revision",
+            status=ActionRequestStatus.PENDING.value,
+            prompt="",
+            options=[],
+            metadata_={
+                "document_id": str(document.id),
+                "document_version_id": str(committed_version.id),
+                "content_hash": committed_version.content_hash,
+            },
+        )
+        async_session.add(reconciliation_action)
+        await async_session.flush()
     elif scenario.startswith("failed_"):
         failure_code = {
             "failed_provider_unavailable": ChapterFailureCode.PROVIDER_UNAVAILABLE,
@@ -655,7 +808,7 @@ async def test_non_finalized_checkpoint_restart_round_trip_preserves_live_state(
                 version_number=2,
                 parent_version_id=version.id,
                 source=DocumentSource.USER.value,
-                content_hash=NEW_CONTENT_HASH,
+                content_hash=CONTENT_HASH,
                 byte_size=11,
                 word_count=2,
                 file_path=version.file_path,
@@ -692,6 +845,12 @@ async def test_non_finalized_checkpoint_restart_round_trip_preserves_live_state(
             DocumentVersion, reloaded_document.current_version_id
         )
         assert reloaded_current_version is not None
+        if scenario in {
+            "failed_document_commit_indeterminate",
+            "failed_drafting_committed_author_gate",
+        }:
+            assert reloaded_current_version.id != reloaded_version.id
+            assert reloaded_current_version.content_hash == reloaded_version.content_hash
         restored = ChapterProductionState.from_checkpoint(checkpoint.state_json)
         restored.validate_persistence_binding(
             workflow_run_id=str(reloaded_run.id),
@@ -733,6 +892,54 @@ async def test_non_finalized_checkpoint_restart_round_trip_preserves_live_state(
             ).awaiting_user
         else:
             assert restored.status is ChapterProductionStatus.FAILED
+            if scenario == "failed_drafting_committed_author_gate":
+                with pytest.raises(
+                    ChapterProductionValidationError, match="reconciliation"
+                ):
+                    restored.recover()
+                pending_actions = list(
+                    await restarted.scalars(
+                        select(ActionRequest).where(
+                            ActionRequest.workflow_run_id == run.id,
+                            ActionRequest.status == ActionRequestStatus.PENDING.value,
+                        )
+                    )
+                )
+                assert len(pending_actions) == 1
+                reconciled = restored.reconcile_failure(
+                    binding=failure_reconciliation_binding(
+                        restored,
+                        ChapterFailureReconciliationOutcome.CANONICAL_VERSION_COMMITTED,
+                        reloaded_document,
+                        reloaded_current_version,
+                    ),
+                    action=action_binding(
+                        pending_actions[0],
+                        ChapterActionKind.AUTHOR_REVISION,
+                        pending_count=1,
+                        document=reloaded_document,
+                        current_version=reloaded_current_version,
+                    ),
+                )
+                assert reconciled.status is ChapterProductionStatus.AUTHOR_REVISION
+                assert reconciled.awaiting_user
+                assert reconciled.action_request_id == str(pending_actions[0].id)
+                assert reconciled.document_version_id == str(
+                    reloaded_current_version.id
+                )
+                reloaded_run.status = reconciled.status.value
+                reloaded_run.current_node = reconciled.current_node
+                reloaded_run.awaiting_user = reconciled.awaiting_user
+                restarted.add(
+                    WorkflowCheckpoint(
+                        workflow_run_id=reloaded_run.id,
+                        checkpoint_index=1,
+                        node_name=reconciled.current_node,
+                        state_json=reconciled.to_checkpoint(),
+                    )
+                )
+                await restarted.commit()
+                return
             if scenario == "failed_provider_unavailable":
                 assert restored.recover().status is ChapterProductionStatus.EDITOR_REVIEW
             else:
@@ -782,7 +989,7 @@ async def test_non_finalized_checkpoint_restart_round_trip_preserves_live_state(
         ChapterActionDecision.SUBMIT_MANUAL_EDIT,
     ],
 )
-async def test_pending_v1_action_stays_pending_when_canonical_document_moves_to_v2(
+async def test_pending_v1_action_reconciles_to_same_hash_canonical_v2_without_staying_pending(
     async_session: AsyncSession,
     integration_database_url: str,
     decision: ChapterActionDecision,
@@ -877,7 +1084,7 @@ async def test_pending_v1_action_stays_pending_when_canonical_document_moves_to_
         version_number=2,
         parent_version_id=version_v1.id,
         source=DocumentSource.USER.value,
-        content_hash=NEW_CONTENT_HASH,
+        content_hash=CONTENT_HASH,
         byte_size=11,
         word_count=2,
         file_path=version_v1.file_path,

@@ -610,7 +610,6 @@ class ChapterProductionState:
             or action.content_hash != self.content_hash
             or action.current_document_id != self.document_id
             or action.current_document_version_id == self.document_version_id
-            or action.current_content_hash == self.content_hash
         ):
             raise ChapterProductionValidationError(
                 "Stale-action reconciliation proof is inconsistent."
@@ -667,6 +666,14 @@ class ChapterProductionState:
             raise ChapterProductionValidationError("A live user action cannot be hidden by failure.")
         if not isinstance(failure_code, ChapterFailureCode):
             raise ChapterProductionValidationError("Failure code is not server-owned.")
+        if (
+            self.status is ChapterProductionStatus.DRAFTING
+            and self.document_id is None
+            and failure_code in _RECONCILIATION_FAILURE_CODES
+        ):
+            raise ChapterProductionValidationError(
+                "Candidate-free drafting cannot enter reconciliation-only failure."
+            )
         return replace(
             self,
             status=ChapterProductionStatus.FAILED,
@@ -685,17 +692,54 @@ class ChapterProductionState:
             raise ChapterProductionValidationError(
                 "Failure requires an explicit reconciliation workflow."
             )
+        if self.failed_from_status in _FINALIZED_STATUSES:
+            raise ChapterProductionValidationError(
+                "Finalized failure recovery requires locked live readiness."
+            )
         return replace(
             self,
             status=self.failed_from_status,
             current_node=_NODES_BY_STATUS[self.failed_from_status],
             failed_from_status=None,
             failure_code=None,
-            _ready_guard=(
-                _READY_GUARD
-                if self.failed_from_status in _FINALIZED_STATUSES
-                else None
-            ),
+        )
+
+    def recover_finalized(
+        self,
+        *,
+        document_id: str,
+        current_document_version_id: str,
+        version_content_hash: str,
+        editor_report: ChapterReviewBinding,
+        chief_editor_report: ChapterReviewBinding | None,
+        lore_report: ChapterReviewBinding,
+    ) -> ChapterProductionState:
+        """Recover a finalized phase only after locked readiness is revalidated."""
+
+        self._require_status(ChapterProductionStatus.FAILED)
+        if (
+            self.failure_code in _RECONCILIATION_FAILURE_CODES
+            or self.failed_from_status not in _FINALIZED_STATUSES
+        ):
+            raise ChapterProductionValidationError(
+                "Failure is not eligible for finalized live recovery."
+            )
+        self.validate_live_readiness(
+            document_id=document_id,
+            current_document_version_id=current_document_version_id,
+            version_content_hash=version_content_hash,
+            editor_report=editor_report,
+            chief_editor_report=chief_editor_report,
+            lore_report=lore_report,
+        )
+        assert self.failed_from_status is not None
+        return replace(
+            self,
+            status=self.failed_from_status,
+            current_node=_NODES_BY_STATUS[self.failed_from_status],
+            failed_from_status=None,
+            failure_code=None,
+            _ready_guard=_READY_GUARD,
         )
 
     def reconcile_failure(
@@ -705,6 +749,7 @@ class ChapterProductionState:
         editor_report: ChapterReviewBinding | None = None,
         chief_editor_report: ChapterReviewBinding | None = None,
         lore_report: ChapterReviewBinding | None = None,
+        action: ChapterActionBinding | None = None,
     ) -> ChapterProductionState:
         """Exit a reconciliation-only failure using locked, typed database proof."""
 
@@ -731,6 +776,10 @@ class ChapterProductionState:
             binding.outcome
             is ChapterFailureReconciliationOutcome.NO_WRITE_OR_PERSISTENCE_RESTORED
         ):
+            if action is not None:
+                raise ChapterProductionValidationError(
+                    "No-write reconciliation cannot create a user action."
+                )
             if (
                 binding.current_document_version_id != self.document_version_id
                 or binding.current_content_hash != self.content_hash
@@ -763,12 +812,41 @@ class ChapterProductionState:
             binding.outcome
             is ChapterFailureReconciliationOutcome.CANONICAL_VERSION_COMMITTED
         ):
-            if (
-                binding.current_document_version_id == self.document_version_id
-                or binding.current_content_hash == self.content_hash
-            ):
+            if binding.current_document_version_id == self.document_version_id:
                 raise ChapterProductionValidationError(
                     "Committed-version proof does not identify a new canonical version."
+                )
+            if self.failed_from_status is ChapterProductionStatus.DRAFTING:
+                if not isinstance(action, ChapterActionBinding):
+                    raise ChapterProductionValidationError(
+                        "Drafting reconciliation requires a typed author action."
+                    )
+                self._validate_action_binding(
+                    action,
+                    ChapterActionKind.AUTHOR_REVISION,
+                    document_id=binding.document_id,
+                    document_version_id=binding.current_document_version_id,
+                    content_hash=binding.current_content_hash,
+                )
+                assert action is not None
+                adopted = self._new_version_for_review(
+                    binding.document_id,
+                    binding.current_document_version_id,
+                    binding.current_content_hash,
+                )
+                return replace(
+                    adopted,
+                    status=ChapterProductionStatus.AUTHOR_REVISION,
+                    current_node=_NODES_BY_STATUS[
+                        ChapterProductionStatus.AUTHOR_REVISION
+                    ],
+                    awaiting_user=True,
+                    action_request_id=action.action_request_id,
+                    action_kind=ChapterActionKind.AUTHOR_REVISION,
+                )
+            if action is not None:
+                raise ChapterProductionValidationError(
+                    "Committed-version reconciliation has an unexpected action."
                 )
             return self._new_version_for_review(
                 binding.document_id,
@@ -1167,6 +1245,11 @@ class ChapterProductionState:
                 or self.failed_from_status is ChapterProductionStatus.FAILED
                 or not isinstance(self.failure_code, ChapterFailureCode)
                 or self.awaiting_user
+                or (
+                    self.failed_from_status is ChapterProductionStatus.DRAFTING
+                    and self.document_id is None
+                    and self.failure_code in _RECONCILIATION_FAILURE_CODES
+                )
             ):
                 raise ChapterProductionValidationError("Failure recovery binding is invalid.")
         elif self.failed_from_status is not None or self.failure_code is not None:

@@ -986,6 +986,19 @@ def test_stale_action_reconciliation_adopts_current_version_and_clears_gate_and_
         )
 
 
+def test_stale_action_reconciliation_accepts_new_version_with_same_content_hash() -> None:
+    reconciled = author_gate().reconcile_stale_action(
+        action=action(
+            ChapterActionKind.AUTHOR_REVISION,
+            current_document_version_id=VERSION_2,
+            current_content_hash=HASH_1,
+        )
+    )
+    assert reconciled.status is ChapterProductionStatus.EDITOR_REVIEW
+    assert reconciled.document_version_id == VERSION_2
+    assert reconciled.content_hash == HASH_1
+
+
 @pytest.mark.parametrize(
     "candidate",
     [
@@ -1043,10 +1056,6 @@ def test_stale_action_reconciliation_adopts_current_version_and_clears_gate_and_
             current_content_hash=HASH_2,
         ),
         action(ChapterActionKind.AUTHOR_REVISION),
-        action(
-            ChapterActionKind.AUTHOR_REVISION,
-            current_document_version_id=VERSION_2,
-        ),
     ],
 )
 def test_stale_action_reconciliation_rejects_nonexact_or_unresolved_proof(
@@ -1215,6 +1224,212 @@ def test_typed_committed_version_reconciliation_adopts_new_canonical_version(
     assert reconciled.lore_report_id is None
     assert reconciled.failed_from_status is None
     assert reconciled.failure_code is None
+
+
+def test_committed_version_reconciliation_accepts_new_version_with_same_hash() -> None:
+    failed = editor_review().fail(ChapterFailureCode.DOCUMENT_COMMIT_INDETERMINATE)
+    reconciled = failed.reconcile_failure(
+        binding=failure_reconciliation(
+            failed,
+            ChapterFailureReconciliationOutcome.CANONICAL_VERSION_COMMITTED,
+            current_document_version_id=VERSION_2,
+            current_content_hash=HASH_1,
+        )
+    )
+    assert reconciled.status is ChapterProductionStatus.EDITOR_REVIEW
+    assert reconciled.document_version_id == VERSION_2
+    assert reconciled.content_hash == HASH_1
+
+
+@pytest.mark.parametrize(
+    "state_factory",
+    [
+        pytest.param(revision_ready, id="ready"),
+        pytest.param(lambda: revision_ready().begin_archive_update(), id="archive"),
+    ],
+)
+def test_finalized_failure_recovery_always_revalidates_locked_live_readiness(
+    state_factory: object,
+) -> None:
+    finalized = state_factory()  # type: ignore[operator]
+    failed = finalized.fail(ChapterFailureCode.ARCHIVE_UNAVAILABLE)
+    restored = restore_finalized_checkpoint(failed)
+    with pytest.raises(ChapterProductionValidationError):
+        restored.recover()
+    with pytest.raises(ChapterProductionValidationError):
+        restored.recover_finalized(
+            document_id=DOCUMENT_ID,
+            current_document_version_id=VERSION_2,
+            version_content_hash=HASH_2,
+            editor_report=binding(restored, ChapterReviewStage.EDITOR, EDITOR_REPORT_ID),
+            chief_editor_report=binding(
+                restored, ChapterReviewStage.CHIEF_EDITOR, CHIEF_REPORT_ID
+            ),
+            lore_report=binding(restored, ChapterReviewStage.LORE, LORE_REPORT_ID),
+        )
+    recovered = restored.recover_finalized(
+        document_id=DOCUMENT_ID,
+        current_document_version_id=VERSION_1,
+        version_content_hash=HASH_1,
+        editor_report=binding(restored, ChapterReviewStage.EDITOR, EDITOR_REPORT_ID),
+        chief_editor_report=binding(
+            restored, ChapterReviewStage.CHIEF_EDITOR, CHIEF_REPORT_ID
+        ),
+        lore_report=binding(restored, ChapterReviewStage.LORE, LORE_REPORT_ID),
+    )
+    assert recovered == finalized
+
+
+@pytest.mark.parametrize(
+    "failure_code",
+    [
+        ChapterFailureCode.DOCUMENT_COMMIT_INDETERMINATE,
+        ChapterFailureCode.PERSISTENCE_UNAVAILABLE,
+        ChapterFailureCode.RECONCILIATION_REQUIRED,
+    ],
+)
+def test_retained_candidate_drafting_committed_reconciliation_requires_author_gate(
+    failure_code: ChapterFailureCode,
+) -> None:
+    drafting = author_gate().resolve_action(
+        action=action(ChapterActionKind.AUTHOR_REVISION),
+        decision=ChapterActionDecision.REQUEST_REVISION,
+    )
+    failed = drafting.fail(failure_code)
+    proof = failure_reconciliation(
+        failed,
+        ChapterFailureReconciliationOutcome.CANONICAL_VERSION_COMMITTED,
+        current_document_version_id=VERSION_2,
+        current_content_hash=HASH_1,
+    )
+    with pytest.raises(ChapterProductionValidationError):
+        failed.reconcile_failure(binding=proof)
+    gated = failed.reconcile_failure(
+        binding=proof,
+        action=action(
+            ChapterActionKind.AUTHOR_REVISION,
+            document_version_id=VERSION_2,
+            content_hash=HASH_1,
+            current_document_version_id=VERSION_2,
+            current_content_hash=HASH_1,
+        ),
+    )
+    assert gated.status is ChapterProductionStatus.AUTHOR_REVISION
+    assert gated.awaiting_user
+    assert gated.action_request_id == ACTION_ID
+    assert gated.document_version_id == VERSION_2
+    assert gated.content_hash == HASH_1
+
+
+@pytest.mark.parametrize(
+    "candidate",
+    [
+        action(
+            ChapterActionKind.AUTHOR_REVISION,
+            workflow_run_id=OTHER_ACTION_ID,
+            document_version_id=VERSION_2,
+            content_hash=HASH_1,
+            current_document_version_id=VERSION_2,
+            current_content_hash=HASH_1,
+        ),
+        action(
+            ChapterActionKind.AUTHOR_REVISION,
+            chapter_id=OTHER_ACTION_ID,
+            document_version_id=VERSION_2,
+            content_hash=HASH_1,
+            current_document_version_id=VERSION_2,
+            current_content_hash=HASH_1,
+        ),
+        action(
+            ChapterActionKind.REVIEW_WARNING,
+            document_version_id=VERSION_2,
+            content_hash=HASH_1,
+            current_document_version_id=VERSION_2,
+            current_content_hash=HASH_1,
+        ),
+        action(
+            ChapterActionKind.AUTHOR_REVISION,
+            status=ActionRequestStatus.APPROVED,
+            document_version_id=VERSION_2,
+            content_hash=HASH_1,
+            current_document_version_id=VERSION_2,
+            current_content_hash=HASH_1,
+        ),
+        action(
+            ChapterActionKind.AUTHOR_REVISION,
+            pending_count=2,
+            document_version_id=VERSION_2,
+            content_hash=HASH_1,
+            current_document_version_id=VERSION_2,
+            current_content_hash=HASH_1,
+        ),
+        action(
+            ChapterActionKind.AUTHOR_REVISION,
+            document_version_id=VERSION_1,
+            content_hash=HASH_1,
+            current_document_version_id=VERSION_2,
+            current_content_hash=HASH_1,
+        ),
+    ],
+)
+def test_drafting_committed_reconciliation_rejects_nonexact_author_action(
+    candidate: ChapterActionBinding,
+) -> None:
+    drafting = author_gate().resolve_action(
+        action=action(ChapterActionKind.AUTHOR_REVISION),
+        decision=ChapterActionDecision.REQUEST_REVISION,
+    )
+    failed = drafting.fail(ChapterFailureCode.DOCUMENT_COMMIT_INDETERMINATE)
+    with pytest.raises(ChapterProductionValidationError):
+        failed.reconcile_failure(
+            binding=failure_reconciliation(
+                failed,
+                ChapterFailureReconciliationOutcome.CANONICAL_VERSION_COMMITTED,
+                current_document_version_id=VERSION_2,
+                current_content_hash=HASH_1,
+            ),
+            action=candidate,
+        )
+
+
+@pytest.mark.parametrize(
+    ("failure_code", "allowed"),
+    [
+        pytest.param(ChapterFailureCode.PROVIDER_UNAVAILABLE, True),
+        pytest.param(ChapterFailureCode.PROVIDER_TIMEOUT, True),
+        pytest.param(ChapterFailureCode.INVALID_PROVIDER_OUTPUT, True),
+        pytest.param(ChapterFailureCode.ARCHIVE_UNAVAILABLE, True),
+        pytest.param(ChapterFailureCode.DOCUMENT_COMMIT_INDETERMINATE, False),
+        pytest.param(ChapterFailureCode.PERSISTENCE_UNAVAILABLE, False),
+        pytest.param(ChapterFailureCode.RECONCILIATION_REQUIRED, False),
+    ],
+)
+def test_initial_drafting_failure_contract_never_creates_an_unrecoverable_state(
+    failure_code: ChapterFailureCode, allowed: bool
+) -> None:
+    state = initial()
+    if not allowed:
+        with pytest.raises(ChapterProductionValidationError):
+            state.fail(failure_code)
+        return
+    assert state.fail(failure_code).recover() == state
+
+
+@pytest.mark.parametrize(
+    "failure_code",
+    [
+        ChapterFailureCode.DOCUMENT_COMMIT_INDETERMINATE,
+        ChapterFailureCode.PERSISTENCE_UNAVAILABLE,
+        ChapterFailureCode.RECONCILIATION_REQUIRED,
+    ],
+)
+def test_checkpoint_cannot_inject_candidate_free_reconciliation_failure(
+    failure_code: ChapterFailureCode,
+) -> None:
+    payload = initial().fail(ChapterFailureCode.PROVIDER_UNAVAILABLE).to_checkpoint()
+    payload["failure_code"] = failure_code.value
+    with pytest.raises(ChapterProductionValidationError):
+        ChapterProductionState.from_checkpoint(payload)
 
 
 @pytest.mark.parametrize(
@@ -1838,7 +2053,29 @@ def test_every_failure_eligible_nonterminal_state_recovers_exactly(
     else:
         restored_failed = ChapterProductionState.from_checkpoint(failed.to_checkpoint())
     assert restored_failed == failed
-    assert restored_failed.recover() == state
+    if state.status in {
+        ChapterProductionStatus.REVISION_READY,
+        ChapterProductionStatus.ARCHIVE_UPDATE,
+    }:
+        with pytest.raises(ChapterProductionValidationError):
+            restored_failed.recover()
+        recovered = restored_failed.recover_finalized(
+            document_id=DOCUMENT_ID,
+            current_document_version_id=VERSION_1,
+            version_content_hash=HASH_1,
+            editor_report=binding(
+                restored_failed, ChapterReviewStage.EDITOR, EDITOR_REPORT_ID
+            ),
+            chief_editor_report=binding(
+                restored_failed, ChapterReviewStage.CHIEF_EDITOR, CHIEF_REPORT_ID
+            ),
+            lore_report=binding(
+                restored_failed, ChapterReviewStage.LORE, LORE_REPORT_ID
+            ),
+        )
+        assert recovered == state
+    else:
+        assert restored_failed.recover() == state
 
 
 @pytest.mark.parametrize(
