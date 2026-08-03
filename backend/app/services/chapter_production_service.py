@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from uuid import UUID
@@ -17,7 +18,11 @@ from app.llm import (
     ChapterGenerationProvider,
     ChapterGenerationRequest,
     FakeChapterGenerationProvider,
+    ProviderConfigurationError,
     ProviderInvalidOutputError,
+    ProviderRateLimitedError,
+    ProviderTimeoutError,
+    ProviderUnavailableError,
     validate_chapter_generation_response,
 )
 from app.llm.contracts import MAX_PROVENANCE_TOKEN_COUNT
@@ -34,6 +39,26 @@ from app.models import (
     WorkflowType,
 )
 from app.services.document_service import DocumentService
+
+
+def _normalize_generation_provider_error(error: Exception) -> Exception:
+    try:
+        error_type = type(error)
+        if issubclass(error_type, ProviderConfigurationError):
+            return ProviderConfigurationError()
+        if issubclass(error_type, ProviderInvalidOutputError):
+            return ProviderInvalidOutputError()
+        if issubclass(error_type, ProviderRateLimitedError):
+            return ProviderRateLimitedError()
+        if issubclass(error_type, ProviderTimeoutError):
+            return ProviderTimeoutError()
+        if issubclass(error_type, ProviderUnavailableError):
+            return ProviderUnavailableError()
+        if issubclass(error_type, (TypeError, ValueError)):
+            return ProviderInvalidOutputError()
+    except Exception:
+        pass
+    return ProviderUnavailableError()
 
 
 class ChapterProductionCommitIndeterminateError(AppError):
@@ -158,6 +183,8 @@ class ChapterProductionService:
         if active_run is not None:
             raise ConflictError("Chapter production is already awaiting approval.")
 
+        provider_failure: Exception | None = None
+        provider_cancelled = False
         try:
             response = await self.generation_provider.generate(
                 ChapterGenerationRequest(
@@ -167,19 +194,18 @@ class ChapterProductionService:
                 )
             )
             response = validate_chapter_generation_response(response)
-        except (TypeError, ValueError) as error:
-            provider_error = ProviderInvalidOutputError()
+        except asyncio.CancelledError:
+            provider_cancelled = True
+        except Exception as error:
+            provider_failure = _normalize_generation_provider_error(error)
+        if provider_cancelled or provider_failure is not None:
             try:
                 await self.session.rollback()
-            except BaseException as rollback_error:
-                raise provider_error from rollback_error
-            raise provider_error from error
-        except BaseException as provider_error:
-            try:
-                await self.session.rollback()
-            except BaseException as rollback_error:
-                raise provider_error from rollback_error
-            raise
+            except Exception:
+                pass
+            if provider_cancelled:
+                raise asyncio.CancelledError() from None
+            raise provider_failure from None
         generated = response.result
         run = WorkflowRun(
             project_id=project_id,

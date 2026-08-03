@@ -386,14 +386,23 @@ async def test_api_real_mode_uses_trusted_configuration_provenance(
     project, chapter = await create_project_and_chapter(async_session, tmp_path / "configured-provider")
     observed_headers: dict[str, str] = {}
 
+    class IdentityRawStream(httpx.AsyncByteStream):
+        async def __aiter__(self) -> AsyncIterator[bytes]:
+            yield (
+                b'{"choices":[{"message":{"content":"{\\"outline\\":\\"o\\",'
+                b'\\"draft\\":\\"d\\",\\"summary\\":\\"s\\"}"}}],'
+                b'"usage":{"prompt_tokens":5,"completion_tokens":8}}'
+            )
+
+        async def aclose(self) -> None:
+            return None
+
     def handler(request: httpx.Request) -> httpx.Response:
         observed_headers.update(request.headers)
         return httpx.Response(
             200,
-            json={
-                "choices": [{"message": {"content": '{"outline":"o","draft":"d","summary":"s"}'}}],
-                "usage": {"prompt_tokens": 5, "completion_tokens": 8},
-            },
+            headers={"Content-Type": "application/json", "Content-Encoding": "identity"},
+            stream=IdentityRawStream(),
         )
 
     upstream = httpx.AsyncClient(transport=httpx.MockTransport(handler))
