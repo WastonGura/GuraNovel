@@ -173,6 +173,7 @@ function ProjectWorkspace() {
       </dl>
       <Link to={`/projects/${projectId}/creation/start`}>开始构思</Link>
       <Link to={`/projects/${projectId}/maintenance/start`}>Project maintenance</Link>
+      <Link to={`/projects/${projectId}/maintenance`}>Maintenance history</Link>
       <section aria-labelledby="chapters-title">
         <h2 id="chapters-title">Chapters</h2>
         {chapters.length === 0 ? <p className="muted">No chapters yet.</p> : (
@@ -517,7 +518,7 @@ export default function App() {
       <header className="topbar" aria-label="GuraNovel workbench"><Link className="wordmark" to="/">GuraNovel</Link><span className="workspace-name">Creative workbench</span></header>
       <div className="workspace">
         <nav aria-label="Workbench navigation"><Link to="/">Projects</Link><span>Approvals</span><span>Documents</span></nav>
-        <main><Routes><Route path="/" element={<ProjectListPage />} /><Route path="/projects/:projectId" element={<ProjectWorkspace />} /><Route path="/projects/:projectId/chapters/:chapterId" element={<ChapterWorkspace />} /><Route path="/projects/:projectId/creation/start" element={<ProjectCreationPage />} /><Route path="/projects/:projectId/creation/:workflowRunId/gate" element={<ConceptGatePage />} /><Route path="/projects/:projectId/maintenance/start" element={<ProjectMaintenancePage mode="start" />} /><Route path="/projects/:projectId/maintenance/:workflowRunId/status" element={<ProjectMaintenancePage mode="handoff" />} /><Route path="/projects/:projectId/maintenance/:workflowRunId" element={<ProjectMaintenancePage mode="gate" />} /><Route path="*" element={<NotFound />} /></Routes></main>
+        <main><Routes><Route path="/" element={<ProjectListPage />} /><Route path="/projects/:projectId" element={<ProjectWorkspace />} /><Route path="/projects/:projectId/chapters/:chapterId" element={<ChapterWorkspace />} /><Route path="/projects/:projectId/creation/start" element={<ProjectCreationPage />} /><Route path="/projects/:projectId/creation/:workflowRunId/gate" element={<ConceptGatePage />} /><Route path="/projects/:projectId/maintenance" element={<ProjectMaintenancePage mode="history" />} /><Route path="/projects/:projectId/maintenance/start" element={<ProjectMaintenancePage mode="start" />} /><Route path="/projects/:projectId/maintenance/:workflowRunId/status" element={<ProjectMaintenancePage mode="handoff" />} /><Route path="/projects/:projectId/maintenance/:workflowRunId" element={<ProjectMaintenancePage mode="gate" />} /><Route path="*" element={<NotFound />} /></Routes></main>
       </div>
     </div>
   )

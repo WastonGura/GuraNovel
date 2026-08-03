@@ -154,8 +154,23 @@ textarea:focus-visible { outline: 3px solid #1d4ed8; outline-offset: 2px; }
 .maintenance-error { background: #fef2f2; border: 1px solid #fecaca; border-radius: 8px; color: #b91c1c; display: grid; gap: 12px; padding: 16px; }
 .maintenance-error:focus { outline: 3px solid #1d4ed8; outline-offset: 2px; }
 .maintenance-error p { margin: 0; }
+.maintenance-page h1:focus-visible { border-radius: 4px; outline: 3px solid #1d4ed8; outline-offset: 4px; }
 .empty-state { background: #ffffff; border: 1px dashed #cbd5e1; border-radius: 4px; color: #475569; margin: 0; padding: 16px; }
 .handoff-page { max-width: 720px; }
+.status-page, .history-page { max-width: 880px; }
+.reference-list, .finding-list, .maintenance-history-list { display: grid; gap: 8px; list-style: none; margin: 0; padding: 0; }
+.reference-list li, .finding-list li, .maintenance-history-list li { background: #ffffff; border: 1px solid #cbd5e1; border-radius: 4px; padding: 12px 16px; }
+.reference-list code, .finding-list code { overflow-wrap: anywhere; }
+.finding-heading { align-items: center; display: flex; flex-wrap: wrap; gap: 8px; justify-content: space-between; }
+.finding-list p { color: #475569; line-height: 1.5; margin: 8px 0 0; }
+.finding-references { display: grid; gap: 8px; margin: 12px 0 0; }
+.finding-references div { min-width: 0; }
+.finding-references dt, .finding-references dd { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: 13px; overflow-wrap: anywhere; }
+.finding-references dd { margin-top: 4px; }
+.maintenance-history-list li { display: grid; gap: 8px; grid-template-columns: minmax(0, 1fr) auto; }
+.maintenance-history-list a { color: #2563eb; font-weight: 700; overflow-wrap: anywhere; }
+.maintenance-history-list p { color: #475569; font-size: 13px; grid-column: 1 / -1; margin: 0; }
+.history-status { background: #dbeafe; border-radius: 9999px; color: #1d4ed8; font-size: 12px; font-weight: 700; padding: 4px 8px; }
 
 .concept-selection {
   display: grid;
@@ -485,4 +500,6 @@ textarea:focus-visible { outline: 3px solid #1d4ed8; outline-offset: 2px; }
   .scope-grid, .affected-groups { grid-template-columns: 1fr; }
   .decision-actions { align-items: stretch; flex-direction: column; }
   .decision-actions button { width: 100%; }
+  .maintenance-history-list li { grid-template-columns: 1fr; }
+  .maintenance-history-list p { grid-column: 1; }
 }
