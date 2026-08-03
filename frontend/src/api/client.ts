@@ -212,6 +212,130 @@ export interface RestoreDocumentRequest {
   change_summary?: string | null
 }
 
+export type ProjectMaintenanceScopeHint =
+  | 'chapter'
+  | 'character'
+  | 'world'
+  | 'outline'
+  | 'foreshadowing'
+  | 'timeline'
+  | 'style'
+
+export type ProjectMaintenanceDecision = 'approve' | 'revise' | 'cancel' | 'accept_warning'
+
+export type ProjectMaintenanceStatus =
+  | 'CHANGE_REQUESTED'
+  | 'LORE_IMPACT_ANALYSIS'
+  | 'CHIEF_EDITOR_IMPACT_ANALYSIS'
+  | 'REVISION_PLAN'
+  | 'USER_CONFIRMATION'
+  | 'APPLY_CHANGE'
+  | 'CONSISTENCY_REVIEW'
+  | 'PROJECT_UPDATED'
+  | 'CANCELLED'
+
+export interface StartProjectMaintenanceRequest {
+  title: string
+  change_request: string
+  scope_hints?: ProjectMaintenanceScopeHint[]
+}
+
+export interface ProjectMaintenanceAffectedItem {
+  id: string
+  position: number
+  type: ProjectMaintenanceScopeHint
+  stable_reference: string
+  impact_level: 'low' | 'medium' | 'high'
+  reason: string
+  document_id: string | null
+  chapter_id: string | null
+}
+
+export interface ProjectMaintenanceRevisionOperation {
+  id: string
+  sequence: number
+  operation: 'revise' | 'retain'
+  document_id: string
+  expected_version_id: string
+  affected_item_ids: string[]
+  instruction: string
+}
+
+export interface ProjectMaintenanceRevisionPlan {
+  id: string
+  document_id: string
+  version_id: string
+  review_outcome: 'passed' | 'warning' | 'blocking'
+  summary: string
+  operations: ProjectMaintenanceRevisionOperation[]
+}
+
+export interface ProjectMaintenanceConsistencyDocument {
+  document_id: string
+  version_id: string
+}
+
+export interface ProjectMaintenanceConsistencyFinding {
+  id: string
+  sequence: number
+  code: string
+  severity: 'warning' | 'blocking'
+  blocking: boolean
+  affected_documents: ProjectMaintenanceConsistencyDocument[]
+  suggested_corrective_action: string
+}
+
+export interface ProjectMaintenanceConsistencyReview {
+  id: string
+  outcome: 'clean' | 'warning' | 'blocking'
+  findings: ProjectMaintenanceConsistencyFinding[]
+}
+
+export interface ProjectMaintenancePendingAction {
+  id: string
+  type: 'project_maintenance_revision_confirmation' | 'project_maintenance_consistency_warning'
+  status: 'pending'
+  confirmation_kind: 'revision_confirmation' | 'consistency_warning'
+  review_outcome: 'passed' | 'warning' | 'blocking'
+  allowed_decisions: ProjectMaintenanceDecision[]
+}
+
+export interface ProjectMaintenanceRun {
+  id: string
+  maintenance_change_id: string
+  type: 'project_maintenance'
+  status: ProjectMaintenanceStatus
+  current_node: string
+  next_node: null
+  awaiting_user: boolean
+  title: string
+  change_request: string
+  created_at: string
+  updated_at: string
+  completed_at: string | null
+  affected_items: ProjectMaintenanceAffectedItem[]
+  revision_plan: ProjectMaintenanceRevisionPlan | null
+  consistency_review: ProjectMaintenanceConsistencyReview | null
+  applied_document_version_ids: string[]
+  pending_action: ProjectMaintenancePendingAction | null
+}
+
+export interface ProjectMaintenanceHistorySummary {
+  id: string
+  maintenance_change_id: string
+  status: ProjectMaintenanceStatus
+  title: string
+  awaiting_user: boolean
+  created_at: string
+  updated_at: string
+  completed_at: string | null
+}
+
+export interface ProjectMaintenanceListOptions {
+  offset?: number
+  limit?: number
+}
+
 export class ApiError extends Error {
   readonly status: number
   readonly code: string
@@ -456,17 +580,24 @@ function errorFromEnvelope(status: number, value: unknown): ApiError {
   return new ApiError(status, 'request_failed', genericErrorMessage)
 }
 
+interface RequestOptions {
+  signal?: AbortSignal
+  decodeError?: (status: number, value: unknown) => ApiError
+}
+
 async function request<T>(
   method: 'GET' | 'POST' | 'PUT',
   path: () => string,
   decode: (value: unknown) => T,
   body?: object,
+  options: RequestOptions = {},
 ): Promise<T> {
   let response: Response
   try {
     response = await fetch(path(), {
       method,
       credentials: 'same-origin',
+      ...(options.signal === undefined ? {} : { signal: options.signal }),
       ...(body === undefined ? {} : { headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }),
     })
   } catch (error: unknown) {
@@ -480,7 +611,7 @@ async function request<T>(
   } catch {
     throw response.ok ? invalidResponse() : new ApiError(response.status, 'request_failed', genericErrorMessage)
   }
-  if (!response.ok) throw errorFromEnvelope(response.status, payload)
+  if (!response.ok) throw (options.decodeError ?? errorFromEnvelope)(response.status, payload)
   return decode(payload)
 }
 
@@ -720,5 +851,508 @@ export function resolveProjectCreationAction(
       return { status: string(data.status) }
     },
     body,
+  )
+}
+
+const maintenanceScopeHints = new Set<ProjectMaintenanceScopeHint>([
+  'chapter', 'character', 'world', 'outline', 'foreshadowing', 'timeline', 'style',
+])
+const maintenanceDecisions = new Set<ProjectMaintenanceDecision>([
+  'approve', 'revise', 'cancel', 'accept_warning',
+])
+const maintenanceNodes: Record<ProjectMaintenanceStatus, string> = {
+  CHANGE_REQUESTED: 'user_change_request',
+  LORE_IMPACT_ANALYSIS: 'lore_impact_analysis',
+  CHIEF_EDITOR_IMPACT_ANALYSIS: 'chief_editor_impact_review',
+  REVISION_PLAN: 'revision_plan',
+  USER_CONFIRMATION: 'user_confirm_revision',
+  APPLY_CHANGE: 'apply_revision',
+  CONSISTENCY_REVIEW: 'consistency_review',
+  PROJECT_UPDATED: 'project_updated',
+  CANCELLED: 'cancelled',
+}
+const maintenanceStatuses = new Set<ProjectMaintenanceStatus>(
+  Object.keys(maintenanceNodes) as ProjectMaintenanceStatus[],
+)
+const maintenanceUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/
+const maintenanceSafeCode = /^[a-z][a-z0-9_]{0,63}$/
+const maintenanceStableReference = /^(chapter|character|world|outline|foreshadowing|timeline|style)\/[a-z0-9][a-z0-9_-]{0,63}$/
+const maintenanceWindowsDrive = /(?:^|[^a-z0-9])[a-z]:/i
+const maintenanceWindowsDevice = /(?:^|[^a-z0-9])(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:$|[^a-z0-9])/i
+const maintenanceEncodedPath = /%(?:[0-9a-f]{2}|u[0-9a-f]{4})/i
+const maintenanceExternalUri = /(?:^|[^a-z0-9])(?:[a-z][a-z0-9+.-]*):(?=\S)/i
+const maintenanceDottedToken = /(?:^|[^a-z0-9])(?:[a-z0-9_-][a-z0-9_-]*(?:\.[a-z0-9_-]+)*\.[a-z]{2,63})(?:$|[^a-z0-9])/i
+const maintenanceCredential = /(?:\b(?:api[_-]?key|access[_-]?token|auth(?:orization)?|bearer|password|passwd|secret|token)\b\s*[:=]\s*\S+|\bsk-[a-z0-9_-]{8,}\b)/i
+
+function exactObject(value: unknown, fields: readonly string[]): Record<string, unknown> {
+  const data = object(value)
+  const keys = Object.keys(data)
+  if (keys.length !== fields.length || fields.some((field) => !Object.hasOwn(data, field))) {
+    throw invalidResponse()
+  }
+  return data
+}
+
+function maintenanceString(value: unknown, minimum: number, maximum: number, multiline = true): string {
+  const decoded = string(value)
+  const length = unicodeCodePointLength(decoded)
+  if (
+    length < minimum
+    || length > maximum
+    || decoded !== decoded.trim()
+    || decoded.includes('\0')
+    || (!multiline && /[\r\n]/.test(decoded))
+  ) throw invalidResponse()
+  return decoded
+}
+
+function maintenanceProviderText(value: unknown, maximum: number): string {
+  const decoded = maintenanceString(value, 1, maximum)
+  if (
+    /[/\\~?#]/.test(decoded)
+    || decoded.includes('..')
+    || maintenanceWindowsDrive.test(decoded)
+    || maintenanceWindowsDevice.test(decoded)
+    || maintenanceEncodedPath.test(decoded)
+    || maintenanceExternalUri.test(decoded)
+    || maintenanceDottedToken.test(decoded)
+    || maintenanceCredential.test(decoded)
+  ) throw invalidResponse()
+  return decoded
+}
+
+function maintenanceId(value: unknown): string {
+  const decoded = string(value)
+  if (!maintenanceUuid.test(decoded) || /^0{8}-0{4}-0{4}-0{4}-0{12}$/.test(decoded)) throw invalidResponse()
+  return decoded
+}
+
+function maintenanceDate(value: unknown): string {
+  const decoded = string(value)
+  if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?(?:Z|[+-]\d{2}:\d{2})$/.test(decoded) || !Number.isFinite(Date.parse(decoded))) {
+    throw invalidResponse()
+  }
+  return decoded
+}
+
+function maintenanceEnum<T extends string>(value: unknown, allowed: ReadonlySet<T>): T {
+  const decoded = string(value) as T
+  if (!allowed.has(decoded)) throw invalidResponse()
+  return decoded
+}
+
+function maintenanceArray(value: unknown, maximum: number): unknown[] {
+  if (!Array.isArray(value) || value.length > maximum) throw invalidResponse()
+  return value
+}
+
+function unique(values: readonly string[]): boolean {
+  return new Set(values).size === values.length
+}
+
+function decodeMaintenanceAffectedItem(value: unknown): ProjectMaintenanceAffectedItem {
+  const data = exactObject(value, [
+    'id', 'position', 'type', 'stable_reference', 'impact_level', 'reason', 'document_id', 'chapter_id',
+  ])
+  const type = maintenanceEnum(data.type, maintenanceScopeHints)
+  const stableReference = string(data.stable_reference)
+  const position = integer(data.position)
+  const impactLevel = maintenanceEnum(data.impact_level, new Set(['low', 'medium', 'high'] as const))
+  if (
+    position < 0
+    || position > 255
+    || !maintenanceStableReference.test(stableReference)
+    || !stableReference.startsWith(`${type}/`)
+  ) throw invalidResponse()
+  return {
+    id: maintenanceId(data.id),
+    position,
+    type,
+    stable_reference: stableReference,
+    impact_level: impactLevel,
+    reason: maintenanceProviderText(data.reason, 1000),
+    document_id: data.document_id === null ? null : maintenanceId(data.document_id),
+    chapter_id: data.chapter_id === null ? null : maintenanceId(data.chapter_id),
+  }
+}
+
+function decodeMaintenanceOperation(value: unknown): ProjectMaintenanceRevisionOperation {
+  const data = exactObject(value, [
+    'id', 'sequence', 'operation', 'document_id', 'expected_version_id', 'affected_item_ids', 'instruction',
+  ])
+  const affectedItemIds = maintenanceArray(data.affected_item_ids, 64).map(maintenanceId)
+  const sequence = integer(data.sequence)
+  if (sequence < 1 || sequence > 128 || affectedItemIds.length === 0 || !unique(affectedItemIds)) throw invalidResponse()
+  return {
+    id: maintenanceId(data.id),
+    sequence,
+    operation: maintenanceEnum(data.operation, new Set(['revise', 'retain'] as const)),
+    document_id: maintenanceId(data.document_id),
+    expected_version_id: maintenanceId(data.expected_version_id),
+    affected_item_ids: affectedItemIds,
+    instruction: maintenanceProviderText(data.instruction, 1000),
+  }
+}
+
+function decodeMaintenancePlan(value: unknown): ProjectMaintenanceRevisionPlan {
+  const data = exactObject(value, ['id', 'document_id', 'version_id', 'review_outcome', 'summary', 'operations'])
+  const operations = maintenanceArray(data.operations, 128).map(decodeMaintenanceOperation)
+  if (
+    operations.length === 0
+    || !unique(operations.map((operation) => operation.id))
+    || !unique(operations.map((operation) => operation.document_id))
+    || operations.some((operation, index) => operation.sequence !== index + 1)
+  ) throw invalidResponse()
+  return {
+    id: maintenanceId(data.id),
+    document_id: maintenanceId(data.document_id),
+    version_id: maintenanceId(data.version_id),
+    review_outcome: maintenanceEnum(data.review_outcome, new Set(['passed', 'warning', 'blocking'] as const)),
+    summary: maintenanceProviderText(data.summary, 2000),
+    operations,
+  }
+}
+
+function decodeMaintenanceConsistencyDocument(value: unknown): ProjectMaintenanceConsistencyDocument {
+  const data = exactObject(value, ['document_id', 'version_id'])
+  return { document_id: maintenanceId(data.document_id), version_id: maintenanceId(data.version_id) }
+}
+
+function decodeMaintenanceFinding(value: unknown): ProjectMaintenanceConsistencyFinding {
+  const data = exactObject(value, [
+    'id', 'sequence', 'code', 'severity', 'blocking', 'affected_documents', 'suggested_corrective_action',
+  ])
+  const sequence = integer(data.sequence)
+  const code = string(data.code)
+  const severity = maintenanceEnum(data.severity, new Set(['warning', 'blocking'] as const))
+  const blocking = boolean(data.blocking)
+  const affectedDocuments = maintenanceArray(data.affected_documents, 128).map(decodeMaintenanceConsistencyDocument)
+  const identities = affectedDocuments.map((item) => `${item.document_id}:${item.version_id}`)
+  if (
+    sequence < 1
+    || sequence > 128
+    || !maintenanceSafeCode.test(code)
+    || affectedDocuments.length === 0
+    || !unique(identities)
+    || blocking !== (severity === 'blocking')
+  ) throw invalidResponse()
+  return {
+    id: maintenanceId(data.id),
+    sequence,
+    code,
+    severity,
+    blocking,
+    affected_documents: affectedDocuments,
+    suggested_corrective_action: maintenanceProviderText(data.suggested_corrective_action, 1000),
+  }
+}
+
+function decodeMaintenanceReview(value: unknown): ProjectMaintenanceConsistencyReview {
+  const data = exactObject(value, ['id', 'outcome', 'findings'])
+  const outcome = maintenanceEnum(data.outcome, new Set(['clean', 'warning', 'blocking'] as const))
+  const findings = maintenanceArray(data.findings, 128).map(decodeMaintenanceFinding)
+  if (
+    !unique(findings.map((finding) => finding.id))
+    || findings.some((finding, index) => finding.sequence !== index + 1)
+    || (outcome === 'clean' && findings.length !== 0)
+    || (outcome === 'warning' && (findings.length === 0 || findings.some((finding) => finding.blocking)))
+    || (outcome === 'blocking' && !findings.some((finding) => finding.blocking))
+  ) throw invalidResponse()
+  return { id: maintenanceId(data.id), outcome, findings }
+}
+
+function decodeMaintenancePendingAction(value: unknown): ProjectMaintenancePendingAction {
+  const data = exactObject(value, [
+    'id', 'type', 'status', 'confirmation_kind', 'review_outcome', 'allowed_decisions',
+  ])
+  const allowedDecisions = maintenanceArray(data.allowed_decisions, 4).map(
+    (decision) => maintenanceEnum(decision, maintenanceDecisions),
+  )
+  if (allowedDecisions.length === 0 || !unique(allowedDecisions)) throw invalidResponse()
+  const type = maintenanceEnum(
+    data.type,
+    new Set(['project_maintenance_revision_confirmation', 'project_maintenance_consistency_warning'] as const),
+  )
+  const confirmationKind = maintenanceEnum(
+    data.confirmation_kind,
+    new Set(['revision_confirmation', 'consistency_warning'] as const),
+  )
+  if (
+    (type === 'project_maintenance_revision_confirmation') !== (confirmationKind === 'revision_confirmation')
+    || data.status !== 'pending'
+  ) throw invalidResponse()
+  return {
+    id: maintenanceId(data.id),
+    type,
+    status: 'pending',
+    confirmation_kind: confirmationKind,
+    review_outcome: maintenanceEnum(data.review_outcome, new Set(['passed', 'warning', 'blocking'] as const)),
+    allowed_decisions: allowedDecisions,
+  }
+}
+
+function sameValues(actual: readonly string[], expected: readonly string[]): boolean {
+  return actual.length === expected.length && actual.every((value, index) => value === expected[index])
+}
+
+function validateMaintenanceGate(run: ProjectMaintenanceRun): void {
+  const pending = run.pending_action
+  if (run.status !== 'USER_CONFIRMATION') {
+    if (run.awaiting_user || pending !== null) throw invalidResponse()
+    return
+  }
+  if (!run.awaiting_user || pending === null || run.revision_plan === null) throw invalidResponse()
+  let expected: ProjectMaintenanceDecision[]
+  if (pending.confirmation_kind === 'consistency_warning') {
+    if (pending.review_outcome !== 'warning' || run.consistency_review?.outcome !== 'warning') throw invalidResponse()
+    expected = ['accept_warning', 'revise']
+  } else if (pending.review_outcome === 'blocking') {
+    if (pending.review_outcome !== run.revision_plan.review_outcome) throw invalidResponse()
+    expected = run.applied_document_version_ids.length === 0 ? ['revise', 'cancel'] : ['revise']
+  } else {
+    if (pending.review_outcome !== run.revision_plan.review_outcome) throw invalidResponse()
+    expected = run.applied_document_version_ids.length === 0 ? ['approve', 'revise', 'cancel'] : ['approve', 'revise']
+  }
+  if (!sameValues(pending.allowed_decisions, expected)) throw invalidResponse()
+}
+
+function validateMaintenanceLifecycle(run: ProjectMaintenanceRun): void {
+  const hasApplied = run.applied_document_version_ids.length > 0
+  const review = run.consistency_review
+  const planOutcome = run.revision_plan?.review_outcome
+  if (run.status === 'CHANGE_REQUESTED') {
+    if (run.affected_items.length > 0 || run.revision_plan !== null || hasApplied || review !== null) throw invalidResponse()
+    return
+  }
+  if (run.status === 'LORE_IMPACT_ANALYSIS' || run.status === 'CHIEF_EDITOR_IMPACT_ANALYSIS') {
+    if (run.revision_plan !== null || hasApplied || review !== null) throw invalidResponse()
+    return
+  }
+  if (run.status === 'REVISION_PLAN') {
+    if (hasApplied !== (review !== null) || review?.outcome === 'clean') throw invalidResponse()
+    return
+  }
+  if (run.status === 'USER_CONFIRMATION') {
+    const confirmationKind = run.pending_action?.confirmation_kind
+    if (confirmationKind === 'revision_confirmation') {
+      if (hasApplied !== (review !== null) || review?.outcome === 'clean') throw invalidResponse()
+    }
+    return
+  }
+  if (run.status === 'APPLY_CHANGE') {
+    if (review !== null || planOutcome === 'blocking') throw invalidResponse()
+    return
+  }
+  if (run.status === 'CONSISTENCY_REVIEW') {
+    if (!hasApplied || planOutcome === 'blocking') throw invalidResponse()
+    return
+  }
+  if (run.status === 'PROJECT_UPDATED') {
+    if (!hasApplied || review === null || review.outcome === 'blocking' || planOutcome === 'blocking') {
+      throw invalidResponse()
+    }
+    return
+  }
+  if (hasApplied || review !== null) throw invalidResponse()
+}
+
+function decodeProjectMaintenanceRun(value: unknown): ProjectMaintenanceRun {
+  const data = exactObject(value, [
+    'id', 'maintenance_change_id', 'type', 'status', 'current_node', 'next_node', 'awaiting_user', 'title',
+    'change_request', 'created_at', 'updated_at', 'completed_at', 'affected_items', 'revision_plan',
+    'consistency_review', 'applied_document_version_ids', 'pending_action',
+  ])
+  const status = maintenanceEnum(data.status, maintenanceStatuses)
+  const affectedItems = maintenanceArray(data.affected_items, 256).map(decodeMaintenanceAffectedItem)
+  const appliedIds = maintenanceArray(data.applied_document_version_ids, 128).map(maintenanceId)
+  const run: ProjectMaintenanceRun = {
+    id: maintenanceId(data.id),
+    maintenance_change_id: maintenanceId(data.maintenance_change_id),
+    type: data.type === 'project_maintenance' ? data.type : (() => { throw invalidResponse() })(),
+    status,
+    current_node: string(data.current_node),
+    next_node: data.next_node === null ? null : (() => { throw invalidResponse() })(),
+    awaiting_user: boolean(data.awaiting_user),
+    title: maintenanceString(data.title, 1, 512, false),
+    change_request: maintenanceString(data.change_request, 1, 4000),
+    created_at: maintenanceDate(data.created_at),
+    updated_at: maintenanceDate(data.updated_at),
+    completed_at: data.completed_at === null ? null : maintenanceDate(data.completed_at),
+    affected_items: affectedItems,
+    revision_plan: data.revision_plan === null ? null : decodeMaintenancePlan(data.revision_plan),
+    consistency_review: data.consistency_review === null ? null : decodeMaintenanceReview(data.consistency_review),
+    applied_document_version_ids: appliedIds,
+    pending_action: data.pending_action === null ? null : decodeMaintenancePendingAction(data.pending_action),
+  }
+  const terminal = status === 'PROJECT_UPDATED' || status === 'CANCELLED'
+  const createdTime = Date.parse(run.created_at)
+  const updatedTime = Date.parse(run.updated_at)
+  const planRequired = new Set<ProjectMaintenanceStatus>([
+    'USER_CONFIRMATION', 'APPLY_CHANGE', 'CONSISTENCY_REVIEW', 'PROJECT_UPDATED', 'CANCELLED',
+  ]).has(status)
+  const reviewedVersionIds = run.consistency_review?.findings.flatMap(
+    (finding) => finding.affected_documents.map((document) => document.version_id),
+  ) ?? []
+  const operationAffectedIds = run.revision_plan?.operations.flatMap(
+    (operation) => operation.affected_item_ids,
+  ) ?? []
+  const operationAffectedSet = new Set(operationAffectedIds)
+  const affectedById = new Map(affectedItems.map((item) => [item.id, item]))
+  if (
+    run.current_node !== maintenanceNodes[status]
+    || terminal !== (run.completed_at !== null)
+    || updatedTime < createdTime
+    || (planRequired && run.revision_plan === null)
+    || (['CHANGE_REQUESTED', 'LORE_IMPACT_ANALYSIS', 'CHIEF_EDITOR_IMPACT_ANALYSIS'].includes(status) && run.revision_plan !== null)
+    || (run.consistency_review !== null && appliedIds.length === 0)
+    || reviewedVersionIds.some((versionId) => !appliedIds.includes(versionId))
+    || !unique(affectedItems.map((item) => item.id))
+    || !unique(affectedItems.map((item) => item.stable_reference))
+    || affectedItems.some((item, index) => item.position !== index)
+    || !unique(appliedIds)
+    || (run.revision_plan !== null && (
+      operationAffectedSet.size !== affectedItems.length
+      || operationAffectedIds.some((affectedId) => !affectedById.has(affectedId))
+      || run.revision_plan.operations.some((operation) => operation.affected_item_ids.some(
+        (affectedId) => {
+          const documentId = affectedById.get(affectedId)?.document_id
+          return documentId !== null && documentId !== operation.document_id
+        },
+      ))
+    ))
+    || (status === 'PROJECT_UPDATED' && (run.revision_plan === null || run.consistency_review === null || appliedIds.length === 0))
+    || (status === 'CANCELLED' && (run.consistency_review !== null || appliedIds.length !== 0))
+  ) throw invalidResponse()
+  validateMaintenanceLifecycle(run)
+  validateMaintenanceGate(run)
+  return run
+}
+
+function maintenanceErrorFromEnvelope(status: number, value: unknown): ApiError {
+  const envelopeCode = isRecord(value) && isRecord(value.error) && isSafeErrorCode(value.error.code)
+    ? value.error.code
+    : 'request_failed'
+  if (status === 404) return new ApiError(status, 'not_found', 'The project maintenance run was not found.')
+  if (status === 409) {
+    const code = envelopeCode === 'workflow_state_error' ? envelopeCode : 'conflict'
+    return new ApiError(status, code, 'The project maintenance state changed. Refresh and try again.')
+  }
+  if (status === 422) {
+    const allowed = new Set(['validation_error', 'agent_output_invalid', 'provider_invalid_output', 'maintenance_change_invalid'])
+    const code = allowed.has(envelopeCode) ? envelopeCode : 'validation_error'
+    return new ApiError(status, code, 'The project maintenance request could not be processed.')
+  }
+  return new ApiError(status, 'request_failed', genericErrorMessage)
+}
+
+function maintenanceRequestOptions(signal?: AbortSignal): RequestOptions {
+  return { ...(signal === undefined ? {} : { signal }), decodeError: maintenanceErrorFromEnvelope }
+}
+
+function invalidMaintenanceRequest(): ApiError {
+  return new ApiError(0, 'invalid_request', 'The project maintenance request is invalid.')
+}
+
+function startMaintenanceBody(payload: StartProjectMaintenanceRequest): StartProjectMaintenanceRequest {
+  const title = typeof payload.title === 'string' ? payload.title.trim() : ''
+  const changeRequest = typeof payload.change_request === 'string' ? payload.change_request.trim() : ''
+  const scopeHints = payload.scope_hints === undefined ? [] : payload.scope_hints
+  if (
+    unicodeCodePointLength(title) < 1
+    || unicodeCodePointLength(title) > 512
+    || /[\r\n]/.test(title)
+    || unicodeCodePointLength(changeRequest) < 1
+    || unicodeCodePointLength(changeRequest) > 4000
+    || !Array.isArray(scopeHints)
+    || scopeHints.length > 7
+    || !scopeHints.every((hint) => maintenanceScopeHints.has(hint))
+    || !unique(scopeHints)
+  ) throw invalidMaintenanceRequest()
+  return { title, change_request: changeRequest, scope_hints: [...scopeHints] }
+}
+
+function decodeExpectedMaintenanceRun(value: unknown, expectedRunId?: string): ProjectMaintenanceRun {
+  const run = decodeProjectMaintenanceRun(value)
+  if (expectedRunId !== undefined && run.id !== expectedRunId) throw invalidResponse()
+  return run
+}
+
+export function startProjectMaintenance(
+  projectId: string,
+  payload: StartProjectMaintenanceRequest,
+  signal?: AbortSignal,
+): Promise<ProjectMaintenanceRun> {
+  const body = startMaintenanceBody(payload)
+  return request(
+    'POST',
+    () => apiPath('projects', projectId, 'maintenance', 'start'),
+    decodeProjectMaintenanceRun,
+    body,
+    maintenanceRequestOptions(signal),
+  )
+}
+
+export function getProjectMaintenanceRun(
+  projectId: string,
+  workflowRunId: string,
+  signal?: AbortSignal,
+): Promise<ProjectMaintenanceRun> {
+  return request(
+    'GET',
+    () => apiPath('projects', projectId, 'maintenance', workflowRunId),
+    (value) => decodeExpectedMaintenanceRun(value, workflowRunId),
+    undefined,
+    maintenanceRequestOptions(signal),
+  )
+}
+
+export function listProjectMaintenanceRuns(
+  projectId: string,
+  options: ProjectMaintenanceListOptions = {},
+  signal?: AbortSignal,
+): Promise<ProjectMaintenanceHistorySummary[]> {
+  const offset = options.offset ?? 0
+  const limit = options.limit ?? 20
+  if (!Number.isInteger(offset) || offset < 0 || offset > 10_000 || !Number.isInteger(limit) || limit < 1 || limit > 100) {
+    throw invalidMaintenanceRequest()
+  }
+  return request(
+    'GET',
+    () => `${apiPath('projects', projectId, 'maintenance')}?offset=${offset}&limit=${limit}`,
+    (value) => maintenanceArray(value, limit).map((item) => {
+      const run = decodeProjectMaintenanceRun(item)
+      return {
+        id: run.id,
+        maintenance_change_id: run.maintenance_change_id,
+        status: run.status,
+        title: run.title,
+        awaiting_user: run.awaiting_user,
+        created_at: run.created_at,
+        updated_at: run.updated_at,
+        completed_at: run.completed_at,
+      }
+    }),
+    undefined,
+    maintenanceRequestOptions(signal),
+  )
+}
+
+export async function resolveProjectMaintenanceAction(
+  projectId: string,
+  run: ProjectMaintenanceRun,
+  decision: ProjectMaintenanceDecision,
+  signal?: AbortSignal,
+): Promise<ProjectMaintenanceRun> {
+  const decodedRun = decodeProjectMaintenanceRun(run)
+  const pending = decodedRun.status === 'USER_CONFIRMATION' && decodedRun.awaiting_user
+    ? decodedRun.pending_action
+    : null
+  if (pending === null || !pending.allowed_decisions.includes(decision)) throw invalidMaintenanceRequest()
+  return request(
+    'POST',
+    () => apiPath('projects', projectId, 'maintenance', decodedRun.id, 'actions', pending.id, 'resolve'),
+    (value) => decodeExpectedMaintenanceRun(value, decodedRun.id),
+    { decision },
+    maintenanceRequestOptions(signal),
   )
 }
