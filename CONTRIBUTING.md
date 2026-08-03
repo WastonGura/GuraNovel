@@ -104,7 +104,8 @@ The following are intentionally not committed:
 - `.env` files and local caches.
 - `.codegraph/` generated local code-intelligence indexes.
 
-Use public docs such as `docs/architecture.md` later for cleaned-up design documentation.
+Use public documentation such as [the architecture guide](docs/architecture.md) for cleaned-up
+design material that is safe to share.
 
 ## Canonical v0.8 verification
 
