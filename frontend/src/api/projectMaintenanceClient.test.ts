@@ -348,6 +348,83 @@ describe('project maintenance API client', () => {
     await expect(getProjectMaintenanceRun('project-1', ids.run)).rejects.toMatchObject({ code: 'invalid_response' })
   })
 
+  it.each([
+    'X-Provider-Request-Id: req_abc123',
+    'OperationalError: connection refused on internal host db-primary port 5432',
+    'Model gpt-5 in region us-east-1',
+    'Error: connection refused',
+    'Exception: raw provider failure',
+    'Server: nginx internal build',
+    'Content-Type: application/json',
+    'Provider OpenAI model gpt-5 region us-east-1',
+    'Details X-Provider-Request-Id: req_abc123',
+    'Details OperationalError: connection refused',
+    'Details Server: nginx internal build',
+    'ERROR: connection refused',
+    'EXCEPTION: raw provider failure',
+    'Server: uvicorn',
+    'Server: Caddy',
+    'Details provider=OpenAI model=gpt-5 region=us-east-1',
+    'Details model: claude-sonnet in region us-east-1',
+    'Details region=us-east-1',
+    'Serving model claude-sonnet in region us-east-1',
+    'Server: Werkzeug',
+    'Details Server: openresty internal build',
+    'Details region=us-central1',
+    'Serving model claude-sonnet in region us-central1',
+    'Serving model gemini in region europe-west1',
+    'Details Error: connection refused',
+    'Provider details EXCEPTION: upstream failed',
+    'Server: uvicorn 0.30.1',
+    'Details Server: Caddy 2',
+    'Server: openresty 1.25.3.1',
+    'Details model=gemini-2',
+    'Provider details model=claude-sonnet',
+    'Details region=me-central1',
+    'Serving model gemini in region africa-south1',
+    'Details error: connection refused',
+    'Provider details exception: upstream failed',
+    'Details server: uvicorn 0.30.1',
+    'Provider details model=deepseek-v3',
+    'Details model=phi-4',
+    'Details region=eastus',
+    'Serving model deepseek-v3 in region eastus',
+  ])('rejects unsafe public provider text: %s', async (unsafeText) => {
+    const value = confirmationRun()
+    const affected = (value.affected_items as Record<string, unknown>[])[0]
+    affected.reason = unsafeText
+    mockJsonResponse(value)
+
+    await expect(getProjectMaintenanceRun('project-1', ids.run)).rejects.toMatchObject({ code: 'invalid_response' })
+  })
+
+  it.each([
+    'Move the conflict to region: north.',
+    'Character model: reluctant host.',
+    'Terror: spreads through the court.',
+    'Host: the banquet begins at dusk.',
+    'Region: northern kingdom remains stable.',
+    'The robot is model T-800 in region north.',
+    'Fix the continuity error: the heroine arrives before the letter.',
+    'Her fatal error: trusting the envoy.',
+    'The continuity error: chapter three contradicts chapter two.',
+    'Editorial error: reveal timing weakens the ending.',
+    'Character model: Gemini twins with opposing goals.',
+    'The tavern server: Mira.',
+    'Change the server: Alice.',
+    'The cookie: a clue at the crime scene.',
+    'The server: Alice.',
+  ])('allows normal public story text: %s', async (safeText) => {
+    const value = confirmationRun()
+    const affected = (value.affected_items as Record<string, unknown>[])[0]
+    affected.reason = safeText
+    mockJsonResponse(value)
+
+    await expect(getProjectMaintenanceRun('project-1', ids.run)).resolves.toMatchObject({
+      affected_items: [expect.objectContaining({ reason: safeText })],
+    })
+  })
+
   it('rejects a forged or stale run capability before resolving', async () => {
     mockJsonResponse(confirmationRun())
     const run = await getProjectMaintenanceRun('project-1', ids.run)

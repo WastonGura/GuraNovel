@@ -883,6 +883,24 @@ const maintenanceEncodedPath = /%(?:[0-9a-f]{2}|u[0-9a-f]{4})/i
 const maintenanceExternalUri = /(?:^|[^a-z0-9])(?:[a-z][a-z0-9+.-]*):(?=\S)/i
 const maintenanceDottedToken = /(?:^|[^a-z0-9])(?:[a-z0-9_-][a-z0-9_-]*(?:\.[a-z0-9_-]+)*\.[a-z]{2,63})(?:$|[^a-z0-9])/i
 const maintenanceCredential = /(?:\b(?:api[_-]?key|access[_-]?token|auth(?:orization)?|bearer|password|passwd|secret|token)\b\s*[:=]\s*\S+|\bsk-[a-z0-9_-]{8,}\b)/i
+const maintenancePublicHeader = /\b(?:x-[a-z0-9-]+|authorization|set-cookie|content-type|referer|user-agent)\s*:/i
+const maintenanceAmbiguousHeaderLine = /(?:^|[\r\n])\s*cookie\s*:/i
+const maintenanceServerMetadata = /(?:\bServer\s*:\s*\S+|(?:^|[\r\n])\s*server\s*:\s*\S+)/
+const maintenanceDetailsDiagnostic = /\b(?:provider\s+)?details\s+(?:error|exception|server)\s*:/i
+const maintenanceRawException = /(?:\b(?:Error|ERROR|Exception|EXCEPTION|Traceback|TRACEBACK)\s*:|(?:^|[\r\n])\s*(?:error|exception|traceback)\s*:)/
+const maintenanceExceptionClass = /\b[A-Z][A-Za-z0-9_]*(?:Error|Exception)\s*:/
+const maintenanceCloudRegion = '(?:(?:[a-z]{2}|us-gov)(?:-[a-z0-9]+)+-\\d+|(?:[a-z]{2}|africa|asia|australia|europe|northamerica|southamerica)(?:-[a-z]+)+\\d+)'
+const maintenanceProviderMetadata = new RegExp(
+  `(?:\\bmodel\\s*[:=]?\\s*\\S+\\s+in\\s+region\\s*[:=]?\\s*${maintenanceCloudRegion}`
+  + `|\\bprovider\\s*[:=]?\\s*\\S+\\s+model\\s*[:=]?\\s*\\S+\\s+region\\s*[:=]?\\s*${maintenanceCloudRegion}`
+  + `|\\bprovider\\s*[:=]\\s*\\S+|\\bendpoint\\s*[:=]\\s*\\S+|\\bregion\\s*[:=]\\s*${maintenanceCloudRegion}`
+  + '|\\bmodel\\s*=\\s*[a-z0-9][a-z0-9._-]*'
+  + '|\\b(?:provider\\s+)?details\\s+model\\s*[:=]\\s*[a-z0-9][a-z0-9._-]*'
+  + '|\\bregion\\s*=\\s*[a-z0-9][a-z0-9._-]*'
+  + '|\\bserving\\s+model\\s+\\S+\\s+in\\s+region\\s+\\S+'
+  + '|(?:^|[\\r\\n])\\s*model\\s*[:=]\\s*(?:gpt|claude|gemini|llama|mistral|command|qwen)[a-z0-9._-]*\\s*(?:$|[\\r\\n]))',
+  'i',
+)
 
 function exactObject(value: unknown, fields: readonly string[]): Record<string, unknown> {
   const data = object(value)
@@ -917,6 +935,13 @@ function maintenanceProviderText(value: unknown, maximum: number): string {
     || maintenanceExternalUri.test(decoded)
     || maintenanceDottedToken.test(decoded)
     || maintenanceCredential.test(decoded)
+    || maintenancePublicHeader.test(decoded)
+    || maintenanceAmbiguousHeaderLine.test(decoded)
+    || maintenanceServerMetadata.test(decoded)
+    || maintenanceDetailsDiagnostic.test(decoded)
+    || maintenanceRawException.test(decoded)
+    || maintenanceExceptionClass.test(decoded)
+    || maintenanceProviderMetadata.test(decoded)
   ) throw invalidResponse()
   return decoded
 }
