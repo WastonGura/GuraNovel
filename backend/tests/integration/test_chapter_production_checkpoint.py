@@ -438,6 +438,104 @@ async def test_checkpoint_restart_round_trip_revalidates_live_ready_references_a
         )
         assert restored.status is ChapterProductionStatus.ARCHIVE_UPDATE
         assert checkpoint.checkpoint_index == 1
+        completed = restored.complete(
+            policy=policy_binding(run.id, chapter_id),
+            document_id=str(document.id),
+            current_document_version_id=str(document.current_version_id),
+            version_content_hash=version.content_hash,
+            editor_report=report_binding(
+                reports[ReviewMode.CHAPTER_EDITOR.value], ChapterReviewStage.EDITOR
+            ),
+            chief_editor_report=report_binding(
+                reports[ReviewMode.CHAPTER_CHIEF_FINAL.value],
+                ChapterReviewStage.CHIEF_EDITOR,
+            ),
+            lore_report=report_binding(
+                reports[ReviewMode.CHAPTER_FINAL_LORE.value], ChapterReviewStage.LORE
+            ),
+        )
+        assert completed.status is ChapterProductionStatus.COMPLETED
+
+
+@pytest.mark.integration
+@pytest.mark.anyio
+async def test_archive_completion_rejects_a_canonical_edit_after_archive_started(
+    async_session: AsyncSession,
+    integration_database_url: str,
+) -> None:
+    run_id, chapter_id, document_id, version_id, ready = await seed_ready_checkpoint(
+        async_session
+    )
+    document = await async_session.get(Document, document_id)
+    version = await async_session.get(DocumentVersion, version_id)
+    reports = {
+        report.review_mode: report
+        for report in await async_session.scalars(
+            select(ReviewReport).where(ReviewReport.workflow_run_id == run_id)
+        )
+    }
+    assert document is not None and version is not None
+    archived = ready.begin_archive_update(
+        policy=policy_binding(run_id, chapter_id),
+        document_id=str(document.id),
+        current_document_version_id=str(document.current_version_id),
+        version_content_hash=version.content_hash,
+        editor_report=report_binding(
+            reports[ReviewMode.CHAPTER_EDITOR.value], ChapterReviewStage.EDITOR
+        ),
+        chief_editor_report=report_binding(
+            reports[ReviewMode.CHAPTER_CHIEF_FINAL.value],
+            ChapterReviewStage.CHIEF_EDITOR,
+        ),
+        lore_report=report_binding(
+            reports[ReviewMode.CHAPTER_FINAL_LORE.value], ChapterReviewStage.LORE
+        ),
+    )
+
+    newer = DocumentVersion(
+        document_id=document.id,
+        version_number=2,
+        parent_version_id=version.id,
+        source=DocumentSource.USER.value,
+        content_hash=NEW_CONTENT_HASH,
+        byte_size=11,
+        word_count=2,
+        file_path="chapters/chapter_001/draft.md",
+    )
+    async_session.add(newer)
+    await async_session.flush()
+    document.current_version_id = newer.id
+    await async_session.commit()
+
+    async with fresh_session(integration_database_url) as restarted:
+        live_document = await restarted.get(Document, document_id)
+        live_version = await restarted.get(DocumentVersion, newer.id)
+        live_reports = {
+            report.review_mode: report
+            for report in await restarted.scalars(
+                select(ReviewReport).where(ReviewReport.workflow_run_id == run_id)
+            )
+        }
+        assert live_document is not None and live_version is not None
+        with pytest.raises(ChapterProductionValidationError, match="stale"):
+            archived.complete(
+                policy=policy_binding(run_id, chapter_id),
+                document_id=str(live_document.id),
+                current_document_version_id=str(live_document.current_version_id),
+                version_content_hash=live_version.content_hash,
+                editor_report=report_binding(
+                    live_reports[ReviewMode.CHAPTER_EDITOR.value],
+                    ChapterReviewStage.EDITOR,
+                ),
+                chief_editor_report=report_binding(
+                    live_reports[ReviewMode.CHAPTER_CHIEF_FINAL.value],
+                    ChapterReviewStage.CHIEF_EDITOR,
+                ),
+                lore_report=report_binding(
+                    live_reports[ReviewMode.CHAPTER_FINAL_LORE.value],
+                    ChapterReviewStage.LORE,
+                ),
+            )
 
 
 @pytest.mark.integration

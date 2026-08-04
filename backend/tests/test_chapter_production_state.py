@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import traceback
 from dataclasses import FrozenInstanceError, replace
 from itertools import product
 
@@ -280,6 +281,22 @@ def begin_archive(state: ChapterProductionState) -> ChapterProductionState:
     )
 
 
+def complete_archive(state: ChapterProductionState) -> ChapterProductionState:
+    return state.complete(
+        policy=policy(chief_editor_required=state.chief_editor_required),
+        document_id=DOCUMENT_ID,
+        current_document_version_id=VERSION_1,
+        version_content_hash=HASH_1,
+        editor_report=binding(state, ChapterReviewStage.EDITOR, EDITOR_REPORT_ID),
+        chief_editor_report=(
+            binding(state, ChapterReviewStage.CHIEF_EDITOR, CHIEF_REPORT_ID)
+            if state.chief_editor_required
+            else None
+        ),
+        lore_report=binding(state, ChapterReviewStage.LORE, LORE_REPORT_ID),
+    )
+
+
 def failure_reconciliation(
     state: ChapterProductionState,
     outcome: ChapterFailureReconciliationOutcome,
@@ -342,7 +359,7 @@ def test_happy_path_requires_exact_version_bound_editor_chief_and_lore_reports()
     assert ready.editor_report_id == EDITOR_REPORT_ID
     assert ready.chief_editor_report_id == CHIEF_REPORT_ID
     assert ready.lore_report_id == LORE_REPORT_ID
-    assert begin_archive(ready).complete().status is ChapterProductionStatus.COMPLETED
+    assert complete_archive(begin_archive(ready)).status is ChapterProductionStatus.COMPLETED
 
 
 def test_policy_can_skip_chief_but_never_editor_or_lore() -> None:
@@ -472,6 +489,40 @@ def test_archive_capability_revalidates_trusted_policy_and_live_readiness() -> N
             lore_report=binding(ready, ChapterReviewStage.LORE, LORE_REPORT_ID),
         )
     assert begin_archive(ready).status is ChapterProductionStatus.ARCHIVE_UPDATE
+
+
+def test_complete_revalidates_trusted_policy_and_live_readiness_after_archive_race() -> None:
+    archived = begin_archive(revision_ready())
+    assert complete_archive(archived).status is ChapterProductionStatus.COMPLETED
+
+    with pytest.raises(ChapterProductionValidationError, match="trusted policy"):
+        archived.complete(
+            policy=policy(review_policy_version="chapter-quality-v2"),
+            document_id=DOCUMENT_ID,
+            current_document_version_id=VERSION_1,
+            version_content_hash=HASH_1,
+            editor_report=binding(
+                archived, ChapterReviewStage.EDITOR, EDITOR_REPORT_ID
+            ),
+            chief_editor_report=binding(
+                archived, ChapterReviewStage.CHIEF_EDITOR, CHIEF_REPORT_ID
+            ),
+            lore_report=binding(archived, ChapterReviewStage.LORE, LORE_REPORT_ID),
+        )
+    with pytest.raises(ChapterProductionValidationError, match="stale"):
+        archived.complete(
+            policy=policy(),
+            document_id=DOCUMENT_ID,
+            current_document_version_id=VERSION_2,
+            version_content_hash=HASH_2,
+            editor_report=binding(
+                archived, ChapterReviewStage.EDITOR, EDITOR_REPORT_ID
+            ),
+            chief_editor_report=binding(
+                archived, ChapterReviewStage.CHIEF_EDITOR, CHIEF_REPORT_ID
+            ),
+            lore_report=binding(archived, ChapterReviewStage.LORE, LORE_REPORT_ID),
+        )
 
 
 @pytest.mark.parametrize(
@@ -1706,7 +1757,7 @@ def test_failed_checkpoint_retains_every_reference_required_by_its_recovery_targ
 def test_terminal_states_reject_every_stateful_operation() -> None:
     ready = revision_ready()
     terminals = (
-        begin_archive(ready).complete(),
+        complete_archive(begin_archive(ready)),
         author_gate().resolve_action(
             action=action(ChapterActionKind.AUTHOR_REVISION),
             decision=ChapterActionDecision.CANCEL,
@@ -1735,7 +1786,7 @@ def test_terminal_states_reject_every_stateful_operation() -> None:
 
 def test_terminal_states_cannot_leave_through_any_public_transition() -> None:
     terminals = (
-        begin_archive(revision_ready()).complete(),
+        complete_archive(begin_archive(revision_ready())),
         author_gate().resolve_action(
             action=action(ChapterActionKind.AUTHOR_REVISION),
             decision=ChapterActionDecision.CANCEL,
@@ -1768,7 +1819,7 @@ def test_terminal_states_cannot_leave_through_any_public_transition() -> None:
                 content_hash=HASH_2,
             ),
             lambda: begin_archive(state),
-            lambda: state.complete(),
+            lambda: complete_archive(state),
             lambda: state.fail(ChapterFailureCode.PROVIDER_UNAVAILABLE),
             lambda: state.recover(),
                 lambda: state.finalize_revision_ready(
@@ -1914,7 +1965,7 @@ def test_every_non_finalized_checkpoint_round_trips_exactly(
         pytest.param(revision_ready, id="ready"),
         pytest.param(lambda: begin_archive(revision_ready()), id="archive"),
         pytest.param(
-            lambda: begin_archive(revision_ready()).complete(), id="completed"
+            lambda: complete_archive(begin_archive(revision_ready())), id="completed"
         ),
         pytest.param(
             lambda: revision_ready().fail(ChapterFailureCode.ARCHIVE_UNAVAILABLE),
@@ -1968,7 +2019,7 @@ def test_ready_restore_rejects_validly_shaped_forged_policy_claims() -> None:
     [
         pytest.param(lambda: begin_archive(revision_ready()), id="archive"),
         pytest.param(
-            lambda: begin_archive(revision_ready()).complete(), id="completed"
+            lambda: complete_archive(begin_archive(revision_ready())), id="completed"
         ),
         pytest.param(
             lambda: revision_ready().fail(ChapterFailureCode.ARCHIVE_UNAVAILABLE),
@@ -2244,7 +2295,7 @@ def test_every_allowed_new_version_source_invalidates_all_review_readiness(
             id="cancelled",
         ),
         pytest.param(
-            lambda: begin_archive(revision_ready()).complete(), id="completed"
+            lambda: complete_archive(begin_archive(revision_ready())), id="completed"
         ),
     ],
 )
@@ -2419,6 +2470,35 @@ def test_checkpoint_rejects_unknown_shapes_types_legacy_values_and_incomplete_re
     mutate(payload)  # type: ignore[operator]
     with pytest.raises(ChapterProductionValidationError):
         ChapterProductionState.from_checkpoint(payload)
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "status",
+        "action_kind",
+        "failed_from_status",
+        "failure_code",
+        "chapter_workflow_run_id",
+        "chapter_id",
+    ],
+)
+def test_untrusted_checkpoint_parser_errors_do_not_retain_hostile_values(
+    field: str,
+) -> None:
+    hostile = "hostile-checkpoint-secret-7f918d"
+    payload = initial().to_checkpoint()
+    payload[field] = hostile
+
+    with pytest.raises(ChapterProductionValidationError) as captured:
+        ChapterProductionState.from_checkpoint(payload)
+
+    error = captured.value
+    assert hostile not in str(error)
+    assert hostile not in repr(error)
+    assert error.__cause__ is None
+    assert error.__context__ is None
+    assert hostile not in "".join(traceback.format_exception(error))
 
 
 def test_ready_state_cannot_be_constructed_without_all_policy_required_bindings() -> None:

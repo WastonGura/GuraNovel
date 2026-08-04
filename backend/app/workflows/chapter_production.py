@@ -119,6 +119,9 @@ _CHECKPOINT_KEYS = {
 
 _POLICY_RE = re.compile(r"[a-z0-9][a-z0-9._-]{0,63}\Z")
 _HASH_RE = re.compile(r"[0-9a-f]{64}\Z")
+_UUID_RE = re.compile(
+    r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\Z"
+)
 _REVIEW_AUTHORITY = {
     ChapterReviewStage.EDITOR: ("chapter_editor", "editor_agent"),
     ChapterReviewStage.CHIEF_EDITOR: ("chapter_chief_final", "chief_editor_agent"),
@@ -140,12 +143,9 @@ _READY_GUARD = object()
 def _canonical_uuid(value: object, field: str, *, optional: bool = False) -> str | None:
     if value is None and optional:
         return None
-    if type(value) is not str:
+    if type(value) is not str or _UUID_RE.fullmatch(value) is None:
         raise ChapterProductionValidationError(f"{field} is invalid.")
-    try:
-        parsed = UUID(value)
-    except (ValueError, AttributeError) as error:
-        raise ChapterProductionValidationError(f"{field} is invalid.") from error
+    parsed = UUID(value)
     if parsed.int == 0:
         raise ChapterProductionValidationError(f"{field} cannot be nil.")
     if str(parsed) != value:
@@ -158,10 +158,10 @@ def _optional_enum(value: object, enum_type: type[Enum], field: str) -> Enum | N
         return None
     if type(value) is not str:
         raise ChapterProductionValidationError(f"Checkpoint {field} is invalid.")
-    try:
-        return enum_type(value)
-    except ValueError as error:
-        raise ChapterProductionValidationError(f"Checkpoint {field} is unrecognized.") from error
+    for member in enum_type:
+        if member.value == value:
+            return member
+    raise ChapterProductionValidationError(f"Checkpoint {field} is unrecognized.")
 
 
 @dataclass(frozen=True)
@@ -713,8 +713,27 @@ class ChapterProductionState:
             _ready_guard=_READY_GUARD,
         )
 
-    def complete(self) -> ChapterProductionState:
+    def complete(
+        self,
+        *,
+        policy: ChapterReviewPolicyBinding,
+        document_id: str,
+        current_document_version_id: str,
+        version_content_hash: str,
+        editor_report: ChapterReviewBinding,
+        chief_editor_report: ChapterReviewBinding | None,
+        lore_report: ChapterReviewBinding,
+    ) -> ChapterProductionState:
         self._require_status(ChapterProductionStatus.ARCHIVE_UPDATE)
+        self.validate_review_policy(policy)
+        self.validate_live_readiness(
+            document_id=document_id,
+            current_document_version_id=current_document_version_id,
+            version_content_hash=version_content_hash,
+            editor_report=editor_report,
+            chief_editor_report=chief_editor_report,
+            lore_report=lore_report,
+        )
         return replace(
             self,
             status=ChapterProductionStatus.COMPLETED,
@@ -975,10 +994,8 @@ class ChapterProductionState:
             raise ChapterProductionValidationError("Checkpoint payload has an invalid version.")
         if type(payload["status"]) is not str:
             raise ChapterProductionValidationError("Checkpoint status is invalid.")
-        try:
-            status = ChapterProductionStatus(payload["status"])
-        except ValueError as error:
-            raise ChapterProductionValidationError("Checkpoint status is unrecognized.") from error
+        status = _optional_enum(payload["status"], ChapterProductionStatus, "status")
+        assert isinstance(status, ChapterProductionStatus)
         if type(payload["current_node"]) is not str or type(payload["awaiting_user"]) is not bool:
             raise ChapterProductionValidationError("Checkpoint workflow fields are invalid.")
         if type(payload["review_policy_version"]) is not str or type(
