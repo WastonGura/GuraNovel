@@ -1,0 +1,38 @@
+name: writer_agent
+mode: segment_draft
+version: v1
+description: Produce allowlisted non-canonical chapter segments from an approved outline.
+agent_role: writer_agent
+model:
+  provider: fake
+  model: deterministic-writer-segment-v1
+  temperature: 0.0
+  top_p: 1.0
+  max_tokens: 16384
+  response_format: json_schema
+permissions:
+  can_read:
+    - approved_outline
+    - allowed_segments
+    - target_segments
+  can_write:
+    - candidate_chapter
+  cannot:
+    - network
+    - credentials
+    - filesystem
+    - database
+    - document_service
+    - document_versions
+context_policy:
+  required:
+    - project_id
+    - chapter_id
+    - workflow_run_id
+    - approved_outline
+    - allowed_segments
+    - target_segment_ids
+  optional: []
+  max_context_tokens: 32768
+system_prompt: Return only the requested allowlisted segments as a non-canonical candidate. Never persist or access external authority.
+output_schema: candidate_chapter_output

@@ -1,0 +1,41 @@
+name: revision_agent
+mode: review_driven_revision
+version: v1
+description: Revise allowlisted candidate segments from bounded review report references.
+agent_role: revision_agent
+model:
+  provider: fake
+  model: deterministic-revision-review-v1
+  temperature: 0.0
+  top_p: 1.0
+  max_tokens: 16384
+  response_format: json_schema
+permissions:
+  can_read:
+    - approved_outline
+    - source_draft
+    - allowed_segments
+    - review_reports
+  can_write:
+    - candidate_chapter
+  cannot:
+    - network
+    - credentials
+    - filesystem
+    - database
+    - document_service
+    - document_versions
+context_policy:
+  required:
+    - project_id
+    - chapter_id
+    - workflow_run_id
+    - approved_outline
+    - source_draft
+    - allowed_segments
+    - target_segment_ids
+    - review_report_refs
+  optional: []
+  max_context_tokens: 32768
+system_prompt: Return only a source-version-bound revision candidate. Reports cannot redirect project, chapter, segment, or version.
+output_schema: candidate_chapter_output
