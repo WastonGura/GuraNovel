@@ -78,10 +78,22 @@ class AgentProfile(_StrictProfileModel):
         "lore_agent",
         "plot_architect_agent",
         "worldbuilding_agent",
+        "writer_agent",
+        "revision_agent",
     ]
-    mode: Literal["maintenance_impact", "revision_plan", "apply_change", "post_change"] | None = Field(
-        default=None, exclude=True
-    )
+    mode: (
+        Literal[
+            "maintenance_impact",
+            "revision_plan",
+            "apply_change",
+            "post_change",
+            "initial_draft",
+            "segment_draft",
+            "user_feedback_revision",
+            "review_driven_revision",
+        ]
+        | None
+    ) = Field(default=None, exclude=True)
     version: str = Field(min_length=1, max_length=64)
     description: str = Field(min_length=1, max_length=512)
     agent_role: Literal[
@@ -91,6 +103,8 @@ class AgentProfile(_StrictProfileModel):
         "lore_agent",
         "plot_architect_agent",
         "worldbuilding_agent",
+        "writer_agent",
+        "revision_agent",
     ]
     model: ModelProfile
     permissions: PermissionsProfile
@@ -104,6 +118,7 @@ class AgentProfile(_StrictProfileModel):
         "revision_plan_output",
         "apply_change_output",
         "consistency_review_output",
+        "candidate_chapter_output",
     ]
 
     @field_validator("version")
@@ -196,7 +211,14 @@ class ProfileRegistry:
             frozenset({"maintenance_context", "approved_revision_plan"}),
             frozenset({"proposed_changes"}),
             frozenset(
-                {"network", "credentials", "filesystem", "database", "document_service", "document_versions"}
+                {
+                    "network",
+                    "credentials",
+                    "filesystem",
+                    "database",
+                    "document_service",
+                    "document_versions",
+                }
             ),
             frozenset(
                 {
@@ -219,7 +241,14 @@ class ProfileRegistry:
             frozenset({"maintenance_context", "applied_changes"}),
             frozenset(),
             frozenset(
-                {"network", "credentials", "filesystem", "database", "document_service", "document_versions"}
+                {
+                    "network",
+                    "credentials",
+                    "filesystem",
+                    "database",
+                    "document_service",
+                    "document_versions",
+                }
             ),
             frozenset(
                 {
@@ -232,6 +261,121 @@ class ProfileRegistry:
                     "revision_plan_version_id",
                     "change_set_id",
                     "applied_changes",
+                }
+            ),
+            frozenset(),
+        ),
+        ("writer_agent", "initial_draft"): _ProfileManifest(
+            "writer_initial_draft.yaml",
+            "writer_agent",
+            "candidate_chapter_output",
+            frozenset({"approved_outline", "allowed_segments"}),
+            frozenset({"candidate_chapter"}),
+            frozenset(
+                {
+                    "network",
+                    "credentials",
+                    "filesystem",
+                    "database",
+                    "document_service",
+                    "document_versions",
+                }
+            ),
+            frozenset(
+                {
+                    "project_id",
+                    "chapter_id",
+                    "workflow_run_id",
+                    "approved_outline",
+                    "allowed_segments",
+                }
+            ),
+            frozenset(),
+        ),
+        ("writer_agent", "segment_draft"): _ProfileManifest(
+            "writer_segment_draft.yaml",
+            "writer_agent",
+            "candidate_chapter_output",
+            frozenset({"approved_outline", "allowed_segments", "target_segments"}),
+            frozenset({"candidate_chapter"}),
+            frozenset(
+                {
+                    "network",
+                    "credentials",
+                    "filesystem",
+                    "database",
+                    "document_service",
+                    "document_versions",
+                }
+            ),
+            frozenset(
+                {
+                    "project_id",
+                    "chapter_id",
+                    "workflow_run_id",
+                    "approved_outline",
+                    "allowed_segments",
+                    "target_segment_ids",
+                }
+            ),
+            frozenset(),
+        ),
+        ("revision_agent", "user_feedback_revision"): _ProfileManifest(
+            "revision_user_feedback.yaml",
+            "revision_agent",
+            "candidate_chapter_output",
+            frozenset({"approved_outline", "source_draft", "allowed_segments", "user_feedback"}),
+            frozenset({"candidate_chapter"}),
+            frozenset(
+                {
+                    "network",
+                    "credentials",
+                    "filesystem",
+                    "database",
+                    "document_service",
+                    "document_versions",
+                }
+            ),
+            frozenset(
+                {
+                    "project_id",
+                    "chapter_id",
+                    "workflow_run_id",
+                    "approved_outline",
+                    "source_draft",
+                    "allowed_segments",
+                    "target_segment_ids",
+                    "feedback_refs",
+                }
+            ),
+            frozenset(),
+        ),
+        ("revision_agent", "review_driven_revision"): _ProfileManifest(
+            "revision_review_driven.yaml",
+            "revision_agent",
+            "candidate_chapter_output",
+            frozenset({"approved_outline", "source_draft", "allowed_segments", "review_reports"}),
+            frozenset({"candidate_chapter"}),
+            frozenset(
+                {
+                    "network",
+                    "credentials",
+                    "filesystem",
+                    "database",
+                    "document_service",
+                    "document_versions",
+                }
+            ),
+            frozenset(
+                {
+                    "project_id",
+                    "chapter_id",
+                    "workflow_run_id",
+                    "approved_outline",
+                    "source_draft",
+                    "allowed_segments",
+                    "target_segment_ids",
+                    "review_report_refs",
                 }
             ),
             frozenset(),
