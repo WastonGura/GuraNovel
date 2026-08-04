@@ -36,6 +36,7 @@ from app.workflows.chapter_production import (
     ChapterProductionValidationError,
     ChapterReviewBinding,
     ChapterReviewOutcome,
+    ChapterReviewPolicyBinding,
     ChapterReviewStage,
     LegacyChapterProductionSnapshot,
 )
@@ -44,6 +45,21 @@ from app.workflows.chapter_production import (
 CONTENT_HASH = "a" * 64
 NEW_CONTENT_HASH = "b" * 64
 POLICY = "chapter-quality-v1"
+
+
+def policy_binding(
+    run_id: UUID,
+    chapter_id: UUID,
+    *,
+    review_policy_version: str = POLICY,
+    chief_editor_required: bool = True,
+) -> ChapterReviewPolicyBinding:
+    return ChapterReviewPolicyBinding(
+        workflow_run_id=str(run_id),
+        chapter_id=str(chapter_id),
+        review_policy_version=review_policy_version,
+        chief_editor_required=chief_editor_required,
+    )
 
 
 @asynccontextmanager
@@ -259,6 +275,7 @@ async def seed_ready_checkpoint(
         )
     assert state.status is ChapterProductionStatus.LORE_FINAL_REVIEW
     state = state.finalize_revision_ready(
+        policy=policy_binding(run.id, chapter.id),
         document_id=str(document.id),
         current_document_version_id=str(document.current_version_id),
         version_content_hash=version.content_hash,
@@ -323,6 +340,7 @@ async def test_checkpoint_restart_round_trip_revalidates_live_ready_references_a
         }
         restored = ChapterProductionState.from_revision_ready_checkpoint(
             checkpoint.state_json,
+            policy=policy_binding(run.id, chapter_id),
             workflow_run_id=str(run.id),
             chapter_id=str(run.chapter_id),
             run_workflow_type=run.workflow_type,
@@ -347,7 +365,22 @@ async def test_checkpoint_restart_round_trip_revalidates_live_ready_references_a
         )
         assert restored == expected
 
-        archived = restored.begin_archive_update()
+        archived = restored.begin_archive_update(
+            policy=policy_binding(run.id, chapter_id),
+            document_id=str(document.id),
+            current_document_version_id=str(document.current_version_id),
+            version_content_hash=version.content_hash,
+            editor_report=report_binding(
+                reports[ReviewMode.CHAPTER_EDITOR.value], ChapterReviewStage.EDITOR
+            ),
+            chief_editor_report=report_binding(
+                reports[ReviewMode.CHAPTER_CHIEF_FINAL.value],
+                ChapterReviewStage.CHIEF_EDITOR,
+            ),
+            lore_report=report_binding(
+                reports[ReviewMode.CHAPTER_FINAL_LORE.value], ChapterReviewStage.LORE
+            ),
+        )
         run.status = archived.status.value
         run.current_node = archived.current_node
         run.awaiting_user = archived.awaiting_user
@@ -378,8 +411,9 @@ async def test_checkpoint_restart_round_trip_revalidates_live_ready_references_a
             and document is not None
             and version is not None
         )
-        restored = ChapterProductionState.from_revision_ready_checkpoint(
+        restored = ChapterProductionState.from_finalized_checkpoint(
             checkpoint.state_json,
+            policy=policy_binding(run.id, chapter_id),
             workflow_run_id=str(run.id),
             chapter_id=str(run.chapter_id),
             run_workflow_type=run.workflow_type,
@@ -453,8 +487,9 @@ async def test_ready_lineage_failure_restart_requires_full_live_reconciliation_b
         lore = report_binding(
             reports[ReviewMode.CHAPTER_FINAL_LORE.value], ChapterReviewStage.LORE
         )
-        restored_failed = ChapterProductionState.from_revision_ready_checkpoint(
+        restored_failed = ChapterProductionState.from_finalized_checkpoint(
             checkpoint.state_json,
+            policy=policy_binding(reloaded_run.id, reloaded_run.chapter_id),
             workflow_run_id=str(reloaded_run.id),
             chapter_id=str(reloaded_run.chapter_id),
             run_workflow_type=reloaded_run.workflow_type,
@@ -477,9 +512,13 @@ async def test_ready_lineage_failure_restart_requires_full_live_reconciliation_b
             version,
         )
         with pytest.raises(ChapterProductionValidationError):
-            restored_failed.reconcile_failure(binding=proof)
+            restored_failed.reconcile_failure(
+                binding=proof,
+                policy=policy_binding(reloaded_run.id, reloaded_run.chapter_id),
+            )
         restored_ready = restored_failed.reconcile_failure(
             binding=proof,
+            policy=policy_binding(reloaded_run.id, reloaded_run.chapter_id),
             editor_report=editor,
             chief_editor_report=chief,
             lore_report=lore,
@@ -552,8 +591,9 @@ async def test_ordinary_finalized_failure_recovery_is_live_bound_after_restart(
         lore = report_binding(
             reports[ReviewMode.CHAPTER_FINAL_LORE.value], ChapterReviewStage.LORE
         )
-        restored_failed = ChapterProductionState.from_revision_ready_checkpoint(
+        restored_failed = ChapterProductionState.from_finalized_checkpoint(
             checkpoint.state_json,
+            policy=policy_binding(reloaded_run.id, reloaded_run.chapter_id),
             workflow_run_id=str(reloaded_run.id),
             chapter_id=str(reloaded_run.chapter_id),
             run_workflow_type=reloaded_run.workflow_type,
@@ -592,6 +632,9 @@ async def test_ordinary_finalized_failure_recovery_is_live_bound_after_restart(
         if canonical_edit:
             with pytest.raises(ChapterProductionValidationError):
                 restored_failed.recover_finalized(
+                    policy=policy_binding(
+                        reloaded_run.id, reloaded_run.chapter_id
+                    ),
                     document_id=str(document.id),
                     current_document_version_id=str(document.current_version_id),
                     version_content_hash=current_version.content_hash,
@@ -603,6 +646,7 @@ async def test_ordinary_finalized_failure_recovery_is_live_bound_after_restart(
             assert checkpoint.state_json == failed.to_checkpoint()
         else:
             recovered = restored_failed.recover_finalized(
+                policy=policy_binding(reloaded_run.id, reloaded_run.chapter_id),
                 document_id=str(document.id),
                 current_document_version_id=str(document.current_version_id),
                 version_content_hash=current_version.content_hash,
@@ -1246,6 +1290,7 @@ async def test_restart_rejects_corrupt_run_or_checkpoint_projection(
         with pytest.raises(ChapterProductionValidationError):
             ChapterProductionState.from_revision_ready_checkpoint(
                 checkpoint.state_json,
+                policy=policy_binding(run.id, run.chapter_id),
                 workflow_run_id=str(run.id),
                 chapter_id=str(run.chapter_id),
                 run_workflow_type=run.workflow_type,
@@ -1358,7 +1403,9 @@ async def test_live_orm_finalize_failure_cannot_create_a_ready_checkpoint(
     integration_database_url: str,
     corruption: str,
 ) -> None:
-    run_id, _, document_id, version_id, ready = await seed_ready_checkpoint(async_session)
+    run_id, chapter_id, document_id, version_id, ready = await seed_ready_checkpoint(
+        async_session
+    )
     pre_ready = replace(
         ready,
         status=ChapterProductionStatus.LORE_FINAL_REVIEW,
@@ -1421,6 +1468,7 @@ async def test_live_orm_finalize_failure_cannot_create_a_ready_checkpoint(
         lore = reports.get(ReviewMode.CHAPTER_FINAL_LORE.value)
         with pytest.raises(ChapterProductionValidationError):
             pre_ready.finalize_revision_ready(
+                policy=policy_binding(run_id, chapter_id),
                 document_id=str(document.id),
                 current_document_version_id=str(document.current_version_id),
                 version_content_hash=version.content_hash,

@@ -18,6 +18,7 @@ from app.workflows.chapter_production import (
     ChapterProductionValidationError,
     ChapterReviewOutcome,
     ChapterReviewBinding,
+    ChapterReviewPolicyBinding,
     ChapterReviewStage,
     LegacyChapterProductionSnapshot,
 )
@@ -36,6 +37,21 @@ LORE_REPORT_ID = "91a38213-71c7-4adc-b50c-a3f2bb2ce22b"
 HASH_1 = "1" * 64
 HASH_2 = "2" * 64
 POLICY = "chapter-quality-v1"
+
+
+def policy(
+    *,
+    workflow_run_id: str = RUN_ID,
+    chapter_id: str = CHAPTER_ID,
+    review_policy_version: str = POLICY,
+    chief_editor_required: bool = True,
+) -> ChapterReviewPolicyBinding:
+    return ChapterReviewPolicyBinding(
+        workflow_run_id=workflow_run_id,
+        chapter_id=chapter_id,
+        review_policy_version=review_policy_version,
+        chief_editor_required=chief_editor_required,
+    )
 
 
 def initial(*, chief_required: bool = True) -> ChapterProductionState:
@@ -147,6 +163,7 @@ def revision_ready(*, chief_required: bool = True) -> ChapterProductionState:
         state = review_passed(state, ChapterReviewStage.CHIEF_EDITOR, CHIEF_REPORT_ID)
     pre_ready = review_passed(state, ChapterReviewStage.LORE, LORE_REPORT_ID)
     return pre_ready.finalize_revision_ready(
+        policy=policy(chief_editor_required=chief_required),
         document_id=DOCUMENT_ID,
         current_document_version_id=VERSION_1,
         version_content_hash=HASH_1,
@@ -207,23 +224,57 @@ def finding_gate(
     )
 
 
+def finalized_restore_kwargs(
+    state: ChapterProductionState,
+    *,
+    trusted_policy: ChapterReviewPolicyBinding | None = None,
+) -> dict[str, object]:
+    return {
+        "policy": trusted_policy
+        or policy(chief_editor_required=state.chief_editor_required),
+        "workflow_run_id": RUN_ID,
+        "chapter_id": CHAPTER_ID,
+        "run_workflow_type": "chapter_production",
+        "run_status": state.status.value,
+        "run_current_node": state.current_node,
+        "run_awaiting_user": state.awaiting_user,
+        "checkpoint_workflow_run_id": RUN_ID,
+        "checkpoint_node_name": state.current_node,
+        "document_id": DOCUMENT_ID,
+        "current_document_version_id": VERSION_1,
+        "version_content_hash": HASH_1,
+        "editor_report": binding(
+            state, ChapterReviewStage.EDITOR, EDITOR_REPORT_ID
+        ),
+        "chief_editor_report": (
+            binding(state, ChapterReviewStage.CHIEF_EDITOR, CHIEF_REPORT_ID)
+            if state.chief_editor_required
+            else None
+        ),
+        "lore_report": binding(state, ChapterReviewStage.LORE, LORE_REPORT_ID),
+    }
+
+
 def restore_finalized_checkpoint(state: ChapterProductionState) -> ChapterProductionState:
-    return ChapterProductionState.from_revision_ready_checkpoint(
-        state.to_checkpoint(),
-        workflow_run_id=RUN_ID,
-        chapter_id=CHAPTER_ID,
-        run_workflow_type="chapter_production",
-        run_status=state.status.value,
-        run_current_node=state.current_node,
-        run_awaiting_user=state.awaiting_user,
-        checkpoint_workflow_run_id=RUN_ID,
-        checkpoint_node_name=state.current_node,
+    loader = (
+        ChapterProductionState.from_revision_ready_checkpoint
+        if state.status is ChapterProductionStatus.REVISION_READY
+        else ChapterProductionState.from_finalized_checkpoint
+    )
+    return loader(state.to_checkpoint(), **finalized_restore_kwargs(state))
+
+
+def begin_archive(state: ChapterProductionState) -> ChapterProductionState:
+    return state.begin_archive_update(
+        policy=policy(chief_editor_required=state.chief_editor_required),
         document_id=DOCUMENT_ID,
         current_document_version_id=VERSION_1,
         version_content_hash=HASH_1,
         editor_report=binding(state, ChapterReviewStage.EDITOR, EDITOR_REPORT_ID),
-        chief_editor_report=binding(
-            state, ChapterReviewStage.CHIEF_EDITOR, CHIEF_REPORT_ID
+        chief_editor_report=(
+            binding(state, ChapterReviewStage.CHIEF_EDITOR, CHIEF_REPORT_ID)
+            if state.chief_editor_required
+            else None
         ),
         lore_report=binding(state, ChapterReviewStage.LORE, LORE_REPORT_ID),
     )
@@ -236,9 +287,9 @@ def failure_reconciliation(
     failure_code: ChapterFailureCode | None = None,
     workflow_run_id: str = RUN_ID,
     chapter_id: str = CHAPTER_ID,
-    document_id: str = DOCUMENT_ID,
-    current_document_version_id: str = VERSION_1,
-    current_content_hash: str = HASH_1,
+    document_id: str | None = DOCUMENT_ID,
+    current_document_version_id: str | None = VERSION_1,
+    current_content_hash: str | None = HASH_1,
 ) -> ChapterFailureReconciliationBinding:
     assert state.failure_code is not None
     return ChapterFailureReconciliationBinding(
@@ -282,7 +333,7 @@ def test_happy_path_requires_exact_version_bound_editor_chief_and_lore_reports()
     assert state.semantic_ready_key is None
     assert state.to_checkpoint()["status"] == "LORE_FINAL_REVIEW"
     with pytest.raises(ChapterProductionValidationError):
-        state.begin_archive_update()
+        begin_archive(state)
 
     ready = revision_ready()
     assert ready.status is ChapterProductionStatus.REVISION_READY
@@ -291,7 +342,7 @@ def test_happy_path_requires_exact_version_bound_editor_chief_and_lore_reports()
     assert ready.editor_report_id == EDITOR_REPORT_ID
     assert ready.chief_editor_report_id == CHIEF_REPORT_ID
     assert ready.lore_report_id == LORE_REPORT_ID
-    assert ready.begin_archive_update().complete().status is ChapterProductionStatus.COMPLETED
+    assert begin_archive(ready).complete().status is ChapterProductionStatus.COMPLETED
 
 
 def test_policy_can_skip_chief_but_never_editor_or_lore() -> None:
@@ -314,6 +365,7 @@ def test_finalize_revision_ready_fails_closed_for_stale_or_invalid_live_facts() 
     chief = binding(pre_ready, ChapterReviewStage.CHIEF_EDITOR, CHIEF_REPORT_ID)
     lore = binding(pre_ready, ChapterReviewStage.LORE, LORE_REPORT_ID)
     baseline = {
+        "policy": policy(),
         "document_id": DOCUMENT_ID,
         "current_document_version_id": VERSION_1,
         "version_content_hash": HASH_1,
@@ -353,6 +405,73 @@ def test_finalize_revision_ready_fails_closed_for_stale_or_invalid_live_facts() 
             status=ChapterProductionStatus.REVISION_READY,
             current_node="REVISION_READY",
         )
+
+
+def test_finalize_revision_ready_rejects_validly_shaped_forged_policy_claims() -> None:
+    required = lore_pre_ready()
+    downgraded = replace(
+        required,
+        chief_editor_required=False,
+        chief_editor_report_id=None,
+    )
+    optional = lore_pre_ready(chief_required=False)
+    upgraded = replace(
+        optional,
+        chief_editor_required=True,
+        chief_editor_report_id=CHIEF_REPORT_ID,
+    )
+    substituted = replace(required, review_policy_version="chapter-quality-v2")
+    cases = (
+        (downgraded, policy()),
+        (upgraded, policy(chief_editor_required=False)),
+        (substituted, policy()),
+    )
+    for state, trusted in cases:
+        with pytest.raises(ChapterProductionValidationError, match="trusted policy"):
+            state.finalize_revision_ready(
+                policy=trusted,
+                document_id=DOCUMENT_ID,
+                current_document_version_id=VERSION_1,
+                version_content_hash=HASH_1,
+                editor_report=binding(
+                    state, ChapterReviewStage.EDITOR, EDITOR_REPORT_ID
+                ),
+                chief_editor_report=(
+                    binding(state, ChapterReviewStage.CHIEF_EDITOR, CHIEF_REPORT_ID)
+                    if state.chief_editor_required
+                    else None
+                ),
+                lore_report=binding(state, ChapterReviewStage.LORE, LORE_REPORT_ID),
+            )
+
+
+def test_archive_capability_revalidates_trusted_policy_and_live_readiness() -> None:
+    ready = revision_ready()
+    with pytest.raises(ChapterProductionValidationError, match="trusted policy"):
+        ready.begin_archive_update(
+            policy=policy(review_policy_version="chapter-quality-v2"),
+            document_id=DOCUMENT_ID,
+            current_document_version_id=VERSION_1,
+            version_content_hash=HASH_1,
+            editor_report=binding(ready, ChapterReviewStage.EDITOR, EDITOR_REPORT_ID),
+            chief_editor_report=binding(
+                ready, ChapterReviewStage.CHIEF_EDITOR, CHIEF_REPORT_ID
+            ),
+            lore_report=binding(ready, ChapterReviewStage.LORE, LORE_REPORT_ID),
+        )
+    with pytest.raises(ChapterProductionValidationError, match="stale"):
+        ready.begin_archive_update(
+            policy=policy(),
+            document_id=DOCUMENT_ID,
+            current_document_version_id=VERSION_2,
+            version_content_hash=HASH_2,
+            editor_report=binding(ready, ChapterReviewStage.EDITOR, EDITOR_REPORT_ID),
+            chief_editor_report=binding(
+                ready, ChapterReviewStage.CHIEF_EDITOR, CHIEF_REPORT_ID
+            ),
+            lore_report=binding(ready, ChapterReviewStage.LORE, LORE_REPORT_ID),
+        )
+    assert begin_archive(ready).status is ChapterProductionStatus.ARCHIVE_UPDATE
 
 
 @pytest.mark.parametrize(
@@ -1245,7 +1364,7 @@ def test_committed_version_reconciliation_accepts_new_version_with_same_hash() -
     "state_factory",
     [
         pytest.param(revision_ready, id="ready"),
-        pytest.param(lambda: revision_ready().begin_archive_update(), id="archive"),
+        pytest.param(lambda: begin_archive(revision_ready()), id="archive"),
     ],
 )
 def test_finalized_failure_recovery_always_revalidates_locked_live_readiness(
@@ -1258,6 +1377,7 @@ def test_finalized_failure_recovery_always_revalidates_locked_live_readiness(
         restored.recover()
     with pytest.raises(ChapterProductionValidationError):
         restored.recover_finalized(
+            policy=policy(),
             document_id=DOCUMENT_ID,
             current_document_version_id=VERSION_2,
             version_content_hash=HASH_2,
@@ -1268,6 +1388,7 @@ def test_finalized_failure_recovery_always_revalidates_locked_live_readiness(
             lore_report=binding(restored, ChapterReviewStage.LORE, LORE_REPORT_ID),
         )
     recovered = restored.recover_finalized(
+        policy=policy(),
         document_id=DOCUMENT_ID,
         current_document_version_id=VERSION_1,
         version_content_hash=HASH_1,
@@ -1393,26 +1514,37 @@ def test_drafting_committed_reconciliation_rejects_nonexact_author_action(
 
 
 @pytest.mark.parametrize(
-    ("failure_code", "allowed"),
+    ("failure_code", "requires_reconciliation"),
     [
-        pytest.param(ChapterFailureCode.PROVIDER_UNAVAILABLE, True),
-        pytest.param(ChapterFailureCode.PROVIDER_TIMEOUT, True),
-        pytest.param(ChapterFailureCode.INVALID_PROVIDER_OUTPUT, True),
-        pytest.param(ChapterFailureCode.ARCHIVE_UNAVAILABLE, True),
-        pytest.param(ChapterFailureCode.DOCUMENT_COMMIT_INDETERMINATE, False),
-        pytest.param(ChapterFailureCode.PERSISTENCE_UNAVAILABLE, False),
-        pytest.param(ChapterFailureCode.RECONCILIATION_REQUIRED, False),
+        pytest.param(ChapterFailureCode.PROVIDER_UNAVAILABLE, False),
+        pytest.param(ChapterFailureCode.PROVIDER_TIMEOUT, False),
+        pytest.param(ChapterFailureCode.INVALID_PROVIDER_OUTPUT, False),
+        pytest.param(ChapterFailureCode.ARCHIVE_UNAVAILABLE, False),
+        pytest.param(ChapterFailureCode.DOCUMENT_COMMIT_INDETERMINATE, True),
+        pytest.param(ChapterFailureCode.PERSISTENCE_UNAVAILABLE, True),
+        pytest.param(ChapterFailureCode.RECONCILIATION_REQUIRED, True),
     ],
 )
 def test_initial_drafting_failure_contract_never_creates_an_unrecoverable_state(
-    failure_code: ChapterFailureCode, allowed: bool
+    failure_code: ChapterFailureCode, requires_reconciliation: bool
 ) -> None:
     state = initial()
-    if not allowed:
+    failed = state.fail(failure_code)
+    if requires_reconciliation:
         with pytest.raises(ChapterProductionValidationError):
-            state.fail(failure_code)
+            failed.recover()
+        restored = failed.reconcile_failure(
+            binding=failure_reconciliation(
+                failed,
+                ChapterFailureReconciliationOutcome.NO_WRITE_OR_PERSISTENCE_RESTORED,
+                document_id=None,
+                current_document_version_id=None,
+                current_content_hash=None,
+            )
+        )
+        assert restored == state
         return
-    assert state.fail(failure_code).recover() == state
+    assert failed.recover() == state
 
 
 @pytest.mark.parametrize(
@@ -1423,13 +1555,63 @@ def test_initial_drafting_failure_contract_never_creates_an_unrecoverable_state(
         ChapterFailureCode.RECONCILIATION_REQUIRED,
     ],
 )
-def test_checkpoint_cannot_inject_candidate_free_reconciliation_failure(
+def test_candidate_free_reconciliation_failure_checkpoint_round_trips_exactly(
     failure_code: ChapterFailureCode,
 ) -> None:
-    payload = initial().fail(ChapterFailureCode.PROVIDER_UNAVAILABLE).to_checkpoint()
-    payload["failure_code"] = failure_code.value
+    failed = initial().fail(failure_code)
+    assert ChapterProductionState.from_checkpoint(failed.to_checkpoint()) == failed
+
+
+@pytest.mark.parametrize(
+    "failure_code",
+    [
+        ChapterFailureCode.DOCUMENT_COMMIT_INDETERMINATE,
+        ChapterFailureCode.PERSISTENCE_UNAVAILABLE,
+        ChapterFailureCode.RECONCILIATION_REQUIRED,
+    ],
+)
+def test_candidate_free_first_commit_requires_exact_author_gate(
+    failure_code: ChapterFailureCode,
+) -> None:
+    failed = initial().fail(failure_code)
+    proof = failure_reconciliation(
+        failed,
+        ChapterFailureReconciliationOutcome.CANONICAL_VERSION_COMMITTED,
+        document_id=DOCUMENT_ID,
+        current_document_version_id=VERSION_1,
+        current_content_hash=HASH_1,
+    )
     with pytest.raises(ChapterProductionValidationError):
-        ChapterProductionState.from_checkpoint(payload)
+        failed.reconcile_failure(binding=proof)
+    reconciled = failed.reconcile_failure(
+        binding=proof,
+        action=action(ChapterActionKind.AUTHOR_REVISION),
+    )
+    assert reconciled.status is ChapterProductionStatus.AUTHOR_REVISION
+    assert reconciled.awaiting_user
+    assert reconciled.document_id == DOCUMENT_ID
+    assert reconciled.document_version_id == VERSION_1
+    assert reconciled.content_hash == HASH_1
+    assert reconciled.action_request_id == ACTION_ID
+
+
+def test_candidate_free_reconciliation_rejects_partial_or_false_no_write_proof() -> None:
+    failed = initial().fail(ChapterFailureCode.DOCUMENT_COMMIT_INDETERMINATE)
+    with pytest.raises(ChapterProductionValidationError):
+        failure_reconciliation(
+            failed,
+            ChapterFailureReconciliationOutcome.NO_WRITE_OR_PERSISTENCE_RESTORED,
+            document_id=DOCUMENT_ID,
+            current_document_version_id=None,
+            current_content_hash=None,
+        )
+    with pytest.raises(ChapterProductionValidationError):
+        failed.reconcile_failure(
+            binding=failure_reconciliation(
+                failed,
+                ChapterFailureReconciliationOutcome.NO_WRITE_OR_PERSISTENCE_RESTORED,
+            )
+        )
 
 
 @pytest.mark.parametrize(
@@ -1451,9 +1633,10 @@ def test_finalized_no_write_reconciliation_requires_complete_live_readiness(
         ChapterFailureReconciliationOutcome.NO_WRITE_OR_PERSISTENCE_RESTORED,
     )
     with pytest.raises(ChapterProductionValidationError):
-        restored.reconcile_failure(binding=proof)
+        restored.reconcile_failure(binding=proof, policy=policy())
     reconciled = restored.reconcile_failure(
         binding=proof,
+        policy=policy(),
         editor_report=binding(restored, ChapterReviewStage.EDITOR, EDITOR_REPORT_ID),
         chief_editor_report=binding(
             restored, ChapterReviewStage.CHIEF_EDITOR, CHIEF_REPORT_ID
@@ -1523,7 +1706,7 @@ def test_failed_checkpoint_retains_every_reference_required_by_its_recovery_targ
 def test_terminal_states_reject_every_stateful_operation() -> None:
     ready = revision_ready()
     terminals = (
-        ready.begin_archive_update().complete(),
+        begin_archive(ready).complete(),
         author_gate().resolve_action(
             action=action(ChapterActionKind.AUTHOR_REVISION),
             decision=ChapterActionDecision.CANCEL,
@@ -1538,7 +1721,7 @@ def test_terminal_states_reject_every_stateful_operation() -> None:
                 content_hash=HASH_2,
                 action=action(ChapterActionKind.AUTHOR_REVISION),
             ),
-            lambda: state.begin_archive_update(),
+            lambda: begin_archive(state),
             lambda: state.fail(ChapterFailureCode.PROVIDER_UNAVAILABLE),
             lambda: state.invalidate_for_new_version(
                 document_id=DOCUMENT_ID,
@@ -1552,7 +1735,7 @@ def test_terminal_states_reject_every_stateful_operation() -> None:
 
 def test_terminal_states_cannot_leave_through_any_public_transition() -> None:
     terminals = (
-        revision_ready().begin_archive_update().complete(),
+        begin_archive(revision_ready()).complete(),
         author_gate().resolve_action(
             action=action(ChapterActionKind.AUTHOR_REVISION),
             decision=ChapterActionDecision.CANCEL,
@@ -1584,12 +1767,13 @@ def test_terminal_states_cannot_leave_through_any_public_transition() -> None:
                 document_version_id=VERSION_2,
                 content_hash=HASH_2,
             ),
-            lambda: state.begin_archive_update(),
+            lambda: begin_archive(state),
             lambda: state.complete(),
             lambda: state.fail(ChapterFailureCode.PROVIDER_UNAVAILABLE),
             lambda: state.recover(),
-            lambda: state.finalize_revision_ready(
-                document_id=DOCUMENT_ID,
+                lambda: state.finalize_revision_ready(
+                    policy=policy(),
+                    document_id=DOCUMENT_ID,
                 current_document_version_id=VERSION_1,
                 version_content_hash=HASH_1,
                 editor_report=binding(
@@ -1728,18 +1912,18 @@ def test_every_non_finalized_checkpoint_round_trips_exactly(
     "state_factory",
     [
         pytest.param(revision_ready, id="ready"),
-        pytest.param(lambda: revision_ready().begin_archive_update(), id="archive"),
+        pytest.param(lambda: begin_archive(revision_ready()), id="archive"),
         pytest.param(
-            lambda: revision_ready().begin_archive_update().complete(), id="completed"
+            lambda: begin_archive(revision_ready()).complete(), id="completed"
         ),
         pytest.param(
             lambda: revision_ready().fail(ChapterFailureCode.ARCHIVE_UNAVAILABLE),
             id="failed-from-ready",
         ),
         pytest.param(
-            lambda: revision_ready()
-            .begin_archive_update()
-            .fail(ChapterFailureCode.ARCHIVE_UNAVAILABLE),
+            lambda: begin_archive(revision_ready()).fail(
+                ChapterFailureCode.ARCHIVE_UNAVAILABLE
+            ),
             id="failed-from-archive",
         ),
     ],
@@ -1753,6 +1937,65 @@ def test_finalized_checkpoint_requires_live_restore_and_round_trips_exactly(
     restored = restore_finalized_checkpoint(state)
     assert restored == state
     assert restored.to_checkpoint() == state.to_checkpoint()
+
+
+def test_ready_restore_rejects_validly_shaped_forged_policy_claims() -> None:
+    required = revision_ready()
+    optional = revision_ready(chief_required=False)
+    cases = []
+    downgraded = required.to_checkpoint()
+    downgraded["chief_editor_required"] = False
+    downgraded["chief_editor_report_id"] = None
+    cases.append((downgraded, required, policy()))
+    upgraded = optional.to_checkpoint()
+    upgraded["chief_editor_required"] = True
+    upgraded["chief_editor_report_id"] = CHIEF_REPORT_ID
+    cases.append((upgraded, optional, policy(chief_editor_required=False)))
+    substituted = required.to_checkpoint()
+    substituted["review_policy_version"] = "chapter-quality-v2"
+    cases.append((substituted, required, policy()))
+
+    for payload, live_state, trusted in cases:
+        with pytest.raises(ChapterProductionValidationError, match="trusted policy"):
+            ChapterProductionState.from_revision_ready_checkpoint(
+                payload,
+                **finalized_restore_kwargs(live_state, trusted_policy=trusted),
+            )
+
+
+@pytest.mark.parametrize(
+    "state_factory",
+    [
+        pytest.param(lambda: begin_archive(revision_ready()), id="archive"),
+        pytest.param(
+            lambda: begin_archive(revision_ready()).complete(), id="completed"
+        ),
+        pytest.param(
+            lambda: revision_ready().fail(ChapterFailureCode.ARCHIVE_UNAVAILABLE),
+            id="failed-from-ready",
+        ),
+        pytest.param(
+            lambda: begin_archive(revision_ready()).fail(
+                ChapterFailureCode.ARCHIVE_UNAVAILABLE
+            ),
+            id="failed-from-archive",
+        ),
+    ],
+)
+def test_revision_ready_restore_rejects_every_non_ready_finalized_status(
+    state_factory: object,
+) -> None:
+    state = state_factory()  # type: ignore[operator]
+    with pytest.raises(ChapterProductionValidationError, match="exact revision-ready"):
+        ChapterProductionState.from_revision_ready_checkpoint(
+            state.to_checkpoint(), **finalized_restore_kwargs(state)
+        )
+    assert (
+        ChapterProductionState.from_finalized_checkpoint(
+            state.to_checkpoint(), **finalized_restore_kwargs(state)
+        )
+        == state
+    )
 
 
 @pytest.mark.parametrize(
@@ -1955,7 +2198,7 @@ def test_accept_warning_advances_each_review_stage_only_to_its_legal_successor(
         pytest.param(lambda: review_gate(ChapterReviewStage.LORE), id="lore"),
         pytest.param(lore_pre_ready, id="lore-report-complete"),
         pytest.param(revision_ready, id="ready"),
-        pytest.param(lambda: revision_ready().begin_archive_update(), id="archive"),
+        pytest.param(lambda: begin_archive(revision_ready()), id="archive"),
     ],
 )
 def test_every_allowed_new_version_source_invalidates_all_review_readiness(
@@ -2001,7 +2244,7 @@ def test_every_allowed_new_version_source_invalidates_all_review_readiness(
             id="cancelled",
         ),
         pytest.param(
-            lambda: revision_ready().begin_archive_update().complete(), id="completed"
+            lambda: begin_archive(revision_ready()).complete(), id="completed"
         ),
     ],
 )
@@ -2035,7 +2278,7 @@ def test_disallowed_new_version_sources_fail_closed(state_factory: object) -> No
         pytest.param(lambda: review_gate(ChapterReviewStage.LORE), id="lore"),
         pytest.param(lore_pre_ready, id="lore-report-complete"),
         pytest.param(revision_ready, id="ready"),
-        pytest.param(lambda: revision_ready().begin_archive_update(), id="archive"),
+        pytest.param(lambda: begin_archive(revision_ready()), id="archive"),
     ],
 )
 def test_every_failure_eligible_nonterminal_state_recovers_exactly(
@@ -2060,6 +2303,7 @@ def test_every_failure_eligible_nonterminal_state_recovers_exactly(
         with pytest.raises(ChapterProductionValidationError):
             restored_failed.recover()
         recovered = restored_failed.recover_finalized(
+            policy=policy(),
             document_id=DOCUMENT_ID,
             current_document_version_id=VERSION_1,
             version_content_hash=HASH_1,
@@ -2129,6 +2373,7 @@ def test_checkpoint_round_trip_is_exact_versioned_and_content_free() -> None:
         ChapterProductionState.from_checkpoint(payload)
     assert ChapterProductionState.from_revision_ready_checkpoint(
         payload,
+        policy=policy(),
         workflow_run_id=RUN_ID,
         chapter_id=CHAPTER_ID,
         run_workflow_type="chapter_production",
