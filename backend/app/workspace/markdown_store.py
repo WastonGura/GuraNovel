@@ -35,6 +35,42 @@ class MarkdownStore:
         finally:
             os.close(parent_descriptor)
 
+    def read_bounded(self, relative_path: str, *, max_bytes: int) -> str:
+        """Read one regular UTF-8 file without blocking or exceeding ``max_bytes``."""
+
+        if type(max_bytes) is not int or max_bytes < 0:
+            raise ValueError("invalid read bound")
+        parent_parts, filename = self._parent_and_filename(relative_path)
+        parent_descriptor = self._open_existing_workspace_directory(parent_parts)
+        descriptor: int | None = None
+        try:
+            descriptor = os.open(
+                filename,
+                os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK,
+                dir_fd=parent_descriptor,
+            )
+            file_status = os.fstat(descriptor)
+            if not stat.S_ISREG(file_status.st_mode) or file_status.st_size > max_bytes:
+                raise OSError("document snapshot is not a bounded regular file")
+            chunks: list[bytes] = []
+            remaining = max_bytes + 1
+            while remaining:
+                chunk = os.read(descriptor, min(64 * 1024, remaining))
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                remaining -= len(chunk)
+            payload = b"".join(chunks)
+            if len(payload) > max_bytes:
+                raise OSError("document snapshot exceeds the read bound")
+            return payload.decode("utf-8", errors="strict")
+        finally:
+            try:
+                if descriptor is not None:
+                    os.close(descriptor)
+            finally:
+                os.close(parent_descriptor)
+
     def write(self, relative_path: str, content: str) -> None:
         parent_parts, filename = self._parent_and_filename(relative_path)
         normalized_content = content.replace("\r\n", "\n").replace("\r", "\n")
@@ -76,9 +112,7 @@ class MarkdownStore:
             return False
         try:
             try:
-                document_status = os.stat(
-                    filename, dir_fd=parent_descriptor, follow_symlinks=False
-                )
+                document_status = os.stat(filename, dir_fd=parent_descriptor, follow_symlinks=False)
             except (FileNotFoundError, NotADirectoryError):
                 return False
             return stat.S_ISREG(document_status.st_mode)
