@@ -80,6 +80,7 @@ class AgentProfile(_StrictProfileModel):
         "worldbuilding_agent",
         "writer_agent",
         "revision_agent",
+        "editor_agent",
     ]
     mode: (
         Literal[
@@ -91,6 +92,7 @@ class AgentProfile(_StrictProfileModel):
             "segment_draft",
             "user_feedback_revision",
             "review_driven_revision",
+            "chapter_final",
         ]
         | None
     ) = Field(default=None, exclude=True)
@@ -105,6 +107,7 @@ class AgentProfile(_StrictProfileModel):
         "worldbuilding_agent",
         "writer_agent",
         "revision_agent",
+        "editor_agent",
     ]
     model: ModelProfile
     permissions: PermissionsProfile
@@ -119,6 +122,7 @@ class AgentProfile(_StrictProfileModel):
         "apply_change_output",
         "consistency_review_output",
         "candidate_chapter_output",
+        "chapter_review_report",
     ]
 
     @field_validator("version")
@@ -171,6 +175,105 @@ class ProfileRegistry:
             frozenset({"pitch/concept_options.md"}),
             frozenset(),
             frozenset({"pitch/selected_concept.md"}),
+        ),
+        ("editor_agent", None): _ProfileManifest(
+            "editor_review.yaml",
+            "editor_agent",
+            "chapter_review_report",
+            frozenset({"target_chapter", "approved_outline", "editor_context"}),
+            frozenset(),
+            frozenset(
+                {
+                    "network",
+                    "credentials",
+                    "filesystem",
+                    "database",
+                    "orm",
+                    "document_service",
+                    "document_versions",
+                    "revise_chapter",
+                    "approve_actions",
+                    "resolve_actions",
+                    "workflow_transitions",
+                }
+            ),
+            frozenset(
+                {
+                    "project_id",
+                    "chapter_id",
+                    "workflow_run_id",
+                    "target",
+                    "approved_outline",
+                    "contexts",
+                }
+            ),
+            frozenset(),
+        ),
+        ("chief_editor", "chapter_final"): _ProfileManifest(
+            "chief_editor_chapter_final.yaml",
+            "chief_editor_agent",
+            "chapter_review_report",
+            frozenset({"target_chapter", "approved_outline", "chief_editor_context"}),
+            frozenset(),
+            frozenset(
+                {
+                    "network",
+                    "credentials",
+                    "filesystem",
+                    "database",
+                    "orm",
+                    "document_service",
+                    "document_versions",
+                    "revise_chapter",
+                    "approve_actions",
+                    "resolve_actions",
+                    "workflow_transitions",
+                }
+            ),
+            frozenset(
+                {
+                    "project_id",
+                    "chapter_id",
+                    "workflow_run_id",
+                    "target",
+                    "approved_outline",
+                    "contexts",
+                }
+            ),
+            frozenset(),
+        ),
+        ("lore_agent", "chapter_final"): _ProfileManifest(
+            "lore_chapter_final.yaml",
+            "lore_agent",
+            "chapter_review_report",
+            frozenset({"target_chapter", "approved_outline", "lore_context"}),
+            frozenset(),
+            frozenset(
+                {
+                    "network",
+                    "credentials",
+                    "filesystem",
+                    "database",
+                    "orm",
+                    "document_service",
+                    "document_versions",
+                    "revise_chapter",
+                    "approve_actions",
+                    "resolve_actions",
+                    "workflow_transitions",
+                }
+            ),
+            frozenset(
+                {
+                    "project_id",
+                    "chapter_id",
+                    "workflow_run_id",
+                    "target",
+                    "approved_outline",
+                    "contexts",
+                }
+            ),
+            frozenset(),
         ),
         ("lore_agent", "maintenance_impact"): _ProfileManifest(
             "lore_maintenance_impact.yaml",
