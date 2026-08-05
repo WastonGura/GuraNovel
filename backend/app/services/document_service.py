@@ -13,7 +13,15 @@ from sqlalchemy.orm import selectinload
 
 from app.core.errors import AppError, ConflictError, NotFoundError
 from app.core.logging import log_event
-from app.models import Document, DocumentSource, DocumentType, DocumentVersion, Project
+from app.documents.chapter_segments import (
+    CURRENT_CHAPTER_SEGMENTER_VERSION,
+    MAX_CHAPTER_CONTENT_BYTES,
+    ChapterSegmentMap,
+    derive_chapter_segment_map,
+    normalize_chapter_content,
+    validate_segment_map_evidence_integrity,
+)
+from app.models import Chapter, Document, DocumentSource, DocumentType, DocumentVersion, Project
 from app.workspace.hashing import sha256_content
 from app.workspace.markdown_store import MarkdownStore
 from app.workspace.paths import version_snapshot_path, workspace_path_parts
@@ -39,6 +47,14 @@ class DocumentCommitIndeterminateError(AppError):
     status_code = 500
     code = "document_commit_indeterminate"
     default_message = "The document save outcome could not be confirmed. Reconciliation is required before retrying."
+
+
+class ChapterSegmentSnapshotMismatchError(AppError):
+    """Raised when an immutable snapshot no longer matches its database identity."""
+
+    status_code = 500
+    code = "chapter_segment_snapshot_mismatch"
+    default_message = "The chapter snapshot could not be verified."
 
 
 @dataclass(frozen=True)
@@ -290,6 +306,106 @@ class DocumentService:
         if version is None:
             raise NotFoundError("Document version not found.")
         return self._store_for(document).read(self._snapshot_path(version))
+
+    async def derive_chapter_segment_map(
+        self,
+        *,
+        project_id: UUID,
+        chapter_id: UUID,
+        document_id: UUID,
+        version_id: UUID,
+        segmenter_version: str = CURRENT_CHAPTER_SEGMENTER_VERSION,
+    ) -> ChapterSegmentMap:
+        """Derive locators from one exact, verified historical chapter snapshot."""
+
+        if any(
+            type(value) is not UUID or value.int == 0
+            for value in (project_id, chapter_id, document_id, version_id)
+        ):
+            raise NotFoundError("Chapter document version not found.")
+        document = await self.session.scalar(
+            select(Document)
+            .join(Chapter, Chapter.id == Document.chapter_id)
+            .options(selectinload(Document.project))
+            .where(
+                Document.id == document_id,
+                Document.project_id == project_id,
+                Document.chapter_id == chapter_id,
+                Document.type.in_(
+                    (DocumentType.CHAPTER_DRAFT.value, DocumentType.CHAPTER_FINAL.value)
+                ),
+                Chapter.project_id == project_id,
+            )
+        )
+        if document is None:
+            raise NotFoundError("Chapter document version not found.")
+        version = await self.session.scalar(
+            select(DocumentVersion).where(
+                DocumentVersion.id == version_id,
+                DocumentVersion.document_id == document_id,
+            )
+        )
+        if version is None:
+            raise NotFoundError("Chapter document version not found.")
+        if (
+            type(version.byte_size) is not int
+            or version.byte_size < 0
+            or version.byte_size > MAX_CHAPTER_CONTENT_BYTES
+        ):
+            raise ChapterSegmentSnapshotMismatchError() from None
+        snapshot_error = False
+        try:
+            snapshot_content = self._store_for(document).read_bounded(
+                self._snapshot_path(version), max_bytes=MAX_CHAPTER_CONTENT_BYTES
+            )
+            normalized_content = normalize_chapter_content(snapshot_content)
+        except Exception:
+            snapshot_error = True
+            normalized_content = ""
+        if snapshot_error:
+            raise ChapterSegmentSnapshotMismatchError() from None
+        if (
+            sha256_content(normalized_content) != version.content_hash
+            or len(normalized_content.encode("utf-8")) != version.byte_size
+        ):
+            raise ChapterSegmentSnapshotMismatchError() from None
+        return derive_chapter_segment_map(
+            project_id=project_id,
+            chapter_id=chapter_id,
+            document_id=document_id,
+            version_id=version_id,
+            content=normalized_content,
+            segmenter_version=segmenter_version,
+        )
+
+    async def validate_chapter_evidence_segment_ids(
+        self,
+        *,
+        project_id: UUID,
+        chapter_id: UUID,
+        document_id: UUID,
+        version_id: UUID,
+        segmenter_version: str,
+        segment_ids: Sequence[UUID],
+    ) -> tuple[UUID, ...]:
+        """Authoritatively validate evidence against a freshly derived exact snapshot."""
+
+        segment_map = await self.derive_chapter_segment_map(
+            project_id=project_id,
+            chapter_id=chapter_id,
+            document_id=document_id,
+            version_id=version_id,
+            segmenter_version=segmenter_version,
+        )
+        return validate_segment_map_evidence_integrity(
+            segment_map,
+            project_id=project_id,
+            chapter_id=chapter_id,
+            document_id=document_id,
+            version_id=version_id,
+            segmenter_version=segmenter_version,
+            segment_ids=segment_ids,
+        )
 
     async def _append_version(
         self,

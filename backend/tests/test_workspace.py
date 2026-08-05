@@ -27,6 +27,37 @@ def test_write_read_and_exists_for_nested_markdown_path(tmp_path: Path) -> None:
     assert list(document.parent.glob(".tmp-*")) == []
 
 
+def test_read_bounded_accepts_exact_regular_utf8_and_rejects_oversize(tmp_path: Path) -> None:
+    store = MarkdownStore(tmp_path)
+    store.write("chapter.md", "界")
+
+    assert store.read_bounded("chapter.md", max_bytes=3) == "界"
+    with pytest.raises(OSError):
+        store.read_bounded("chapter.md", max_bytes=2)
+
+
+def test_read_bounded_attempts_parent_close_when_file_descriptor_close_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = MarkdownStore(tmp_path)
+    store.write("chapter.md", "safe")
+    original_close = os.close
+    closed: list[int] = []
+
+    def close_then_fail_first(descriptor: int) -> None:
+        closed.append(descriptor)
+        original_close(descriptor)
+        if len(closed) == 1:
+            raise OSError("file descriptor close failed")
+
+    monkeypatch.setattr(os, "close", close_then_fail_first)
+
+    with pytest.raises(OSError, match="file descriptor close failed"):
+        store.read_bounded("chapter.md", max_bytes=4)
+
+    assert len(closed) == 2
+
+
 def test_read_and_exists_do_not_use_pathname_helpers(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -55,7 +86,9 @@ def test_read_and_exists_do_not_follow_final_symlinks(tmp_path: Path) -> None:
     assert store.exists("chapter.md") is False
 
 
-@pytest.mark.parametrize("relative_path", ["/tmp/document.md", "../document.md", "draft/../../x.md"])
+@pytest.mark.parametrize(
+    "relative_path", ["/tmp/document.md", "../document.md", "draft/../../x.md"]
+)
 def test_resolve_workspace_path_rejects_absolute_and_traversal_paths(
     tmp_path: Path, relative_path: str
 ) -> None:
@@ -135,16 +168,17 @@ def test_write_replaces_using_open_parent_directory_descriptor(
         dst_dir_fd: int | None = None,
     ) -> None:
         replace_calls.append((src_dir_fd, dst_dir_fd))
-        original_replace(
-            source, destination, src_dir_fd=src_dir_fd, dst_dir_fd=dst_dir_fd
-        )
+        original_replace(source, destination, src_dir_fd=src_dir_fd, dst_dir_fd=dst_dir_fd)
 
     monkeypatch.setattr("app.workspace.markdown_store.os.replace", track_replace)
 
     store.write("drafts/chapter.md", "safe")
 
     assert replace_calls
-    assert all(source_fd is not None and destination_fd is not None for source_fd, destination_fd in replace_calls)
+    assert all(
+        source_fd is not None and destination_fd is not None
+        for source_fd, destination_fd in replace_calls
+    )
     assert (tmp_path / "drafts" / "chapter.md").read_text() == "safe"
 
 
@@ -235,7 +269,10 @@ def test_write_fsyncs_containing_directory_after_replace(
 
 
 def test_sha256_content_hash_is_deterministic() -> None:
-    assert sha256_content("Gura\n") == "8c56dd52dd78b3b4722a9acbf201e24c108423d861b5b6114770bea0d76c875f"
+    assert (
+        sha256_content("Gura\n")
+        == "8c56dd52dd78b3b4722a9acbf201e24c108423d861b5b6114770bea0d76c875f"
+    )
 
 
 def test_word_count_counts_whitespace_delimited_tokens() -> None:

@@ -1,6 +1,6 @@
 """Application service boundaries."""
 
-from app.services.document_service import DocumentService
+from app.services.document_service import ChapterSegmentSnapshotMismatchError, DocumentService
 from app.services.chapter_service import ChapterService
 from app.services.chapter_production_service import (
     ChapterProductionCommitIndeterminateError,
@@ -38,6 +38,7 @@ from app.services.project_maintenance_service import (
 
 __all__ = [
     "DocumentService",
+    "ChapterSegmentSnapshotMismatchError",
     "ChapterService",
     "ChapterProductionCommitIndeterminateError",
     "ChapterProductionRunRead",
