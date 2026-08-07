@@ -9,6 +9,15 @@ from app.services.chapter_production_service import (
     ChapterProductionService,
     ChapterProductionStarted,
 )
+from app.services.chapter_production_v2_service import (
+    ChapterProductionV2CommitIndeterminateError,
+    ChapterProductionV2ProviderError,
+    ChapterProductionV2ReconciliationError,
+    ChapterProductionV2Service,
+    ChapterProductionV2Started,
+    ChapterProductionV2Updated,
+    ChapterProductionV2ValidationError,
+)
 from app.services.project_service import (
     ProjectCommitIndeterminateError,
     ProjectService,
@@ -45,6 +54,13 @@ __all__ = [
     "ChapterProductionResolved",
     "ChapterProductionService",
     "ChapterProductionStarted",
+    "ChapterProductionV2CommitIndeterminateError",
+    "ChapterProductionV2ProviderError",
+    "ChapterProductionV2ReconciliationError",
+    "ChapterProductionV2Service",
+    "ChapterProductionV2Started",
+    "ChapterProductionV2Updated",
+    "ChapterProductionV2ValidationError",
     "ProjectCommitIndeterminateError",
     "ProjectService",
     "ProjectWorkspaceCleanupError",
