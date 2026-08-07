@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
+import re
 from uuid import UUID
 
 from sqlalchemy import func, select, text
@@ -57,6 +58,25 @@ class ChapterSegmentSnapshotMismatchError(AppError):
     default_message = "The chapter snapshot could not be verified."
 
 
+class DocumentVersionMetadataError(AppError):
+    """Raised when a caller tries to persist non-mechanical version metadata."""
+
+    code = "document_version_metadata_invalid"
+    default_message = "Document version metadata is invalid."
+
+
+_CONTRACT_VERSION_RE = re.compile(r"[a-z0-9][a-z0-9._-]{0,63}\Z")
+_OPERATION_KEY_RE = re.compile(r"[0-9a-f]{64}\Z")
+
+
+def _is_canonical_nonzero_uuid(value: str) -> bool:
+    try:
+        parsed = UUID(value)
+    except (AttributeError, TypeError, ValueError):
+        return False
+    return parsed.int != 0 and str(parsed) == value
+
+
 @dataclass(frozen=True)
 class _FileBackup:
     path: str
@@ -91,7 +111,9 @@ class DocumentService:
         agent_role: str | None = None,
         workflow_run_id: UUID | None = None,
         change_summary: str | None = None,
+        version_metadata: dict[str, object] | None = None,
     ) -> Document:
+        version_metadata = self._validated_version_metadata(version_metadata)
         self._ensure_document_path_is_not_reserved(path)
         project = await self.session.get(Project, project_id)
         if project is None:
@@ -127,6 +149,7 @@ class DocumentService:
             agent_role=agent_role,
             workflow_run_id=workflow_run_id,
             change_summary=change_summary,
+            version_metadata=version_metadata,
         )
         document.current_version = version
         self.session.add(version)
@@ -141,6 +164,9 @@ class DocumentService:
         self, **kwargs
     ) -> tuple[Document, tuple[str, str], tuple[str, str]]:
         """Stage a create in the caller's transaction; deliberately does not commit."""
+        kwargs["version_metadata"] = self._validated_version_metadata(
+            kwargs.get("version_metadata")
+        )
         project_id = kwargs["project_id"]
         path = kwargs["path"]
         content = kwargs["content"]
@@ -176,6 +202,7 @@ class DocumentService:
             agent_role=kwargs.get("agent_role"),
             workflow_run_id=kwargs.get("workflow_run_id"),
             change_summary=kwargs.get("change_summary"),
+            version_metadata=kwargs.get("version_metadata"),
         )
         document.current_version = version
         self.session.add(version)
@@ -186,6 +213,9 @@ class DocumentService:
         self, **kwargs
     ) -> tuple[DocumentVersion, tuple[str, str], tuple[str, str]]:
         """Stage a version in the caller's transaction; deliberately does not commit."""
+        kwargs["version_metadata"] = self._validated_version_metadata(
+            kwargs.get("version_metadata")
+        )
         document = await self._locked_document(kwargs["document_id"])
         self._ensure_expected_current_version(document, kwargs["expected_current_version_id"])
         content = kwargs["content"]
@@ -199,6 +229,7 @@ class DocumentService:
             agent_role=kwargs.get("agent_role"),
             workflow_run_id=kwargs.get("workflow_run_id"),
             change_summary=kwargs.get("change_summary"),
+            version_metadata=kwargs.get("version_metadata"),
         )
         document.current_version = version
         self.session.add(version)
@@ -225,7 +256,9 @@ class DocumentService:
         agent_role: str | None = None,
         workflow_run_id: UUID | None = None,
         change_summary: str | None = None,
+        version_metadata: dict[str, object] | None = None,
     ) -> DocumentVersion:
+        version_metadata = self._validated_version_metadata(version_metadata)
         document = await self._locked_document(document_id)
         self._ensure_expected_current_version(document, expected_current_version_id)
         version = self._new_version(
@@ -238,6 +271,7 @@ class DocumentService:
             agent_role=agent_role,
             workflow_run_id=workflow_run_id,
             change_summary=change_summary,
+            version_metadata=version_metadata,
         )
         document.current_version = version
         self.session.add(version)
@@ -258,7 +292,9 @@ class DocumentService:
         agent_role: str | None = None,
         workflow_run_id: UUID | None = None,
         change_summary: str | None = None,
+        version_metadata: dict[str, object] | None = None,
     ) -> DocumentVersion:
+        version_metadata = self._validated_version_metadata(version_metadata)
         document = await self._locked_document(document_id)
         self._ensure_expected_current_version(document, expected_current_version_id)
         target = await self.session.scalar(
@@ -277,6 +313,7 @@ class DocumentService:
             agent_role=agent_role,
             workflow_run_id=workflow_run_id,
             change_summary=change_summary,
+            version_metadata=version_metadata,
         )
         log_event(
             "document_restored",
@@ -318,10 +355,56 @@ class DocumentService:
     ) -> ChapterSegmentMap:
         """Derive locators from one exact, verified historical chapter snapshot."""
 
-        if any(
-            type(value) is not UUID or value.int == 0
-            for value in (project_id, chapter_id, document_id, version_id)
-        ):
+        return await self._derive_chapter_segment_map_for_types(
+            project_id=project_id,
+            chapter_id=chapter_id,
+            document_id=document_id,
+            version_id=version_id,
+            segmenter_version=segmenter_version,
+            document_types=(DocumentType.CHAPTER_DRAFT, DocumentType.CHAPTER_FINAL),
+        )
+
+    async def derive_chapter_production_segment_map(
+        self,
+        *,
+        project_id: UUID,
+        chapter_id: UUID,
+        document_id: UUID,
+        version_id: UUID,
+        segmenter_version: str = CURRENT_CHAPTER_SEGMENTER_VERSION,
+    ) -> ChapterSegmentMap:
+        """Verify and derive a production-owned outline or draft snapshot."""
+
+        return await self._derive_chapter_segment_map_for_types(
+            project_id=project_id,
+            chapter_id=chapter_id,
+            document_id=document_id,
+            version_id=version_id,
+            segmenter_version=segmenter_version,
+            document_types=(
+                DocumentType.CHAPTER_SELECTED_OUTLINE,
+                DocumentType.CHAPTER_OUTLINE_OPTIONS,
+                DocumentType.CHAPTER_DRAFT,
+            ),
+        )
+
+    async def _derive_chapter_segment_map_for_types(
+        self,
+        *,
+        project_id: UUID,
+        chapter_id: UUID,
+        document_id: UUID,
+        version_id: UUID,
+        segmenter_version: str,
+        document_types: Sequence[DocumentType],
+    ) -> ChapterSegmentMap:
+        try:
+            project_id, chapter_id, document_id, version_id = (
+                UUID(str(value)) for value in (project_id, chapter_id, document_id, version_id)
+            )
+        except (AttributeError, TypeError, ValueError):
+            raise NotFoundError("Chapter document version not found.") from None
+        if any(value.int == 0 for value in (project_id, chapter_id, document_id, version_id)):
             raise NotFoundError("Chapter document version not found.")
         document = await self.session.scalar(
             select(Document)
@@ -331,9 +414,7 @@ class DocumentService:
                 Document.id == document_id,
                 Document.project_id == project_id,
                 Document.chapter_id == chapter_id,
-                Document.type.in_(
-                    (DocumentType.CHAPTER_DRAFT.value, DocumentType.CHAPTER_FINAL.value)
-                ),
+                Document.type.in_(tuple(item.value for item in document_types)),
                 Chapter.project_id == project_id,
             )
         )
@@ -417,6 +498,7 @@ class DocumentService:
         agent_role: str | None,
         workflow_run_id: UUID | None,
         change_summary: str | None,
+        version_metadata: dict[str, object] | None = None,
     ) -> DocumentVersion:
         version = self._new_version(
             document=document,
@@ -428,6 +510,7 @@ class DocumentService:
             agent_role=agent_role,
             workflow_run_id=workflow_run_id,
             change_summary=change_summary,
+            version_metadata=version_metadata,
         )
         document.current_version = version
         self.session.add(version)
@@ -496,6 +579,7 @@ class DocumentService:
         agent_role: str | None,
         workflow_run_id: UUID | None,
         change_summary: str | None,
+        version_metadata: dict[str, object] | None = None,
     ) -> DocumentVersion:
         normalized_content = _normalize_content(content)
         snapshot = version_snapshot_path(str(document.id), version_number).as_posix()
@@ -513,7 +597,36 @@ class DocumentService:
             file_path=document.path,
             snapshot_path=snapshot,
             change_summary=change_summary,
+            metadata_=dict(version_metadata or {}),
         )
+
+    @staticmethod
+    def _validated_version_metadata(
+        metadata: dict[str, object] | None,
+    ) -> dict[str, object]:
+        if metadata is None:
+            return {}
+        if (
+            type(metadata) is not dict
+            or set(metadata)
+            not in (
+                {"contract_version", "operation_key"},
+                {"contract_version", "operation_key", "attempt_id"},
+            )
+            or type(metadata.get("contract_version")) is not str
+            or _CONTRACT_VERSION_RE.fullmatch(metadata["contract_version"]) is None
+            or type(metadata.get("operation_key")) is not str
+            or _OPERATION_KEY_RE.fullmatch(metadata["operation_key"]) is None
+            or (
+                "attempt_id" in metadata
+                and (
+                    type(metadata["attempt_id"]) is not str
+                    or not _is_canonical_nonzero_uuid(metadata["attempt_id"])
+                )
+            )
+        ):
+            raise DocumentVersionMetadataError() from None
+        return dict(metadata)
 
     @staticmethod
     def _store_for(document: Document) -> MarkdownStore:
