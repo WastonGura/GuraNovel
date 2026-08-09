@@ -62,6 +62,392 @@ The target pipeline is human-led and version-bound:
    full prompts, credentials, provider responses, or complete reports in workflow events or
    checkpoints.
 
+## LangGraph scheduling boundary (target contract, v0.9)
+
+PostgreSQL is the sole business source of truth for Chapter Production V2. `WorkflowRun`,
+`WorkflowCheckpoint`, `ActionRequest`, `ReviewReport`, `Document`, and `DocumentVersion` retain their
+existing authority, and `DocumentService` remains the exclusive canonical document writer.
+LangGraph is only the node/edge scheduler: it selects the next typed node from a bounded mechanical
+cursor and returns a typed routing outcome. It does not authorize a transition, resolve an action,
+approve a report, select a current document version, or make an artifact durable.
+
+Every graph invocation uses `thread_id = workflow_run_id`. The server chooses the graph definition
+through a server-owned `graph_id` and `graph_version`; clients, providers, persisted model output,
+and arbitrary graph state cannot select or upgrade either value. An unknown graph identity, version,
+node, edge, state key, or outcome fails closed before a domain mutation or provider call. A deployed
+graph version is immutable. Compatibility code may reconstruct a run with an explicitly supported
+older graph version, but it must never reinterpret that run as the current version.
+
+LangGraph execution state is an optimization, not a durable domain record. A LangGraph cursor or
+checkpoint may be corrupted, unavailable, or discarded in full. The scheduler must then be
+reconstructed from PostgreSQL by locking and validating the exact run, current workflow checkpoint,
+pending action, version-bound reports, canonical document, and current document version. The
+reconstruction reads the six authoritative model families above and derives the next legal node;
+it does not copy their payloads into graph state. A LangGraph checkpoint must never become a second business truth,
+and no recovery path may choose it over conflicting PostgreSQL state.
+
+Reconstruction applies each domain contract's exact 0, 1, or N cardinality rules under fresh locks.
+It accepts one row or one bound row set only when that contract permits it. Zero is either a valid
+not-yet-created state or corruption according to the current transition; N greater than one is never
+silently reduced to a winner. An orphan, mismatch, duplicate, malformed, or cross-scoped record is
+not routing guidance. The scheduler must not guess, fill a gap, select the newest row, or use a graph
+cursor to repair PostgreSQL; it returns reconciliation-required before mutation or provider setup.
+
+The existing PostgreSQL `WorkflowCheckpoint` is not a generic LangGraph checkpoint. It remains a
+bounded, domain-owned record of a committed workflow transition. A LangGraph checkpointer, if one is
+configured, stores only the disposable allowlist below. It may point at a committed PostgreSQL
+checkpoint but cannot create one, fill a missing domain transition, or prove that an action, report,
+version, readiness marker, or final document exists. Deleting the generic graph checkpoint must not
+lose a user decision, provider claim, review, version, event, or finalization fact.
+
+### PostgreSQL-authoritative runtime pin
+
+Every new Chapter Production V2 run pins its scheduler contract under
+`WorkflowRun.metadata.chapter_production_runtime`. The server-owned namespace has exactly these three keys:
+
+| Field | Contract |
+| --- | --- |
+| `scheduler_kind` | Closed enum: `service_v2` or `langgraph`. |
+| `graph_id` | Server-owned definition ID; `service_v2_legacy` for the service scheduler. |
+| `graph_version` | Server-owned immutable version; `legacy` for the service scheduler. |
+
+The server validates the exact shape and writes the pinned tuple in the same transaction that creates the run,
+its initial domain checkpoint, and other required initial state. Extra, missing, client-selected, or
+malformed namespace keys fail closed. A live run may be invoked only by the exact pinned tuple; any change to the pinned tuple,
+including a partial edit or a supported-but-different version, is reconciliation-required rather
+than an upgrade or fallback.
+
+Historical V2 runs with a missing namespace are bound to the service_v2 legacy contract, interpreted
+as `(service_v2, service_v2_legacy, legacy)` without rewriting the row. They must never be auto-upgraded,
+backfilled during ordinary execution, or routed through LangGraph. A graph checkpoint may copy the
+validated tuple as disposable routing data, but a graph checkpoint cannot create, own, or modify the runtime pin.
+PostgreSQL reconstruction always reloads the namespace and compares it with server composition.
+The strict-shape parser, legacy interpretation, and transactional pin creation belong to a dedicated
+P0 schema-and-compatibility Issue that must be completed before #149 begins. #149 consumes that
+boundary and only composes the graph; it does not introduce or reinterpret runtime identity.
+
+### Exact content-free graph state allowlist
+
+The graph state schema is closed. Its complete top-level allowlist is:
+
+| Field | Type and meaning |
+| --- | --- |
+| `workflow_run_id` | UUID reference used as the LangGraph thread ID and PostgreSQL reconstruction key. |
+| `graph_id` | Bounded server-owned graph-definition enum. |
+| `graph_version` | Bounded server-owned immutable graph-contract version. |
+| `cursor` | Bounded server-owned scheduling cursor enum; it is re-derived from PostgreSQL. |
+| `workflow_checkpoint_index` | A non-negative integer copied from the freshly locked latest domain checkpoint. It is only a freshly derived stale hint and reference and has no authority. |
+| `invocation_id` | Server-created UUID for one scheduling invocation and log correlation. |
+| `attempt_id` | Optional fresh UUID reference to a persisted draft or revision provider claim. |
+| `claim_id` | Optional fresh UUID reference to a persisted reviewer claim. |
+| `action_request_id` | Optional UUID reference to the exact persisted human gate at which execution pauses. |
+| `resume_reason` | Bounded server enum: new, action-resolved, retry, or reconcile. |
+
+No additional key is permitted. In particular, graph state contains no prose, prompt fragments,
+report content, provider result, client metadata, path, endpoint, credential, or arbitrary mapping.
+IDs and enums are references, not authority: every node reloads and scope-checks the referenced rows
+instead of trusting a graph-state relationship, cursor, or status.
+
+Persistent graph state may point only through `workflow_checkpoint_index` to the domain checkpoint
+from which it was freshly derived. It cannot store an opaque checkpoint row, payload, event, or
+alternate pointer. On invocation, a mismatch with the locked latest checkpoint makes the graph state
+stale; the scheduler reconstructs rather than following the hint.
+
+The checkpointer payload, framework configuration, and framework metadata are each closed and sanitized
+before entering LangGraph or any persistence adapter. The checkpointer payload is exactly the graph
+state allowlist above. Invocation configuration permits only the server-built
+`configurable.thread_id` and a bounded server-owned recursion limit. Framework metadata is limited to
+the safe state subset `workflow_run_id`, `graph_id`, `graph_version`, `cursor`,
+`workflow_checkpoint_index`, and `invocation_id`. Unknown keys, nested configurable dictionaries,
+callbacks supplied as data, tags, arbitrary metadata, and any hidden extension or provider/client
+value fail closed before persistence, logging, node construction, or provider setup.
+
+### Closed typed outcome boundary
+
+A node returns a closed discriminated mechanical schema, not persistent graph state and not an observability envelope.
+The required discriminator is a server enum with exactly `continue`, `await-user`,
+`retryable-failure`, `reconciliation-required`, `cancelled`, or `complete`. Each variant permits only
+its declared mechanical fields: a bounded next cursor, exact action or claim reference when needed,
+and a fixed failure or completion code. It contains no prose, report, provider result, database row,
+path, exception context, or unrestricted metadata. Unknown discriminator values and extra fields fail
+closed. The observability allowlist does not define or widen either persistent graph state or a typed
+outcome; telemetry projects a safe subset from already validated values.
+
+### Persisted human gates and pause/resume
+
+A persisted `ActionRequest` is the pause capability. The graph returns an `await-user` outcome only
+after the chapter orchestrator has atomically persisted the exact `ActionRequest`, `WorkflowRun.awaiting_user`, and `WorkflowCheckpoint`.
+A matching `WorkflowEvent` is persisted only when that domain transition contract defines one; it
+is not manufactured merely because LangGraph pauses. A `WorkflowEvent` is audit evidence, never gate authority.
+The disposable graph state may retain the exact action ID only as a scheduling reference; an
+in-memory interrupt payload is never a decision capability.
+
+Resume begins with the authenticated application service resolving that exact action ID in a fresh transaction.
+It locks and revalidates owner, project, chapter, workflow run, action kind and options,
+pending status, current workflow checkpoint, expected document version, and single-use decision.
+In the same locked transaction, after acquiring every required lock, it performs one query for a
+single PostgreSQL `clock_timestamp()` wall-clock value named `database_now`. Expiry validation must not use `CURRENT_TIMESTAMP`,
+`transaction_timestamp()`, `statement_timestamp()`, or an application or client clock: those values
+can predate time spent waiting for a lock and incorrectly authorize an action that expired meanwhile.
+`expires_at IS NULL` means no expiry; otherwise resolution requires `database_now < expires_at`.
+When `database_now >= expires_at`, the action is stale and cannot be resolved. Existing V2-created
+actions use the null, non-expiring form, while the general contract remains safe for a future bounded
+expiry. Expired, stale, foreign, mismatched, and already-resolved capabilities return a fixed stale/foreign action error
+that does not disclose whether an action ID exists, its prompt or options, another owner, its scope,
+timestamps, or the current workflow state.
+Only the committed PostgreSQL resolution makes a resume eligible. The graph is then reconstructed
+from the run and routes from the server-owned result. A resume never trusts client-supplied graph state,
+a client cursor, an action option copied from a prior response, or an interrupt resume value to resolve an action
+or select the next node. A stale, foreign, cancelled, already-resolved, or mismatched action fails
+closed without changing the graph or domain state.
+
+### Provider-node three-phase transaction
+
+Every Writer, Revision, Editor, Chief Editor, and Lore operation uses the same three phases. The
+phase boundary belongs to an application coordinator; the LangGraph node is only its typed adapter.
+
+1. **Phase 1 - claim and snapshot.** Open a short transaction, acquire the prescribed advisory and
+   row locks, reload all scoped authoritative rows, validate the current transition, and persist a
+   unique provider claim containing the operation key, a fresh UUID `attempt_id` or `claim_id` as its generation token,
+   immutable input version IDs and hashes, and the expected checkpoint. The service must commit the claim before returning
+   from this phase. A lost or indeterminate commit acknowledgement enters explicit
+   reconciliation and performs zero provider calls.
+2. **Phase 2 - provider call.** Close the Phase 1 session and transaction. Build the provider request
+   from the validated immutable snapshot, then call the server-selected agent/provider while no database session or transaction is open.
+   The request and result may contain prose in process,
+   but they never enter graph state, graph checkpoints, generic node outcomes, or logs.
+3. **Phase 3 - fresh lock, revalidate, and persist.** Open a new session and transaction, reacquire
+   locks in the canonical order, and reload with fresh database values. Revalidate ownership and
+   project/chapter/run scope, the fresh claim token, operation key, checkpoint, and current domain binding,
+   including node, action/report bindings, review policy, locator map when applicable, and the current version and content hash.
+   Strictly validate the provider output, then let the appropriate
+   coordinator and `DocumentService` persist the one canonical result, transition, checkpoint, and
+   allowlisted event. A stale or invalid result cannot mutate state.
+
+Cancellation and known provider failures release or fail only the still-current claim under fresh
+locks. A commit-indeterminate result is never guessed from the graph cursor or retried blindly; it
+routes to the persisted reconciliation contract. No graph node owns or reuses an `AsyncSession`, and
+no session or transaction crosses a provider call.
+
+### Typed node contracts
+
+Node inputs are freshly reconstructed typed references, while node outputs use the separate closed
+outcome schema above. Neither is inferred from free-form graph metadata. Candidate prose and full
+reports remain private, ephemeral coordinator data. The following table is the complete proposed
+Chapter Production V2 topology; adding a node or edge is an architecture-contract change.
+
+| Node | Typed input | Typed output | Authority | Side effects | Failure semantics |
+| --- | --- | --- | --- | --- | --- |
+| `reconstruct` | `ReconstructInput` with run and graph identity | `RouteOutcome` with a derived cursor | Read authoritative rows only | None | Corruption, unsupported graph version, or ambiguous state becomes reconciliation-required. |
+| `draft` | `ProviderNodeInput` bound to a drafting run | `DraftOutcome` | `ChapterDraftRevisionCoordinator` validates; the node has none | Three-phase Writer claim and canonical candidate persistence through `DocumentService` | Typed provider failure is retryable; stale claim is ignored; unknown persistence result requires reconciliation. |
+| `await_author_action` | `ActionGateInput` with exact run and optional action reference | `AwaitActionOutcome` | `ChapterDraftRevisionCoordinator` creates or reloads the gate | Persist or reuse one scoped `ActionRequest` and checkpoint, plus a matching event only when its domain transition requires one | Duplicate, stale, foreign, or corrupt gates fail closed; event has no gate authority and a live gate returns await-user. |
+| `author_revision` | `AuthorRevisionInput` referring to a committed decision | `RevisionOutcome` | `ChapterDraftRevisionCoordinator` and `DocumentService`; the node has none | Manual edit or three-phase feedback revision creates one immutable version | Invalid decision or stale base fails closed; provider and commit uncertainty use their typed outcomes. |
+| `editor_review` | `ReviewNodeInput` for the exact current version and Editor role | `ReviewOutcome` | `ChapterReviewCoordinator` applies server review policy | Three-phase Editor claim and one validated `ReviewReport` or warning action | Invalid or stale reports cannot advance; provider failure is normalized; unknown commit requires reconciliation. |
+| `chief_editor_review` | `ReviewNodeInput` for the policy-required Chief Editor role | `ReviewOutcome` | `ChapterReviewCoordinator` applies server-selected policy | Three-phase claim and one exact-version `ReviewReport` when required; otherwise no provider side effect | Policy drift or unexpected invocation fails closed; provider and commit failures are typed. |
+| `lore_review` | `ReviewNodeInput` for the exact current version and Lore role | `ReviewOutcome` | `ChapterReviewCoordinator` applies server review policy | Three-phase Lore claim and one validated exact-version `ReviewReport` or warning action | Invalid, stale, or cross-scoped reports cannot advance; failures are normalized. |
+| `corrective_revision` | `CorrectiveRevisionInput` bound to validated review reports | `RevisionOutcome` | `ChapterDraftRevisionCoordinator`; `DocumentService` writes | Three-phase Revision claim and one immutable child version | Changed reports, version, policy, locator map, or fresh claim token reject the result. |
+| `mark_revision_ready` | `ReadinessInput` with exact reviewed-version references | `ReadinessOutcome` | `RevisionReadinessStore` owns validation and persistence | Atomically create or reuse the exact READY checkpoint and bound event | Any cardinality, binding, current-version, hash, or report mismatch requires reconciliation. |
+| `finalize` | `FinalizationInput` bound to current READY state | `FinalizationOutcome` | `ChapterFinalizationSaga` and `DocumentService`; the node has none | Idempotently materialize the final document and complete the run | Prewrite failure is retryable when proven safe; postwrite or commit uncertainty requires reconciliation. |
+| `reconcile` | `ReconciliationInput` with run and bounded failure code | `RouteOutcome` | `ChapterProductionRecovery` evaluates persisted evidence | May adopt a proven committed result or persist a bounded recovery transition | Ambiguous or conflicting evidence remains reconciliation-required; it never fabricates success. |
+
+This contract intentionally keeps eleven scheduler nodes. Candidate persistence is an atomic or
+three-phase internal sub-stage of `draft`, `author_revision`, or `corrective_revision`; review evaluation
+is an internal sub-stage of the relevant Editor, Chief Editor, or Lore coordinator call; final evaluation
+is an internal sub-stage of `lore_review` before `mark_revision_ready` independently revalidates and
+persists readiness. These are internal coordinator sub-stages, not separate scheduler nodes, so
+candidate text and report bodies never cross a graph edge or enter graph state. The #149 body must be updated before development begins
+to match this topology instead of adding candidate-persistence, review-evaluation, or
+final-evaluation nodes.
+
+Each node opens only the sessions needed by its coordinator call and returns a typed output after
+those sessions close. Nodes cannot write ORM rows, call filesystem APIs, resolve actions, choose
+providers, or invoke `DocumentService` directly. Conditional edges inspect only the typed output;
+they never parse free-form provider text or database metadata.
+
+### Service convergence map
+
+At the #147 baseline, the oversized `ChapterProductionV2Service` monolith combines scheduling,
+locking, provider attempts, review, readiness, finalization, and recovery. Its tested public contract
+remains stable while implementation issues extract domain responsibilities behind it:
+
+| Disposition | Component | Boundary after convergence |
+| --- | --- | --- |
+| **Retain** | `ChapterProductionV2Service` | Thin stable facade with the existing public methods, DTOs, fixed exceptions, authorization entry points, and composition. It exposes one orchestration boundary to future routes. |
+| **Retain** | `DocumentService` | Exclusive immutable document/version writer and expected-current-version enforcement. |
+| **Split** | `ChapterProductionRepository` | Short-lived session operations, canonical advisory/row lock order, forced refresh, exact-cardinality queries, and scope-bound reconstruction. It never calls a provider. |
+| **Split** | `ChapterDraftRevisionCoordinator` | Initial draft, author accept/manual edit/feedback revision, corrective revision, locator validation, and candidate persistence orchestration. |
+| **Split** | `ChapterReviewCoordinator` | Reviewer selection, claims, strict report validation, warning/blocking action bindings, deterministic review policy, and report persistence. |
+| **Split** | `RevisionReadinessStore` | Exact READY semantic key, checkpoint/event cardinality, version/report/hash revalidation, create-or-reuse, and consumption. |
+| **Split** | `ChapterFinalizationSaga` | Final-document staging, workspace materialization, commit acknowledgement, idempotent replay, and completion. |
+| **Split** | `ChapterProductionRecovery` | PostgreSQL reconstruction, stale-state handling, failed-attempt recovery, committed-result adoption, and explicit reconciliation. |
+| **Split** | `ProviderAttemptCoordinator` | Claim identity, immutable snapshot references, fresh-token checks, release/failure, transaction-free provider handoff, and result revalidation. |
+| **Wrap** | LangGraph node adapters | Call the stable facade or extracted coordinators with typed references; contain no ORM, document, provider-selection, or security rule. |
+| **Remove** | Duplicated private scheduling branches | Removed only after #150 proves parity and rollback. Domain validation, locks, recovery, security checks, and fixed-error behavior are moved, not deleted. |
+
+Extraction must be behavior-preserving. The facade may first delegate to extracted modules while the
+handwritten scheduler remains active; LangGraph adoption does not justify parallel implementations
+of a lock, validation rule, persistence write, or recovery decision.
+
+A separate P0 CI hardening Issue must be completed before #149 begins. It enforces dependency
+direction with import-boundary tests: node and topology packages cannot import ORM models,
+SQLAlchemy, filesystem adapters, concrete providers, or private repository implementations, while
+the facade cannot import ORM models or lock helpers. After extraction the facade must not reacquire ORM queries or lock orchestration;
+new persistence and concurrency behavior belongs behind the repository/coordinator ports. CI also
+fails if extracted modules import back through the facade and create a dependency cycle.
+
+### Recovery and failure matrix
+
+Every entry is decided from freshly loaded PostgreSQL evidence, not from a graph checkpoint:
+
+| Scenario | Required detection and durable behavior | Scheduler outcome |
+| --- | --- | --- |
+| Restart | Reconstruct the exact run, checkpoint, live action, current document/version, reports, and persisted attempt; discard any graph cursor. | Route to the one legal next node, await the exact action, or require reconciliation. |
+| Stale invocation | Invocation references an old checkpoint, action, version, policy, claim, or graph version after fresh locking. | Perform no write and no provider call; return stale or reconciliation-required as appropriate. |
+| Claim-token ABA | Invocation A's fresh attempt or claim UUID, operation key, checkpoint, or current binding no longer matches after claim B was created. | Late success, failure, or cancellation from A is ignored and cannot release or overwrite B. |
+| Cancellation | Catch cancellation outside the transaction-free provider call, then fresh-lock and release only the exact current claim when safe. | Return cancelled; committed business state remains authoritative and resumable. |
+| Provider failure | Normalize timeout, rate limit, invalid output, and unavailable failures without raw exception context; fresh-lock the current claim. | Persist only the bounded allowed failure transition and return a typed retryable or terminal outcome. |
+| Commit-indeterminate | A claim, version, report, readiness, or finalization commit lacks acknowledgement, so success and failure are both possible. | Make no blind retry or second provider call; route to evidence-based reconciliation. |
+| Reconciliation | Lock and inspect exact semantic keys, versions, hashes, actions, reports, checkpoints, events, filesystem evidence, and attempt identity. | Adopt only a uniquely proven committed result; conflicts remain failed closed for operator action. |
+
+### PostgreSQL reconstruction evidence matrix
+
+Before using a status row, reconstruction proves that the latest domain checkpoint is exactly one contiguous maximum:
+there is one row at the maximum `checkpoint_index`, its run/node/state projection equals
+`WorkflowRun`, and the immediately previous row, when present, is exactly maximum minus one. It does
+not require old history to be gap-free beyond that frozen #110 rule. For all states, pending action cardinality is exactly 0 or 1
+as dictated by `awaiting_user`; a candidate-bound state requires that the current draft and version resolve to exactly one bound pair
+with matching project, chapter, document, version, hash, and current pointer; stage reports use the required exact 0/1 combination
+for the active policy and target version. A provider attempt or reviewer claim is 0 or 1 and current,
+with its fresh token, operation key, checkpoint, status, target, and hash all matching.
+
+| State | Candidate and action evidence | Report and claim evidence | Additional durable evidence | Derived route |
+| --- | --- | --- | --- | --- |
+| `DRAFTING` | Initial drafting has no candidate and no pending action; feedback drafting has exactly one bound source candidate and no pending action. | No review report; provider attempt is zero before claim or one exact current Writer/Revision claim. | Approved outline/version/hash and operation key match the run; a uniquely committed child may be adopted only by reconciliation. | Claim/resume Writer or Revision, adopt one proven child, or reconcile. |
+| `AUTHOR_REVISION` | Exactly one current draft/version; one pending author action while waiting, or zero pending plus one exact resolved source action only during manual-edit commit reconciliation. | No review reports and no reviewer claim or provider attempt. | Action kind, options, version/hash binding, owner, and decision state match the checkpoint. | Await the action, enter Editor review after acceptance/edit, or reconcile a uniquely committed manual child. |
+| `EDITOR_REVIEW` | Exactly one current draft/version; pending action is zero except one exact warning action bound to an already persisted Editor report. | Editor report is zero before evaluation or exactly one for a warning; Chief and Lore reports are zero; reviewer claim is zero or one exact current Editor claim. | Review policy, role, mode, target hash, report/action provenance, and current checkpoint match. | Execute/evaluate Editor, await warning, advance by policy, or reconcile. |
+| `REVIEW_REVISION` | Exactly one current draft/version; pending action is one before the blocking decision and zero after its exact resolution. | At least the triggering stage report is exactly one; only policy-ordered earlier report slots may also be one; provider attempt is zero or one exact current Revision claim. | Report tuple/input hash, resolved action when required, locator snapshot, source version, and operation key match. | Await revision authorization, execute corrective revision, adopt one proven child, or reconcile. |
+| `CHIEF_FINAL_REVIEW` | Exactly one current draft/version; pending action is zero except one exact Chief warning action bound to the Chief report. | Editor report is exactly one, Chief report is zero before evaluation or one for a warning, Lore report is zero; reviewer claim is zero or one current Chief claim. | Policy must require Chief Editor. This state is never reconstructed when policy skips Chief Editor; an Editor pass must route directly from Editor to Lore. | Execute/evaluate Chief, await warning, advance to Lore, or reconcile. |
+| `LORE_FINAL_REVIEW` | Exactly one current draft/version; pending action is zero except one exact Lore warning action bound to the Lore report. | Editor is exactly one; Chief is exactly one when required and zero when skipped; Lore is zero before evaluation or one for a warning; reviewer claim is zero or one current Lore claim. | All prior reports, policy, exact target/hash, and action provenance match. | Execute/evaluate Lore, await warning, request revision, or continue to READY validation. |
+| `REVISION_READY` | Exactly one current reviewed draft/version and zero pending actions. | Editor and Lore are exactly one; Chief is exactly one when required and zero when skipped; both claim slots are empty. | READY checkpoint plus event is exact 1+1 for the semantic key, fully bound to each other, the reports, policy, version, and hash. | Finalize or launch only the separately authorized optional-panel path. |
+| `ARCHIVE_UPDATE` | The same exact current reviewed draft/version and zero pending actions. | Same complete policy-required reports as READY; both claim slots are empty. | The historical READY pair remains exact 1+1. Final-document evidence is either zero before staging or one exact staged final document/version with canonical paths, hash, source, run, and operation key; file evidence is revalidated before completion. | Stage/replay the finalization saga, verify materialization, complete, or reconcile. |
+| `FAILED` | Candidate, action, and report evidence follows `failed_from_status`, but pending actions are zero because failure cannot hide a live gate. | A known provider failure requires exactly one provider attempt or reviewer claim with `status=failed` whose failed-from status, checkpoint, operation key, fresh token, and target all match. A commit-indeterminate permits exactly one `status=claimed` exact current claim, but only for explicit reconciliation with no provider retry. A contract-proven failure before claim persistence permits zero claims. | Typed failure code and failed-from status match; finalized lineage revalidates the READY pair. Any unrelated, duplicate, expired, wrong-status, or wrongly bound attempt or claim must fail closed. | Recover an allowed known failure, explicitly reconcile claimed uncertainty, or remain failed. |
+| `CANCELLED` | Candidate/report history may remain exactly as checkpointed, but pending actions and live claims are zero. | No report is treated as permission to resume. | Run, node, terminal flag, and checkpoint agree; cancellation creates no successor artifact. | Return the terminal cancelled result only. |
+| `COMPLETED` | Exactly one current reviewed draft/version and zero pending actions or claims. | Complete policy-required report tuple and historical READY pair remain valid. | Exactly one final document and current final version bind to the run and operation key; the final document, version, current file, and snapshot file all have the expected canonical paths, bytes, size, and hash, with one bound finalization event. | Return the existing terminal result without a write. |
+
+Any N greater than expected, orphan, mismatch, malformed, or cross-scope checkpoint, action, report,
+claim, READY marker, final artifact, or event is reconciliation-required. Reconstruction never picks
+the newest UUID/timestamp, fills a missing half, skips a required report, or repairs evidence while
+routing.
+
+### Observability and content boundary
+
+Only structured logs, traces, metrics, and safe errors use the observability allowlist. It is a
+one-way safe subset of persistent graph state and typed outcome fields, plus a measured duration;
+it does not expand either closed schema and never defines what state or an outcome may contain.
+These observability sinks may expose only the following fields when applicable: `graph_id`, `graph_version`, `workflow_run_id`,
+`node_name`, `invocation_id`, `attempt_id`, `claim_id`, `action_request_id`,
+`outcome_code`, `failure_code`, and `duration_ms`. Values must be bounded, server-created, and
+allowlisted; absence is preferred when a field is not needed.
+
+They must never contain chapter prose, full prompts, credentials, raw provider payloads, provider
+endpoints, filesystem or workspace paths, unrestricted metadata, full report bodies, user feedback,
+locator excerpts, stack-trace locals, raw exception chains, or serialized provider requests. Hashes
+and immutable version/report IDs belong only in the domain records that require them, not generic
+graph telemetry. Operational messages use fixed templates, and public projections apply an
+independent allowlist rather than serializing graph state or ORM objects.
+
+### Persistence constraints and graph cutover blockers
+
+Graph scheduling requires a stable database order that is independent of process timing. Each graph-compatible
+run allocates a per-run monotonic `event_sequence` transition ordinal for Chapter Production V2 in
+the same transaction as each new V2 event. V2 consumers order only by this sequence; they must not
+use `created_at` plus a random UUID, insertion timing, a graph cursor, or a generic graph checkpoint
+to infer domain order. Sequence gaps after a rolled-back allocation are acceptable, but duplicate or
+decreasing committed values fail closed.
+
+This is a two-phase compatibility migration of the generic `WorkflowEvent` table. Phase one adds a
+nullable `event_sequence`; historical legacy rows and other workflow types remain `NULL`, and no
+global consumer assumes otherwise. V2 writers allocate a non-`NULL` value under the locked run for
+events written after the migration. A partial unique index enforces
+`(workflow_run_id, event_sequence)` only where the sequence is non-`NULL`. Phase two permits graph
+cutover only for runs whose post-migration V2 event evidence satisfies that contract. Historical
+service runs and non-V2 workflows keep their existing compatibility readers and are never silently
+renumbered. Missing sequence on an event that claims a graph-compatible V2 run is corruption, not a
+reason to sort by timestamp.
+
+The current application-level locking and cardinality checks already reject many corrupt states,
+but the database schema does not yet encode every semantic invariant:
+
+| Debt | Required database constraint or typed structure | Priority before removal of application checks |
+| --- | --- | --- |
+| runtime pin | Strict, immutable `chapter_production_runtime` tuple for each new V2 run, with legacy absence interpreted only by the compatibility layer. | **P0 schema-and-compatibility cutover blocker.** |
+| event sequence | Nullable generic column; new V2 events receive a per-run ordinal and a partial uniqueness constraint, while historical and non-V2 rows stay null. | **P0 schema-and-compatibility cutover blocker.** |
+| READY semantic key | Unique exact `(chapter_workflow_run_id, document_version_id, review_policy_version)` checkpoint/event identity and validated bindings. | **P1 pre-public-API hardening.** |
+| one pending action | Partial uniqueness for one live pending action per run and gate kind where the transition contract requires one. | **P1 pre-public-API hardening.** |
+| review tuple | Uniqueness for run, document, version, review mode, and reviewer role, with exact scope foreign keys. | **P1 pre-public-API hardening.** |
+| typed provider claims and operation keys | Typed claim rows or constrained columns for claim token, operation key, source binding, status, and acknowledgement evidence. | **P1 pre-public-API hardening.** |
+| event-to-checkpoint binding | A direct constrained reference from an audit event to the domain checkpoint when that event contract requires the binding. | **P2 defense in depth.** |
+| document current-version parentage | A composite same-document foreign key proving `Document.current_version_id` belongs to that `Document`. | **P1 pre-public-API hardening.** |
+
+The runtime pin and event ordering are graph cutover blockers. Their schema, strict parser,
+transactional creation, legacy reader, and two-phase event rollout belong to one P0 schema-and-compatibility Issue
+that must complete before #149 schedules a production graph run. A separate P0 CI hardening Issue
+must also enforce the module boundaries above before #149 begins.
+The P1 and P2 debts remain explicit, ranked follow-up work; until their constraints land, the
+repository and coordinators must lock, count exact 0/1/N cardinality, validate every binding, and
+fail closed on duplicates, orphans, malformed rows, mismatches, and cross-scope references. Database
+constraints add defense in depth and never replace those service-level checks.
+
+### Migration, compatibility, rollback, and parity
+
+The rollout preserves the same facade and PostgreSQL artifacts throughout:
+
+1. **#148 - runtime foundation.** Add the pinned LangGraph dependency, closed graph-state schema,
+   typed outcomes, reconstruction adapter, and content-safe test helpers. No Chapter Production V2
+   run is migrated, and the existing service-backed scheduler remains the default. A graph runtime
+   execution state can be deleted without affecting a run.
+2. **Prerequisites before graph composition.** An independent behavior-preserving extraction Issue
+   is created and completed before #149 begins; it moves the repository, draft/revision, review,
+   readiness, finalization, attempt, and recovery boundaries behind the stable facade while the
+   service scheduler stays in sole use. The P0 schema-and-compatibility Issue and separate P0 CI
+   hardening Issue also land here.
+   Extraction tests prove identical artifacts, errors, locks, provider calls, and recovery without
+   importing or composing LangGraph.
+3. **#149 - internal orchestration migration.** #149 only composes the graph from the already
+   extracted boundaries and routes explicitly selected new runs through it using the PostgreSQL
+   runtime pin. It does not combine extraction with scheduler migration. The stable `ChapterProductionV2Service` facade,
+   API-facing behavior, fixed errors, and authoritative
+   persistence contract do not change. Existing and legacy runs retain their pinned or derived
+   service contract. The import-boundary tests prevent graph nodes and topology modules from importing
+   ORM models, SQLAlchemy sessions, filesystem APIs, or concrete providers; nodes depend only on
+   typed ports and the facade/coordinator layer.
+4. **#150 - parity, cutover, and cleanup.** Use frozen #114/#115 fixtures plus independent
+   PostgreSQL concurrency and restart cases to compare service-backed and graph-backed execution.
+   Cut over the default only after the durable `DocumentVersion`, `ActionRequest`, `ReviewReport`,
+   `WorkflowCheckpoint`, `WorkflowEvent`, run status, user gate, provider-call count, and safe error
+   outcomes are identical for every supported branch. #150 runs the full serial PostgreSQL integration suite,
+   records artifact parity and provider-call parity for every lifecycle and failure branch, and may
+   cut over only after independent Correctness and Security reviewers return PASS.
+
+Parity runs execute against isolated databases or rolled-back fixtures; production never dual-writes
+the same operation through two schedulers. The server-owned rollback switch affects only the default for runs created after the switch;
+it never changes an existing run's PostgreSQL runtime pin. A live run already pinned to `langgraph`
+must never execute through `service_v2`, even after rollback is enabled. It continues only through
+its compatible exact graph version. If that code is unavailable or fails its identity check, the run
+becomes reconciliation-required and remains paused until that exact version is deployed again.
+There is no safe mid-run fallback, no dual scheduler ownership, and no conversion of a live graph
+run into a service run. Because both schedulers use the extracted domain modules, rollback for future
+runs needs no artifact translation; it is not permission to reinterpret an existing graph checkpoint
+or runtime tuple.
+
+The handwritten scheduler is retained behind that explicit rollback switch until #150's lifecycle,
+restart-after-every-boundary, stale/ABA, failure, cancellation, commit-indeterminate, concurrency,
+and content-canary matrix passes independent Correctness and Security review. Only scheduling code
+proven redundant may then be removed; the stable facade and all domain modules remain. Project Creation,
+Project Maintenance, and legacy Chapter Production keep their existing implementations,
+states, persistence, routes, and semantics. #148, #149, and #150 do not change public APIs, frontend
+behavior, Reader Panel behavior, or historical runs.
+
 ## Reader-aware chapter quality pipeline
 
 ### Four responsibility lanes
