@@ -12,6 +12,7 @@ import json
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from pathlib import Path
 from uuid import UUID, uuid4
 
 from sqlalchemy import func, select, text
@@ -21,7 +22,21 @@ from sqlalchemy.orm import selectinload
 from app.agents import (
     AllowedChapterSegment,
     ApprovedOutlineReference,
+    ApprovedOutlineSnapshot,
+    ChapterReviewReport,
+    ChapterReviewTarget,
+    ChiefEditorChapterFinalAgent,
+    ChiefEditorChapterFinalRequest,
+    EditorAgent,
+    EditorReviewRequest,
     InitialDraftRequest,
+    LoreChapterFinalAgent,
+    LoreChapterFinalRequest,
+    ReviewContextKind,
+    ReviewContextSnapshot,
+    ReviewFindingSeverity,
+    ReviewerRole,
+    ReviewSegmentSnapshot,
     RevisionAgent,
     ReviewDrivenRevisionRequest,
     ReviewReportReference,
@@ -59,6 +74,7 @@ from app.models import (
     ReviewMode,
     ReviewReport,
     WorkflowCheckpoint,
+    WorkflowEvent,
     WorkflowRun,
     WorkflowType,
 )
@@ -74,8 +90,14 @@ from app.workflows.chapter_production import (
     ChapterProductionState,
     ChapterProductionStatus,
     ChapterProductionValidationError,
+    ChapterReviewBinding,
+    ChapterReviewOutcome,
+    ChapterReviewPolicyBinding,
+    ChapterReviewStage,
 )
 from app.workspace.hashing import sha256_content
+from app.workspace.markdown_store import MarkdownStore
+from app.workspace.paths import version_snapshot_path
 
 
 _CONTRACT_VERSION = "chapter-production-v2"
@@ -83,6 +105,12 @@ _REVIEW_POLICY_VERSION = "chapter-quality-v1"
 _AUTHOR_ACTION_TYPE = "chapter_author_revision"
 _ATTEMPT_STATUS_CLAIMED = "claimed"
 _ATTEMPT_STATUS_FAILED = "failed"
+_REVIEWER_CLAIM_STATUS_CLAIMED = "claimed"
+_REVIEWER_CLAIM_STATUS_FAILED = "failed"
+_REVIEW_WARNING_ACTION_TYPE = "chapter_review_warning"
+_REVIEW_REVISION_ACTION_TYPE = "chapter_review_revision"
+_READY_EVENT_TYPE = "revision_ready"
+_REVIEW_EVENT_TYPE = "chapter_review_recorded"
 
 
 def _safe_cancelled_error(_: BaseException) -> asyncio.CancelledError:
@@ -136,6 +164,17 @@ class ChapterProductionV2ProviderError(AppError):
         super().__init__()
 
 
+class ChapterProductionV2ReviewProviderError(AppError):
+    """A fixed advisory-review provider failure with no untrusted causal data."""
+
+    status_code = 503
+    code = "chapter_production_v2_review_provider_failed"
+    default_message = "Chapter review failed safely."
+
+    def __init__(self) -> None:
+        super().__init__()
+
+
 class ChapterProductionV2CommitIndeterminateError(AppError):
     status_code = 500
     code = "chapter_production_v2_commit_indeterminate"
@@ -170,6 +209,43 @@ class ChapterProductionV2Updated:
     draft_document_id: UUID
     draft_version_id: UUID
     action_request_id: UUID | None
+
+
+@dataclass(frozen=True, slots=True)
+class ChapterProductionV2Finalized:
+    workflow_run_id: UUID
+    final_document_id: UUID
+    final_version_id: UUID
+
+
+@dataclass(frozen=True, slots=True)
+class _ReviewContext:
+    run: WorkflowRun
+    state: ChapterProductionState
+    checkpoint: WorkflowCheckpoint
+    document: Document
+    version: DocumentVersion
+    segment_map: ChapterSegmentMap
+    request: EditorReviewRequest | ChiefEditorChapterFinalRequest | LoreChapterFinalRequest
+    stage: ChapterReviewStage
+    request_hash: str
+    operation_key: str
+
+
+@dataclass(frozen=True, slots=True)
+class _ReviewStateReferences:
+    review_policy_version: str
+    chief_editor_required: bool
+    editor_report_id: str | None
+    chief_editor_report_id: str | None
+    lore_report_id: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class _ReadyPair:
+    state: ChapterProductionState
+    checkpoint: WorkflowCheckpoint
+    event: WorkflowEvent
 
 
 @dataclass(frozen=True, slots=True)
@@ -349,10 +425,20 @@ class ChapterProductionV2Service:
         *,
         writer_agent: WriterAgent,
         revision_agent: RevisionAgent | None = None,
+        editor_agent: EditorAgent | None = None,
+        chief_editor_agent: ChiefEditorChapterFinalAgent | None = None,
+        lore_agent: LoreChapterFinalAgent | None = None,
+        chief_editor_required: bool = True,
     ) -> None:
+        if type(chief_editor_required) is not bool:
+            raise _invalid() from None
         self.session = session
         self.writer_agent = writer_agent
         self.revision_agent = revision_agent
+        self.editor_agent = editor_agent
+        self.chief_editor_agent = chief_editor_agent
+        self.lore_agent = lore_agent
+        self.chief_editor_required = chief_editor_required
         self.documents = DocumentService(session)
 
     async def start_from_approved_outline(
@@ -396,13 +482,14 @@ class ChapterProductionV2Service:
                     metadata_={
                         "contract_version": _CONTRACT_VERSION,
                         "review_policy_version": _REVIEW_POLICY_VERSION,
-                        "chief_editor_required": True,
+                        "chief_editor_required": self.chief_editor_required,
                         "outline_document_id": str(outline.id),
                         "outline_version_id": str(outline_version.id),
                         "outline_content_hash": outline_version.content_hash,
                         "segmenter_version": CURRENT_CHAPTER_SEGMENTER_VERSION,
                         "operation_key": operation_key,
                         "provider_attempt": None,
+                        "reviewer_claim": None,
                     },
                 )
                 self.session.add(run)
@@ -411,7 +498,7 @@ class ChapterProductionV2Service:
                     chapter_workflow_run_id=str(run.id),
                     chapter_id=str(chapter_id),
                     review_policy_version=_REVIEW_POLICY_VERSION,
-                    chief_editor_required=True,
+                    chief_editor_required=self.chief_editor_required,
                 )
                 self.session.add(
                     WorkflowCheckpoint(
@@ -967,6 +1054,9 @@ class ChapterProductionV2Service:
         except ChapterProductionV2ProviderError:
             await self._rollback()
             raise
+        except ChapterProductionV2ReconciliationError:
+            await self._rollback()
+            raise
         except ChapterProductionV2ValidationError:
             await self._rollback()
             raise
@@ -1101,6 +1191,593 @@ class ChapterProductionV2Service:
             report_input_hash=report_input_hash,
             actor_user_id=actor_user_id,
         )
+
+    async def execute_current_review(
+        self,
+        project_id: UUID,
+        chapter_id: UUID,
+        workflow_run_id: UUID,
+        *,
+        actor_user_id: UUID,
+    ) -> ChapterProductionV2Updated:
+        """Run exactly the server-selected reviewer for the locked current version."""
+
+        self._validated_ids(project_id, chapter_id, workflow_run_id, actor_user_id)
+        context = await self._claim_current_review(
+            project_id=project_id,
+            chapter_id=chapter_id,
+            workflow_run_id=workflow_run_id,
+            actor_user_id=actor_user_id,
+        )
+        agent = {
+            ChapterReviewStage.EDITOR: self.editor_agent,
+            ChapterReviewStage.CHIEF_EDITOR: self.chief_editor_agent,
+            ChapterReviewStage.LORE: self.lore_agent,
+        }[context.stage]
+        if agent is None:
+            await self._release_reviewer_claim(
+                workflow_run_id,
+                expected_operation_key=context.operation_key,
+                expected_claim_id=self._run_metadata(context.run)["reviewer_claim"]["claim_id"],
+            )
+            raise _invalid() from None
+
+        cancellation: asyncio.CancelledError | None = None
+        failure_code: ChapterFailureCode | None = None
+        report: ChapterReviewReport | None = None
+        try:
+            report = await agent.review(context.request)  # type: ignore[arg-type, union-attr]
+        except asyncio.CancelledError as error:
+            cancellation = _safe_cancelled_error(error)
+        except ProviderTimeoutError:
+            failure_code = ChapterFailureCode.PROVIDER_TIMEOUT
+        except ProviderInvalidOutputError:
+            failure_code = ChapterFailureCode.INVALID_PROVIDER_OUTPUT
+        except Exception:
+            failure_code = ChapterFailureCode.PROVIDER_UNAVAILABLE
+        claim_id = self._run_metadata(context.run)["reviewer_claim"]["claim_id"]
+        if cancellation is not None:
+            await self._release_reviewer_claim(
+                workflow_run_id,
+                expected_operation_key=context.operation_key,
+                expected_claim_id=claim_id,
+            )
+            raise cancellation from None
+        if failure_code is not None or report is None:
+            await self._fail_reviewer(
+                project_id=project_id,
+                chapter_id=chapter_id,
+                workflow_run_id=workflow_run_id,
+                actor_user_id=actor_user_id,
+                expected_operation_key=context.operation_key,
+                expected_claim_id=claim_id,
+                failure_code=failure_code or ChapterFailureCode.PROVIDER_UNAVAILABLE,
+            )
+            raise ChapterProductionV2ReviewProviderError() from None
+        return await self._persist_current_review(
+            project_id=project_id,
+            chapter_id=chapter_id,
+            workflow_run_id=workflow_run_id,
+            actor_user_id=actor_user_id,
+            expected_operation_key=context.operation_key,
+            expected_claim_id=claim_id,
+            expected_request_hash=context.request_hash,
+            report=report,
+        )
+
+    async def resolve_review_action(
+        self,
+        project_id: UUID,
+        chapter_id: UUID,
+        workflow_run_id: UUID,
+        action_request_id: UUID,
+        *,
+        actor_user_id: UUID,
+        decision: str,
+    ) -> ChapterProductionV2Updated:
+        """Resolve one exact version-bound review warning or required revision."""
+
+        self._validated_ids(
+            project_id, chapter_id, workflow_run_id, action_request_id, actor_user_id
+        )
+        try:
+            typed_decision = ChapterActionDecision(decision)
+        except (TypeError, ValueError):
+            raise _invalid() from None
+        if typed_decision not in {
+            ChapterActionDecision.ACCEPT_WARNING,
+            ChapterActionDecision.REQUEST_REVISION,
+        }:
+            raise _invalid() from None
+        try:
+            await self._require_project_owner(project_id, actor_user_id)
+            chapter = await self._chapter(project_id, chapter_id, lock=True)
+            run = await self._run(project_id, chapter_id, workflow_run_id, lock=True)
+            state, checkpoint = await self._locked_state(run)
+            if (
+                not state.awaiting_user
+                or state.action_request_id != str(action_request_id)
+                or state.action_kind
+                not in {ChapterActionKind.REVIEW_WARNING, ChapterActionKind.REVIEW_REVISION}
+            ):
+                raise _invalid()
+            action = await self.session.scalar(
+                select(ActionRequest)
+                .execution_options(populate_existing=True)
+                .where(
+                    ActionRequest.id == action_request_id,
+                    ActionRequest.workflow_run_id == run.id,
+                    ActionRequest.project_id == project_id,
+                    ActionRequest.chapter_id == chapter_id,
+                )
+                .with_for_update()
+            )
+            pending_count = await self.session.scalar(
+                select(func.count())
+                .select_from(ActionRequest)
+                .where(
+                    ActionRequest.workflow_run_id == run.id,
+                    ActionRequest.status == ActionRequestStatus.PENDING.value,
+                )
+            )
+            if action is None or pending_count != 1:
+                raise _invalid()
+            metadata = self._review_action_metadata(action)
+            expected_report_id = {
+                ChapterReviewStage.EDITOR.value: state.editor_report_id,
+                ChapterReviewStage.CHIEF_EDITOR.value: state.chief_editor_report_id,
+                ChapterReviewStage.LORE.value: state.lore_report_id,
+            }[metadata["review_stage"]]
+            if (
+                metadata["action_kind"] != state.action_kind.value
+                or metadata["review_report_id"] != expected_report_id
+                or metadata["document_id"] != state.document_id
+                or metadata["document_version_id"] != state.document_version_id
+                or metadata["content_hash"] != state.content_hash
+            ):
+                raise _invalid()
+            document, version = await self._locked_review_document(
+                project_id=project_id,
+                chapter_id=chapter_id,
+                state=state,
+                chapter=chapter,
+            )
+            report = await self.session.scalar(
+                select(ReviewReport)
+                .execution_options(populate_existing=True)
+                .where(
+                    ReviewReport.id == UUID(metadata["review_report_id"]),
+                    ReviewReport.project_id == project_id,
+                    ReviewReport.chapter_id == chapter_id,
+                    ReviewReport.workflow_run_id == run.id,
+                    ReviewReport.target_document_id == document.id,
+                    ReviewReport.target_version_id == version.id,
+                )
+                .with_for_update()
+            )
+            stage = ChapterReviewStage(metadata["review_stage"])
+            if report is None:
+                raise _invalid()
+            await self._validated_persisted_review_report(
+                row=report,
+                run=run,
+                document=document,
+                version=version,
+                stage=stage,
+            )
+            if metadata["operation_key"] != report.raw_report.get("operation_key"):
+                raise _invalid()
+            if (
+                state.action_kind is ChapterActionKind.REVIEW_WARNING
+                and (report.passed is not True or not report.warnings)
+            ) or (
+                state.action_kind is ChapterActionKind.REVIEW_REVISION
+                and (report.passed is not False or not report.blocking_issues)
+            ):
+                raise _invalid()
+            binding = ChapterActionBinding(
+                action_request_id=str(action.id),
+                workflow_run_id=str(run.id),
+                chapter_id=str(chapter.id),
+                request_type=action.request_type,
+                kind=state.action_kind,
+                status=ActionRequestStatus(action.status),
+                pending_count=pending_count,
+                document_id=str(document.id),
+                document_version_id=str(version.id),
+                content_hash=version.content_hash,
+                current_document_id=str(document.id),
+                current_document_version_id=str(version.id),
+                current_content_hash=version.content_hash,
+            )
+            next_state = state.resolve_action(action=binding, decision=typed_decision)
+            self._resolve_action_row(
+                action,
+                status=(
+                    ActionRequestStatus.APPROVED
+                    if typed_decision is ChapterActionDecision.ACCEPT_WARNING
+                    else ActionRequestStatus.REVISED
+                ),
+                decision=typed_decision,
+                actor_user_id=actor_user_id,
+            )
+            if (
+                next_state.status is ChapterProductionStatus.LORE_FINAL_REVIEW
+                and next_state.lore_report_id is not None
+                and not next_state.awaiting_user
+            ):
+                next_state = await self._enter_revision_ready_locked(
+                    run=run,
+                    checkpoint=checkpoint,
+                    state=next_state,
+                    document=document,
+                    version=version,
+                )
+            else:
+                self._append_state(run, checkpoint, next_state)
+            self.session.add(
+                WorkflowEvent(
+                    workflow_run_id=run.id,
+                    event_type="chapter_review_action_resolved",
+                    node_name=next_state.current_node,
+                    actor_type="user",
+                    actor_id=str(actor_user_id),
+                    payload={
+                        "action_request_id": str(action.id),
+                        "chapter_id": str(chapter.id),
+                        "decision": typed_decision.value,
+                        "document_version_id": str(version.id),
+                        "status": next_state.status.value,
+                    },
+                )
+            )
+            await self._commit()
+            return ChapterProductionV2Updated(
+                workflow_run_id=run.id,
+                draft_document_id=document.id,
+                draft_version_id=version.id,
+                action_request_id=(
+                    UUID(next_state.action_request_id)
+                    if next_state.action_request_id is not None
+                    else None
+                ),
+            )
+        except ChapterProductionV2CommitIndeterminateError:
+            raise
+        except ChapterProductionV2ValidationError:
+            await self._rollback()
+            raise
+        except Exception:
+            await self._rollback()
+            raise _invalid() from None
+
+    async def acknowledge_reviewer_no_write(
+        self,
+        project_id: UUID,
+        chapter_id: UUID,
+        workflow_run_id: UUID,
+        *,
+        actor_user_id: UUID,
+        expected_operation_key: str,
+        expected_claim_id: str,
+    ) -> ChapterProductionState:
+        """Release a durable reviewer claim after an operator proves no report was written."""
+
+        self._validated_ids(project_id, chapter_id, workflow_run_id, actor_user_id)
+        if not _valid_sha256(expected_operation_key) or not _valid_nonzero_uuid(
+            expected_claim_id
+        ):
+            raise _invalid() from None
+        try:
+            await self._require_project_owner(project_id, actor_user_id)
+            chapter = await self._chapter(project_id, chapter_id, lock=True)
+            run = await self._run(project_id, chapter_id, workflow_run_id, lock=True)
+            state, checkpoint = await self._locked_state(run)
+            if state.status not in {
+                ChapterProductionStatus.EDITOR_REVIEW,
+                ChapterProductionStatus.CHIEF_FINAL_REVIEW,
+                ChapterProductionStatus.LORE_FINAL_REVIEW,
+            } or state.awaiting_user:
+                raise ChapterProductionV2ReconciliationError()
+            claim = self._run_metadata(run)["reviewer_claim"]
+            stage = {
+                ChapterProductionStatus.EDITOR_REVIEW: ChapterReviewStage.EDITOR,
+                ChapterProductionStatus.CHIEF_FINAL_REVIEW: ChapterReviewStage.CHIEF_EDITOR,
+                ChapterProductionStatus.LORE_FINAL_REVIEW: ChapterReviewStage.LORE,
+            }[state.status]
+            document, version = await self._locked_review_document(
+                project_id=project_id,
+                chapter_id=chapter_id,
+                state=state,
+                chapter=chapter,
+            )
+            if (
+                type(claim) is not dict
+                or claim.get("operation_key") != expected_operation_key
+                or claim.get("claim_id") != expected_claim_id
+                or claim.get("status") != _REVIEWER_CLAIM_STATUS_CLAIMED
+                or claim.get("checkpoint_index") != checkpoint.checkpoint_index
+                or claim.get("stage") != stage.value
+                or await self._exact_review_report_count(
+                    run=run, version=version, stage=stage
+                )
+                != 0
+            ):
+                raise ChapterProductionV2ReconciliationError()
+            self._set_reviewer_claim(run, None)
+            self._append_state(run, checkpoint, state)
+            await self._commit()
+            return state
+        except ChapterProductionV2CommitIndeterminateError:
+            raise
+        except ChapterProductionV2ReconciliationError:
+            await self._rollback()
+            raise
+        except ChapterProductionV2ValidationError:
+            await self._rollback()
+            raise
+        except Exception:
+            await self._rollback()
+            raise _invalid() from None
+
+    async def finalize_without_reader_panel(
+        self,
+        project_id: UUID,
+        chapter_id: UUID,
+        workflow_run_id: UUID,
+        *,
+        actor_user_id: UUID,
+    ) -> ChapterProductionV2Finalized:
+        """Promote the exact ready version through a restart-safe DB/filesystem saga."""
+
+        self._validated_ids(project_id, chapter_id, workflow_run_id, actor_user_id)
+        try:
+            await self._require_project_owner(project_id, actor_user_id)
+            chapter = await self._chapter(project_id, chapter_id, lock=True)
+            run = await self._run(project_id, chapter_id, workflow_run_id, lock=True)
+            state, checkpoint = await self._locked_state(run)
+            if state.status is ChapterProductionStatus.COMPLETED:
+                result = await self._finalized_result_locked(
+                    chapter=chapter, run=run, state=state
+                )
+                await self.session.commit()
+                return result
+            document, version = await self._locked_review_document(
+                project_id=project_id,
+                chapter_id=chapter_id,
+                state=state,
+                chapter=chapter,
+            )
+            if state.status is ChapterProductionStatus.REVISION_READY:
+                policy, editor, chief, lore = await self._live_review_bindings_locked(
+                    run=run, state=state, document=document, version=version
+                )
+                try:
+                    archive_state = state.begin_archive_update(
+                        policy=policy,
+                        document_id=str(document.id),
+                        current_document_version_id=str(version.id),
+                        version_content_hash=version.content_hash,
+                        editor_report=editor,
+                        chief_editor_report=chief,
+                        lore_report=lore,
+                    )
+                except ChapterProductionValidationError:
+                    raise _invalid() from None
+                self._append_state(run, checkpoint, archive_state)
+                chapter.status = ChapterProductionStatus.ARCHIVE_UPDATE.value
+                await self._commit()
+                state = archive_state
+            elif state.status is not ChapterProductionStatus.ARCHIVE_UPDATE:
+                raise _invalid()
+            else:
+                await self.session.commit()
+            draft_document_id = document.id
+            draft_version_id = version.id
+            draft_hash = version.content_hash
+        except ChapterProductionV2CommitIndeterminateError:
+            raise
+        except ChapterProductionV2ReconciliationError:
+            await self._rollback()
+            raise
+        except ChapterProductionV2ValidationError:
+            await self._rollback()
+            raise
+        except Exception:
+            await self._rollback()
+            raise _invalid() from None
+
+        try:
+            content = self._verified_snapshot_content(document, version)
+            if version.id != draft_version_id or sha256_content(content) != draft_hash:
+                raise _invalid()
+            await self.session.commit()
+        except ChapterProductionV2ValidationError:
+            await self._rollback()
+            raise
+        except Exception:
+            await self._rollback()
+            raise _invalid() from None
+
+        try:
+            await self._require_project_owner(project_id, actor_user_id)
+            chapter = await self._chapter(project_id, chapter_id, lock=True)
+            run = await self._run(project_id, chapter_id, workflow_run_id, lock=True)
+            state, _ = await self._locked_state(run)
+            if state.status is ChapterProductionStatus.COMPLETED:
+                result = await self._finalized_result_locked(
+                    chapter=chapter, run=run, state=state
+                )
+                await self.session.commit()
+                return result
+            if state.status is not ChapterProductionStatus.ARCHIVE_UPDATE:
+                raise _invalid()
+            document, version = await self._locked_review_document(
+                project_id=project_id,
+                chapter_id=chapter_id,
+                state=state,
+                chapter=chapter,
+            )
+            if (
+                document.id != draft_document_id
+                or version.id != draft_version_id
+                or version.content_hash != draft_hash
+            ):
+                raise ChapterProductionV2ReconciliationError()
+            final_operation_key = self._final_operation_key(run, state)
+            final_documents = list(
+                await self.session.scalars(
+                    select(Document)
+                    .options(selectinload(Document.project))
+                    .execution_options(populate_existing=True)
+                    .where(
+                        Document.project_id == project_id,
+                        Document.chapter_id == chapter_id,
+                        Document.type == DocumentType.CHAPTER_FINAL.value,
+                    )
+                    .with_for_update()
+                )
+            )
+            writes: tuple[tuple[str, str], ...]
+            if not final_documents:
+                final_document, current_write, snapshot_write = (
+                    await self.documents.stage_create_document(
+                        project_id=project_id,
+                        chapter_id=chapter_id,
+                        document_type=DocumentType.CHAPTER_FINAL,
+                        title=f"Chapter {chapter.chapter_number} final",
+                        path=self._final_document_path(chapter=chapter, run=run),
+                        content=content,
+                        source=DocumentSource.SYSTEM,
+                        workflow_run_id=run.id,
+                        change_summary="Promoted the reviewed Chapter Production V2 version.",
+                        version_metadata={
+                            "contract_version": _CONTRACT_VERSION,
+                            "operation_key": final_operation_key,
+                        },
+                    )
+                )
+                final_version = final_document.current_version
+                if final_version is None:
+                    raise _invalid()
+                writes = (current_write, snapshot_write)
+                chapter.final_document_id = final_document.id
+                await self._commit()
+            elif len(final_documents) == 1:
+                final_document = final_documents[0]
+                final_version = await self._locked_current_document_version(
+                    final_document
+                )
+                if (
+                    final_version is None
+                    or chapter.final_document_id != final_document.id
+                    or not self._valid_final_document_paths(
+                        chapter=chapter,
+                        run=run,
+                        document=final_document,
+                        version=final_version,
+                    )
+                    or final_version.content_hash != draft_hash
+                    or final_version.workflow_run_id != run.id
+                    or final_version.source != DocumentSource.SYSTEM.value
+                    or final_version.metadata_
+                    != {
+                        "contract_version": _CONTRACT_VERSION,
+                        "operation_key": final_operation_key,
+                    }
+                    or final_version.snapshot_path is None
+                ):
+                    raise ChapterProductionV2ReconciliationError()
+                writes = (
+                    (final_document.path, content),
+                    (final_version.snapshot_path, content),
+                )
+                await self.session.commit()
+            else:
+                raise ChapterProductionV2ReconciliationError()
+        except ChapterProductionV2CommitIndeterminateError:
+            raise
+        except ChapterProductionV2ReconciliationError:
+            await self._rollback()
+            raise
+        except ChapterProductionV2ValidationError:
+            await self._rollback()
+            raise
+        except Exception:
+            await self._rollback()
+            raise _invalid() from None
+
+        try:
+            self.documents.write_staged_files(final_document, writes)
+        except DocumentCommitIndeterminateError:
+            raise ChapterProductionV2CommitIndeterminateError() from None
+
+        try:
+            await self._require_project_owner(project_id, actor_user_id)
+            chapter = await self._chapter(project_id, chapter_id, lock=True)
+            run = await self._run(project_id, chapter_id, workflow_run_id, lock=True)
+            state, checkpoint = await self._locked_state(run)
+            if state.status is ChapterProductionStatus.COMPLETED:
+                result = await self._finalized_result_locked(
+                    chapter=chapter, run=run, state=state
+                )
+                await self.session.commit()
+                return result
+            if state.status is not ChapterProductionStatus.ARCHIVE_UPDATE:
+                raise ChapterProductionV2ReconciliationError()
+            document, version = await self._locked_review_document(
+                project_id=project_id,
+                chapter_id=chapter_id,
+                state=state,
+                chapter=chapter,
+            )
+            policy, editor, chief, lore = await self._live_review_bindings_locked(
+                run=run, state=state, document=document, version=version
+            )
+            result = await self._finalized_result_locked(
+                chapter=chapter, run=run, state=state
+            )
+            try:
+                completed = state.complete(
+                    policy=policy,
+                    document_id=str(document.id),
+                    current_document_version_id=str(version.id),
+                    version_content_hash=version.content_hash,
+                    editor_report=editor,
+                    chief_editor_report=chief,
+                    lore_report=lore,
+                )
+            except ChapterProductionValidationError:
+                raise _invalid() from None
+            self._append_state(run, checkpoint, completed)
+            chapter.status = ChapterProductionStatus.COMPLETED.value
+            self.session.add(
+                WorkflowEvent(
+                    workflow_run_id=run.id,
+                    event_type="chapter_finalized",
+                    node_name=completed.current_node,
+                    payload={
+                        "chapter_id": str(chapter.id),
+                        "document_version_id": state.document_version_id,
+                        "final_document_id": str(result.final_document_id),
+                        "final_version_id": str(result.final_version_id),
+                        "status": completed.status.value,
+                    },
+                )
+            )
+            await self._commit()
+            return result
+        except ChapterProductionV2CommitIndeterminateError:
+            raise
+        except ChapterProductionV2ReconciliationError:
+            await self._rollback()
+            raise
+        except ChapterProductionV2ValidationError:
+            await self._rollback()
+            raise
+        except Exception:
+            await self._rollback()
+            raise _invalid() from None
 
     async def load_state(
         self,
@@ -1867,6 +2544,31 @@ class ChapterProductionV2Service:
             document_id=document.id,
             version_id=version.id,
         )
+        for report, (_, expected_mode, _) in zip(reports, report_slots, strict=True):
+            stage = {
+                ReviewMode.CHAPTER_EDITOR.value: ChapterReviewStage.EDITOR,
+                ReviewMode.CHAPTER_CHIEF_FINAL.value: ChapterReviewStage.CHIEF_EDITOR,
+                ReviewMode.CHAPTER_FINAL_LORE.value: ChapterReviewStage.LORE,
+            }[expected_mode]
+            await self._validated_persisted_review_report(
+                row=report,
+                run=run,
+                document=document,
+                version=version,
+                stage=stage,
+            )
+        trigger_mode = report_slots[-1][1]
+        await self._validated_resolved_review_action(
+            run=run,
+            document=document,
+            version=version,
+            report=reports[-1],
+            stage={
+                ReviewMode.CHAPTER_EDITOR.value: ChapterReviewStage.EDITOR,
+                ReviewMode.CHAPTER_CHIEF_FINAL.value: ChapterReviewStage.CHIEF_EDITOR,
+                ReviewMode.CHAPTER_FINAL_LORE.value: ChapterReviewStage.LORE,
+            }[trigger_mode],
+        )
         return _ReviewRevisionContext(
             run, state, checkpoint, document, version, segment_map, tuple(reports)
         )
@@ -1945,6 +2647,1457 @@ class ChapterProductionV2Service:
         except Exception:
             raise _invalid() from None
 
+    async def _claim_current_review(
+        self,
+        *,
+        project_id: UUID,
+        chapter_id: UUID,
+        workflow_run_id: UUID,
+        actor_user_id: UUID,
+    ) -> _ReviewContext:
+        retry_recovered = False
+        try:
+            await self._require_project_owner(project_id, actor_user_id)
+            chapter = await self._chapter(project_id, chapter_id, lock=True)
+            run = await self._run(project_id, chapter_id, workflow_run_id, lock=True)
+            state, checkpoint = await self._locked_state(run)
+            metadata = self._run_metadata(run)
+            claim = metadata["reviewer_claim"]
+            review_statuses = {
+                ChapterProductionStatus.EDITOR_REVIEW,
+                ChapterProductionStatus.CHIEF_FINAL_REVIEW,
+                ChapterProductionStatus.LORE_FINAL_REVIEW,
+            }
+            if state.status is ChapterProductionStatus.FAILED:
+                if (
+                    state.failed_from_status not in review_statuses
+                    or state.failure_code
+                    not in {
+                        ChapterFailureCode.PROVIDER_UNAVAILABLE,
+                        ChapterFailureCode.PROVIDER_TIMEOUT,
+                        ChapterFailureCode.INVALID_PROVIDER_OUTPUT,
+                    }
+                    or type(claim) is not dict
+                    or claim.get("status") != _REVIEWER_CLAIM_STATUS_FAILED
+                ):
+                    raise ChapterProductionV2ReconciliationError()
+                recovered = state.recover()
+                self._set_reviewer_claim(run, None)
+                self._append_state(run, checkpoint, recovered)
+                await self._commit()
+                retry_recovered = True
+            elif state.status not in review_statuses or state.awaiting_user:
+                raise _invalid()
+            elif claim is not None:
+                raise ChapterProductionV2ReconciliationError()
+            if not retry_recovered:
+                context = await self._build_review_context_locked(
+                    project_id=project_id,
+                    chapter_id=chapter_id,
+                    chapter=chapter,
+                    run=run,
+                    state=state,
+                    checkpoint=checkpoint,
+                )
+                if await self._exact_review_report_count(
+                    run=run,
+                    version=context.version,
+                    stage=context.stage,
+                ):
+                    raise ChapterProductionV2ReconciliationError()
+                claim_id = _new_attempt_id()
+                self._set_reviewer_claim(
+                    run,
+                    {
+                        "claim_id": claim_id,
+                        "operation_key": context.operation_key,
+                        "stage": context.stage.value,
+                        "checkpoint_index": checkpoint.checkpoint_index,
+                        "document_id": str(context.document.id),
+                        "document_version_id": str(context.version.id),
+                        "content_hash": context.version.content_hash,
+                        "review_policy_version": state.review_policy_version,
+                        "segment_map_hash": context.segment_map.map_hash,
+                        "request_hash": context.request_hash,
+                        "status": _REVIEWER_CLAIM_STATUS_CLAIMED,
+                    },
+                )
+                await self._commit()
+                return context
+        except ChapterProductionV2CommitIndeterminateError:
+            raise
+        except ChapterProductionV2ReconciliationError:
+            await self._rollback()
+            raise
+        except ChapterProductionV2ValidationError:
+            await self._rollback()
+            raise
+        except Exception:
+            await self._rollback()
+            raise _invalid() from None
+        if retry_recovered:
+            return await self._claim_current_review(
+                project_id=project_id,
+                chapter_id=chapter_id,
+                workflow_run_id=workflow_run_id,
+                actor_user_id=actor_user_id,
+            )
+        raise _invalid() from None
+
+    async def _build_review_context_locked(
+        self,
+        *,
+        project_id: UUID,
+        chapter_id: UUID,
+        chapter: Chapter,
+        run: WorkflowRun,
+        state: ChapterProductionState,
+        checkpoint: WorkflowCheckpoint,
+    ) -> _ReviewContext:
+        stage = {
+            ChapterProductionStatus.EDITOR_REVIEW: ChapterReviewStage.EDITOR,
+            ChapterProductionStatus.CHIEF_FINAL_REVIEW: ChapterReviewStage.CHIEF_EDITOR,
+            ChapterProductionStatus.LORE_FINAL_REVIEW: ChapterReviewStage.LORE,
+        }.get(state.status)
+        if stage is None:
+            raise _invalid()
+        metadata = self._run_metadata(run)
+        if (
+            state.review_policy_version != metadata["review_policy_version"]
+            or state.chief_editor_required is not metadata["chief_editor_required"]
+            or (stage is ChapterReviewStage.CHIEF_EDITOR and not state.chief_editor_required)
+        ):
+            raise _invalid()
+        document, version = await self._locked_review_document(
+            project_id=project_id,
+            chapter_id=chapter_id,
+            state=state,
+            chapter=chapter,
+        )
+        segment_map = await self.documents.derive_chapter_segment_map(
+            project_id=project_id,
+            chapter_id=chapter_id,
+            document_id=document.id,
+            version_id=version.id,
+        )
+        if len(segment_map.segments) > 64 or segment_map.map_hash != segment_map.map_hash.lower():
+            raise _invalid()
+        outline, outline_version = await self._outline_for_chapter(
+            chapter, project_id, lock=True
+        )
+        self._validate_outline_metadata(metadata, outline, outline_version)
+        outline_content = self._verified_snapshot_content(outline, outline_version)
+        contexts = await self._review_context_snapshots(project_id=project_id, stage=stage)
+        target = ChapterReviewTarget(
+            project_id=project_id,
+            chapter_id=chapter_id,
+            document_id=document.id,
+            version_id=version.id,
+            segments=tuple(
+                ReviewSegmentSnapshot(
+                    segment_id=item.segment_id,
+                    index=item.ordinal,
+                    title=item.structural_path,
+                    content=item.content,
+                )
+                for item in segment_map.segments
+            ),
+        )
+        outline_snapshot = ApprovedOutlineSnapshot(
+            project_id=project_id,
+            chapter_id=chapter_id,
+            document_id=outline.id,
+            version_id=outline_version.id,
+            content=outline_content.strip(),
+        )
+        request_type = {
+            ChapterReviewStage.EDITOR: EditorReviewRequest,
+            ChapterReviewStage.CHIEF_EDITOR: ChiefEditorChapterFinalRequest,
+            ChapterReviewStage.LORE: LoreChapterFinalRequest,
+        }[stage]
+        request = request_type(
+            project_id=project_id,
+            chapter_id=chapter_id,
+            workflow_run_id=run.id,
+            target=target,
+            approved_outline=outline_snapshot,
+            contexts=contexts,
+        )
+        request_hash = sha256_content(
+            json.dumps(
+                request.model_dump(mode="json"),
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=False,
+            )
+        )
+        operation_key = sha256_content(
+            ":".join(
+                (
+                    _CONTRACT_VERSION,
+                    str(run.id),
+                    str(version.id),
+                    state.review_policy_version,
+                    stage.value,
+                    str(checkpoint.checkpoint_index),
+                    segment_map.map_hash,
+                    request_hash,
+                )
+            )
+        )
+        return _ReviewContext(
+            run,
+            state,
+            checkpoint,
+            document,
+            version,
+            segment_map,
+            request,
+            stage,
+            request_hash,
+            operation_key,
+        )
+
+    async def _review_context_snapshots(
+        self, *, project_id: UUID, stage: ChapterReviewStage
+    ) -> tuple[ReviewContextSnapshot, ...]:
+        if stage in {ChapterReviewStage.EDITOR, ChapterReviewStage.CHIEF_EDITOR}:
+            allowed_types = {
+                DocumentType.STYLE_GUIDE.value: ReviewContextKind.STYLE_GUIDE,
+                DocumentType.CHAPTER_SUMMARY.value: ReviewContextKind.PREVIOUS_CHAPTER_SUMMARY,
+            }
+        else:
+            allowed_types = {
+                DocumentType.WORLD_OVERVIEW.value: ReviewContextKind.LORE_BOUNDARY,
+                DocumentType.POWER_SYSTEM.value: ReviewContextKind.LORE_BOUNDARY,
+                DocumentType.FACTIONS.value: ReviewContextKind.LORE_BOUNDARY,
+                DocumentType.GEOGRAPHY.value: ReviewContextKind.LORE_BOUNDARY,
+                DocumentType.HISTORY.value: ReviewContextKind.TIMELINE,
+                DocumentType.CHARACTER_PROFILE.value: ReviewContextKind.CHARACTER_STATE,
+                DocumentType.MAIN_CAST.value: ReviewContextKind.CHARACTER_STATE,
+                DocumentType.FORESHADOWING.value: ReviewContextKind.FORESHADOWING,
+                DocumentType.UNRESOLVED_THREADS.value: ReviewContextKind.FORESHADOWING,
+            }
+        documents = list(
+            await self.session.scalars(
+                select(Document)
+                .options(selectinload(Document.project))
+                .execution_options(populate_existing=True)
+                .where(
+                    Document.project_id == project_id,
+                    Document.type.in_(tuple(allowed_types)),
+                    Document.current_version_id.is_not(None),
+                )
+                .order_by(Document.type, Document.path, Document.id)
+                .limit(16)
+                .with_for_update()
+            )
+        )
+        snapshots: list[ReviewContextSnapshot] = []
+        for document in documents:
+            version_id = document.current_version_id
+            if version_id is None:
+                raise _invalid()
+            version = await self.session.scalar(
+                select(DocumentVersion)
+                .execution_options(populate_existing=True)
+                .where(
+                    DocumentVersion.id == version_id,
+                    DocumentVersion.document_id == document.id,
+                )
+                .with_for_update()
+            )
+            if version is None:
+                raise _invalid()
+            content = self._verified_snapshot_content(document, version)
+            snapshots.append(
+                ReviewContextSnapshot(
+                    project_id=project_id,
+                    document_id=document.id,
+                    version_id=version.id,
+                    kind=allowed_types[document.type],
+                    content=content.strip(),
+                )
+            )
+        if not snapshots:
+            raise _invalid()
+        return tuple(snapshots)
+
+    @staticmethod
+    def _verified_snapshot_content(
+        document: Document, version: DocumentVersion
+    ) -> str:
+        if (
+            document.project is None
+            or version.document_id != document.id
+            or type(version.version_number) is not int
+            or version.version_number < 1
+            or version.file_path != document.path
+            or version.snapshot_path
+            != version_snapshot_path(str(document.id), version.version_number).as_posix()
+            or type(version.byte_size) is not int
+            or version.byte_size < 0
+            or version.byte_size > MAX_CHAPTER_CONTENT_BYTES
+            or not _valid_sha256(version.content_hash)
+        ):
+            raise _invalid()
+        try:
+            content = MarkdownStore(Path(document.project.workspace_root)).read_bounded(
+                version.snapshot_path,
+                max_bytes=MAX_CHAPTER_CONTENT_BYTES,
+            )
+        except Exception:
+            raise _invalid() from None
+        if (
+            len(content.encode("utf-8")) != version.byte_size
+            or sha256_content(content) != version.content_hash
+        ):
+            raise _invalid()
+        return content
+
+    async def _locked_review_document(
+        self,
+        *,
+        project_id: UUID,
+        chapter_id: UUID,
+        state: ChapterProductionState,
+        chapter: Chapter,
+    ) -> tuple[Document, DocumentVersion]:
+        if state.document_id is None or state.document_version_id is None:
+            raise _invalid()
+        document_id = UUID(state.document_id)
+        version_id = UUID(state.document_version_id)
+        document = await self.session.scalar(
+            select(Document)
+            .options(selectinload(Document.project), selectinload(Document.current_version))
+            .execution_options(populate_existing=True)
+            .where(
+                Document.id == document_id,
+                Document.project_id == project_id,
+                Document.chapter_id == chapter_id,
+                Document.type == DocumentType.CHAPTER_DRAFT.value,
+                Document.current_version_id == version_id,
+            )
+            .with_for_update()
+        )
+        version = await self.session.scalar(
+            select(DocumentVersion)
+            .execution_options(populate_existing=True)
+            .where(
+                DocumentVersion.id == version_id,
+                DocumentVersion.document_id == document_id,
+                DocumentVersion.content_hash == state.content_hash,
+            )
+            .with_for_update()
+        )
+        if (
+            document is None
+            or version is None
+            or chapter.current_draft_document_id != document.id
+        ):
+            raise _invalid()
+        return document, version
+
+    async def _exact_review_report_count(
+        self, *, run: WorkflowRun, version: DocumentVersion, stage: ChapterReviewStage
+    ) -> int:
+        mode, role = {
+            ChapterReviewStage.EDITOR: (ReviewMode.CHAPTER_EDITOR.value, "editor_agent"),
+            ChapterReviewStage.CHIEF_EDITOR: (
+                ReviewMode.CHAPTER_CHIEF_FINAL.value,
+                "chief_editor_agent",
+            ),
+            ChapterReviewStage.LORE: (ReviewMode.CHAPTER_FINAL_LORE.value, "lore_agent"),
+        }[stage]
+        count = await self.session.scalar(
+            select(func.count())
+            .select_from(ReviewReport)
+            .where(
+                ReviewReport.project_id == run.project_id,
+                ReviewReport.chapter_id == run.chapter_id,
+                ReviewReport.workflow_run_id == run.id,
+                ReviewReport.target_document_id == version.document_id,
+                ReviewReport.target_version_id == version.id,
+                ReviewReport.review_mode == mode,
+                ReviewReport.reviewer_agent_role == role,
+            )
+        )
+        return int(count or 0)
+
+    async def _persist_current_review(
+        self,
+        *,
+        project_id: UUID,
+        chapter_id: UUID,
+        workflow_run_id: UUID,
+        actor_user_id: UUID,
+        expected_operation_key: str,
+        expected_claim_id: str,
+        expected_request_hash: str,
+        report: ChapterReviewReport,
+    ) -> ChapterProductionV2Updated:
+        try:
+            await self._require_project_owner(project_id, actor_user_id)
+            chapter = await self._chapter(project_id, chapter_id, lock=True)
+            run = await self._run(project_id, chapter_id, workflow_run_id, lock=True)
+            state, checkpoint = await self._locked_state(run)
+            context = await self._build_review_context_locked(
+                project_id=project_id,
+                chapter_id=chapter_id,
+                chapter=chapter,
+                run=run,
+                state=state,
+                checkpoint=checkpoint,
+            )
+            claim = self._run_metadata(run)["reviewer_claim"]
+            if (
+                type(claim) is not dict
+                or claim.get("status") != _REVIEWER_CLAIM_STATUS_CLAIMED
+                or claim.get("claim_id") != expected_claim_id
+                or claim.get("operation_key") != expected_operation_key
+                or claim.get("request_hash") != expected_request_hash
+                or claim.get("checkpoint_index") != checkpoint.checkpoint_index
+                or claim.get("stage") != context.stage.value
+                or context.operation_key != expected_operation_key
+                or context.request_hash != expected_request_hash
+                or report.project_id != project_id
+                or report.chapter_id != chapter_id
+                or report.workflow_run_id != run.id
+                or report.target_document_id != context.document.id
+                or report.target_version_id != context.version.id
+                or report.reviewer_role.value
+                != {
+                    ChapterReviewStage.EDITOR: ReviewerRole.EDITOR.value,
+                    ChapterReviewStage.CHIEF_EDITOR: ReviewerRole.CHIEF_EDITOR.value,
+                    ChapterReviewStage.LORE: ReviewerRole.LORE.value,
+                }[context.stage]
+                or await self._exact_review_report_count(
+                    run=run, version=context.version, stage=context.stage
+                )
+                != 0
+            ):
+                raise ChapterProductionV2ReconciliationError()
+            findings_by_severity: dict[ReviewFindingSeverity, list[dict[str, object]]] = {
+                severity: [] for severity in ReviewFindingSeverity
+            }
+            for finding in report.findings:
+                findings_by_severity[finding.severity].append(
+                    {
+                        "sequence": finding.sequence,
+                        "code": finding.code,
+                        "severity": finding.severity.value,
+                        "required": finding.required,
+                        "evidence_segment_ids": [
+                            str(item) for item in finding.evidence_segment_ids
+                        ],
+                        "rationale": finding.rationale,
+                        "suggested_action": finding.suggested_action,
+                        "segmenter_version": context.segment_map.segmenter_version,
+                        "segment_map_hash": context.segment_map.map_hash,
+                    }
+                )
+            persisted = ReviewReport(
+                project_id=project_id,
+                chapter_id=chapter_id,
+                workflow_run_id=run.id,
+                review_mode=report.review_mode,
+                reviewer_agent_role=report.reviewer_role.value,
+                target_document_id=context.document.id,
+                target_version_id=context.version.id,
+                passed=report.passed,
+                summary=report.summary,
+                blocking_issues=findings_by_severity[ReviewFindingSeverity.BLOCKING],
+                warnings=findings_by_severity[ReviewFindingSeverity.WARNING],
+                notes=findings_by_severity[ReviewFindingSeverity.NOTE],
+                suggested_actions=list(report.suggested_actions),
+                raw_report={
+                    "claim_id": expected_claim_id,
+                    "contract_version": _CONTRACT_VERSION,
+                    "operation_key": expected_operation_key,
+                    "request_hash": expected_request_hash,
+                    "segment_map_hash": context.segment_map.map_hash,
+                    "segmenter_version": context.segment_map.segmenter_version,
+                },
+            )
+            self.session.add(persisted)
+            await self.session.flush()
+            outcome = (
+                ChapterReviewOutcome.BLOCKING
+                if persisted.blocking_issues
+                else ChapterReviewOutcome.WARNING
+                if persisted.warnings
+                else ChapterReviewOutcome.PASSED
+            )
+            action: ActionRequest | None = None
+            action_binding: ChapterActionBinding | None = None
+            if outcome is not ChapterReviewOutcome.PASSED:
+                pending_count = await self.session.scalar(
+                    select(func.count())
+                    .select_from(ActionRequest)
+                    .where(
+                        ActionRequest.workflow_run_id == run.id,
+                        ActionRequest.status == ActionRequestStatus.PENDING.value,
+                    )
+                )
+                if pending_count != 0:
+                    raise ChapterProductionV2ReconciliationError()
+                action_kind = (
+                    ChapterActionKind.REVIEW_WARNING
+                    if outcome is ChapterReviewOutcome.WARNING
+                    else ChapterActionKind.REVIEW_REVISION
+                )
+                action = self._new_review_action(
+                    run=run,
+                    project_id=project_id,
+                    chapter_id=chapter_id,
+                    document=context.document,
+                    version=context.version,
+                    report=persisted,
+                    stage=context.stage,
+                    action_kind=action_kind,
+                    operation_key=expected_operation_key,
+                )
+                self.session.add(action)
+                await self.session.flush()
+                action_binding = ChapterActionBinding(
+                    action_request_id=str(action.id),
+                    workflow_run_id=str(run.id),
+                    chapter_id=str(chapter_id),
+                    request_type=action.request_type,
+                    kind=action_kind,
+                    status=ActionRequestStatus.PENDING,
+                    pending_count=1,
+                    document_id=str(context.document.id),
+                    document_version_id=str(context.version.id),
+                    content_hash=context.version.content_hash,
+                    current_document_id=str(context.document.id),
+                    current_document_version_id=str(context.version.id),
+                    current_content_hash=context.version.content_hash,
+                )
+            review_binding = ChapterReviewBinding(
+                report_id=str(persisted.id),
+                stage=context.stage,
+                workflow_run_id=str(run.id),
+                chapter_id=str(chapter_id),
+                document_id=str(context.document.id),
+                document_version_id=str(context.version.id),
+                review_mode=persisted.review_mode,
+                reviewer_agent_role=persisted.reviewer_agent_role,
+                passed=persisted.passed,
+            )
+            next_state = state.record_review(
+                outcome=outcome,
+                review=review_binding,
+                action=action_binding,
+            )
+            self._set_reviewer_claim(run, None)
+            if (
+                context.stage is ChapterReviewStage.LORE
+                and outcome is ChapterReviewOutcome.PASSED
+            ):
+                next_state = await self._enter_revision_ready_locked(
+                    run=run,
+                    checkpoint=checkpoint,
+                    state=next_state,
+                    document=context.document,
+                    version=context.version,
+                )
+            else:
+                self._append_state(run, checkpoint, next_state)
+            self.session.add(
+                WorkflowEvent(
+                    workflow_run_id=run.id,
+                    event_type=_REVIEW_EVENT_TYPE,
+                    node_name=next_state.current_node,
+                    payload={
+                        "chapter_id": str(chapter_id),
+                        "document_version_id": str(context.version.id),
+                        "finding_codes": [item.code for item in report.findings],
+                        "review_outcome": outcome.value,
+                        "review_report_id": str(persisted.id),
+                        "review_stage": context.stage.value,
+                        "segment_map_hash": context.segment_map.map_hash,
+                        "status": next_state.status.value,
+                    },
+                )
+            )
+            await self._commit()
+            return ChapterProductionV2Updated(
+                workflow_run_id=run.id,
+                draft_document_id=context.document.id,
+                draft_version_id=context.version.id,
+                action_request_id=action.id if action is not None else None,
+            )
+        except ChapterProductionV2CommitIndeterminateError:
+            raise
+        except ChapterProductionV2ReconciliationError:
+            await self._rollback()
+            raise
+        except ChapterProductionV2ValidationError:
+            await self._rollback()
+            raise
+        except Exception:
+            await self._rollback()
+            raise _invalid() from None
+
+    @staticmethod
+    def _set_reviewer_claim(
+        run: WorkflowRun, claim: dict[str, object] | None
+    ) -> None:
+        run.metadata_ = {**run.metadata_, "reviewer_claim": claim}
+
+    async def _release_reviewer_claim(
+        self,
+        workflow_run_id: UUID,
+        *,
+        expected_operation_key: str,
+        expected_claim_id: str,
+    ) -> None:
+        try:
+            projection = await self.session.scalar(
+                select(WorkflowRun).where(WorkflowRun.id == workflow_run_id)
+            )
+            if (
+                projection is None
+                or projection.project_id is None
+                or projection.chapter_id is None
+            ):
+                await self._rollback()
+                return
+            await self._chapter(projection.project_id, projection.chapter_id, lock=True)
+            run = await self._run(
+                projection.project_id,
+                projection.chapter_id,
+                workflow_run_id,
+                lock=True,
+            )
+            claim = self._run_metadata(run)["reviewer_claim"]
+            if (
+                type(claim) is dict
+                and claim.get("operation_key") == expected_operation_key
+                and claim.get("claim_id") == expected_claim_id
+                and claim.get("status") == _REVIEWER_CLAIM_STATUS_CLAIMED
+            ):
+                self._set_reviewer_claim(run, None)
+                await self._commit()
+            else:
+                await self._rollback()
+        except BaseException:
+            await self._rollback()
+
+    async def _fail_reviewer(
+        self,
+        *,
+        project_id: UUID,
+        chapter_id: UUID,
+        workflow_run_id: UUID,
+        actor_user_id: UUID,
+        expected_operation_key: str,
+        expected_claim_id: str,
+        failure_code: ChapterFailureCode,
+    ) -> None:
+        try:
+            await self._require_project_owner(project_id, actor_user_id)
+            await self._chapter(project_id, chapter_id, lock=True)
+            run = await self._run(project_id, chapter_id, workflow_run_id, lock=True)
+            state, checkpoint = await self._locked_state(run)
+            claim = self._run_metadata(run)["reviewer_claim"]
+            if (
+                state.status
+                not in {
+                    ChapterProductionStatus.EDITOR_REVIEW,
+                    ChapterProductionStatus.CHIEF_FINAL_REVIEW,
+                    ChapterProductionStatus.LORE_FINAL_REVIEW,
+                }
+                or type(claim) is not dict
+                or claim.get("operation_key") != expected_operation_key
+                or claim.get("claim_id") != expected_claim_id
+                or claim.get("checkpoint_index") != checkpoint.checkpoint_index
+                or claim.get("status") != _REVIEWER_CLAIM_STATUS_CLAIMED
+            ):
+                raise ChapterProductionV2ReconciliationError()
+            failed = state.fail(failure_code)
+            self._set_reviewer_claim(
+                run, {**claim, "status": _REVIEWER_CLAIM_STATUS_FAILED}
+            )
+            self._append_state(run, checkpoint, failed)
+            await self._commit()
+        except ChapterProductionV2CommitIndeterminateError:
+            raise
+        except ChapterProductionV2ReconciliationError:
+            await self._rollback()
+            raise
+        except Exception:
+            await self._rollback()
+
+    @staticmethod
+    def _new_review_action(
+        *,
+        run: WorkflowRun,
+        project_id: UUID,
+        chapter_id: UUID,
+        document: Document,
+        version: DocumentVersion,
+        report: ReviewReport,
+        stage: ChapterReviewStage,
+        action_kind: ChapterActionKind,
+        operation_key: str,
+    ) -> ActionRequest:
+        if action_kind is ChapterActionKind.REVIEW_WARNING:
+            request_type = _REVIEW_WARNING_ACTION_TYPE
+            options = ["accept_warning", "request_revision"]
+            default_option = None
+            prompt = "Review the warning for the current chapter version."
+        elif action_kind is ChapterActionKind.REVIEW_REVISION:
+            request_type = _REVIEW_REVISION_ACTION_TYPE
+            options = ["request_revision"]
+            default_option = "request_revision"
+            prompt = "Request a revision for the blocking chapter review."
+        else:
+            raise _invalid()
+        return ActionRequest(
+            workflow_run_id=run.id,
+            project_id=project_id,
+            chapter_id=chapter_id,
+            request_type=request_type,
+            status=ActionRequestStatus.PENDING.value,
+            prompt=prompt,
+            options=options,
+            default_option=default_option,
+            metadata_={
+                "contract_version": _CONTRACT_VERSION,
+                "action_kind": action_kind.value,
+                "document_id": str(document.id),
+                "document_version_id": str(version.id),
+                "content_hash": version.content_hash,
+                "operation_key": operation_key,
+                "review_report_id": str(report.id),
+                "review_stage": stage.value,
+            },
+        )
+
+    @staticmethod
+    def _review_action_metadata(action: ActionRequest) -> dict[str, str]:
+        metadata = action.metadata_
+        if (
+            type(metadata) is not dict
+            or set(metadata)
+            != {
+                "contract_version",
+                "action_kind",
+                "document_id",
+                "document_version_id",
+                "content_hash",
+                "operation_key",
+                "review_report_id",
+                "review_stage",
+            }
+            or metadata.get("contract_version") != _CONTRACT_VERSION
+            or metadata.get("action_kind")
+            not in {
+                ChapterActionKind.REVIEW_WARNING.value,
+                ChapterActionKind.REVIEW_REVISION.value,
+            }
+            or metadata.get("review_stage") not in {item.value for item in ChapterReviewStage}
+            or not _valid_nonzero_uuid(metadata.get("document_id"))
+            or not _valid_nonzero_uuid(metadata.get("document_version_id"))
+            or not _valid_nonzero_uuid(metadata.get("review_report_id"))
+            or not _valid_sha256(metadata.get("content_hash"))
+            or not _valid_sha256(metadata.get("operation_key"))
+            or action.status != ActionRequestStatus.PENDING.value
+            or action.user_decision is not None
+            or action.user_feedback is not None
+            or action.resolved_by_id is not None
+            or action.resolved_at is not None
+        ):
+            raise _invalid()
+        expected_type = (
+            _REVIEW_WARNING_ACTION_TYPE
+            if metadata["action_kind"] == ChapterActionKind.REVIEW_WARNING.value
+            else _REVIEW_REVISION_ACTION_TYPE
+        )
+        expected_options = (
+            (["accept_warning", "request_revision"], None)
+            if metadata["action_kind"] == ChapterActionKind.REVIEW_WARNING.value
+            else (["request_revision"], "request_revision")
+        )
+        expected_prompt = (
+            "Review the warning for the current chapter version."
+            if metadata["action_kind"] == ChapterActionKind.REVIEW_WARNING.value
+            else "Request a revision for the blocking chapter review."
+        )
+        if (
+            action.request_type != expected_type
+            or action.options != expected_options[0]
+            or action.default_option != expected_options[1]
+            or action.prompt != expected_prompt
+        ):
+            raise _invalid()
+        return metadata  # type: ignore[return-value]
+
+    async def _validated_resolved_review_action(
+        self,
+        *,
+        run: WorkflowRun,
+        document: Document,
+        version: DocumentVersion,
+        report: ReviewReport,
+        stage: ChapterReviewStage,
+    ) -> ActionRequest:
+        actions = list(
+            await self.session.scalars(
+                select(ActionRequest)
+                .execution_options(populate_existing=True)
+                .where(ActionRequest.workflow_run_id == run.id)
+                .with_for_update()
+            )
+        )
+        candidates = [
+            action
+            for action in actions
+            if type(action.metadata_) is dict
+            and action.metadata_.get("document_id") == str(document.id)
+            and action.metadata_.get("document_version_id") == str(version.id)
+            and action.metadata_.get("review_report_id") == str(report.id)
+        ]
+        if len(candidates) != 1:
+            raise ChapterProductionV2ReconciliationError()
+        action = candidates[0]
+        metadata = action.metadata_
+        expected_keys = {
+            "contract_version",
+            "action_kind",
+            "document_id",
+            "document_version_id",
+            "content_hash",
+            "operation_key",
+            "review_report_id",
+            "review_stage",
+        }
+        action_kind = (
+            ChapterActionKind.REVIEW_REVISION
+            if report.blocking_issues
+            else ChapterActionKind.REVIEW_WARNING
+            if report.warnings
+            else None
+        )
+        expected_type = (
+            _REVIEW_REVISION_ACTION_TYPE
+            if action_kind is ChapterActionKind.REVIEW_REVISION
+            else _REVIEW_WARNING_ACTION_TYPE
+        )
+        expected_options = (
+            (["request_revision"], "request_revision")
+            if action_kind is ChapterActionKind.REVIEW_REVISION
+            else (["accept_warning", "request_revision"], None)
+        )
+        if (
+            action.project_id != run.project_id
+            or action.chapter_id != run.chapter_id
+            or type(metadata) is not dict
+            or set(metadata) != expected_keys
+            or action_kind is None
+            or metadata.get("contract_version") != _CONTRACT_VERSION
+            or metadata.get("action_kind") != action_kind.value
+            or metadata.get("content_hash") != version.content_hash
+            or metadata.get("operation_key") != report.raw_report.get("operation_key")
+            or metadata.get("review_stage") != stage.value
+            or action.request_type != expected_type
+            or action.options != expected_options[0]
+            or action.default_option != expected_options[1]
+            or action.status != ActionRequestStatus.REVISED.value
+            or action.user_decision != ChapterActionDecision.REQUEST_REVISION.value
+            or action.user_feedback is not None
+            or action.resolved_by_id is None
+            or action.resolved_at is None
+        ):
+            raise ChapterProductionV2ReconciliationError()
+        return action
+
+    async def _validated_persisted_review_report(
+        self,
+        *,
+        row: ReviewReport,
+        run: WorkflowRun,
+        document: Document,
+        version: DocumentVersion,
+        stage: ChapterReviewStage,
+    ) -> ChapterReviewReport:
+        mode, role = {
+            ChapterReviewStage.EDITOR: (ReviewMode.CHAPTER_EDITOR.value, "editor_agent"),
+            ChapterReviewStage.CHIEF_EDITOR: (
+                ReviewMode.CHAPTER_CHIEF_FINAL.value,
+                "chief_editor_agent",
+            ),
+            ChapterReviewStage.LORE: (ReviewMode.CHAPTER_FINAL_LORE.value, "lore_agent"),
+        }[stage]
+        provenance_keys = {
+            "claim_id",
+            "contract_version",
+            "operation_key",
+            "request_hash",
+            "segment_map_hash",
+            "segmenter_version",
+        }
+        finding_keys = {
+            "sequence",
+            "code",
+            "severity",
+            "required",
+            "evidence_segment_ids",
+            "rationale",
+            "suggested_action",
+            "segmenter_version",
+            "segment_map_hash",
+        }
+        if (
+            row.project_id != run.project_id
+            or row.chapter_id != run.chapter_id
+            or row.workflow_run_id != run.id
+            or row.target_document_id != document.id
+            or row.target_version_id != version.id
+            or row.review_mode != mode
+            or row.reviewer_agent_role != role
+            or type(row.raw_report) is not dict
+            or set(row.raw_report) != provenance_keys
+            or row.raw_report.get("contract_version") != _CONTRACT_VERSION
+            or row.raw_report.get("segmenter_version")
+            != CURRENT_CHAPTER_SEGMENTER_VERSION
+            or not _valid_nonzero_uuid(row.raw_report.get("claim_id"))
+            or not _valid_sha256(row.raw_report.get("operation_key"))
+            or not _valid_sha256(row.raw_report.get("request_hash"))
+            or not _valid_sha256(row.raw_report.get("segment_map_hash"))
+            or type(row.blocking_issues) is not list
+            or type(row.warnings) is not list
+            or type(row.notes) is not list
+            or type(row.suggested_actions) is not list
+        ):
+            raise ChapterProductionV2ReconciliationError()
+        segment_map = await self.documents.derive_chapter_segment_map(
+            project_id=run.project_id,
+            chapter_id=run.chapter_id,
+            document_id=document.id,
+            version_id=version.id,
+        )
+        if row.raw_report["segment_map_hash"] != segment_map.map_hash:
+            raise ChapterProductionV2ReconciliationError()
+        findings: list[dict[str, object]] = []
+        for bucket, severity in (
+            (row.blocking_issues, ReviewFindingSeverity.BLOCKING),
+            (row.warnings, ReviewFindingSeverity.WARNING),
+            (row.notes, ReviewFindingSeverity.NOTE),
+        ):
+            for item in bucket:
+                if (
+                    type(item) is not dict
+                    or set(item) != finding_keys
+                    or item.get("severity") != severity.value
+                    or item.get("segmenter_version") != segment_map.segmenter_version
+                    or item.get("segment_map_hash") != segment_map.map_hash
+                ):
+                    raise ChapterProductionV2ReconciliationError()
+                findings.append(
+                    {key: value for key, value in item.items() if key not in {
+                        "segmenter_version",
+                        "segment_map_hash",
+                    }}
+                )
+        findings.sort(key=lambda item: item.get("sequence", 0))
+        try:
+            validated = ChapterReviewReport(
+                project_id=run.project_id,
+                chapter_id=run.chapter_id,
+                workflow_run_id=run.id,
+                reviewer_role=role,
+                review_mode=mode,
+                target_document_id=document.id,
+                target_version_id=version.id,
+                passed=row.passed,
+                summary=row.summary,
+                findings=tuple(findings),
+                suggested_actions=tuple(row.suggested_actions),
+            )
+        except Exception:
+            raise ChapterProductionV2ReconciliationError() from None
+        known_segments = {item.segment_id for item in segment_map.segments}
+        if any(
+            not set(finding.evidence_segment_ids) <= known_segments
+            for finding in validated.findings
+        ):
+            raise ChapterProductionV2ReconciliationError()
+        return validated
+
+    async def _live_review_bindings_locked(
+        self,
+        *,
+        run: WorkflowRun,
+        state: ChapterProductionState | _ReviewStateReferences,
+        document: Document,
+        version: DocumentVersion,
+    ) -> tuple[
+        ChapterReviewPolicyBinding,
+        ChapterReviewBinding,
+        ChapterReviewBinding | None,
+        ChapterReviewBinding,
+    ]:
+        metadata = self._run_metadata(run)
+        policy = ChapterReviewPolicyBinding(
+            workflow_run_id=str(run.id),
+            chapter_id=str(run.chapter_id),
+            review_policy_version=metadata["review_policy_version"],
+            chief_editor_required=metadata["chief_editor_required"],
+        )
+        expected = _review_report_slots(
+            editor_report_id=UUID(state.editor_report_id) if state.editor_report_id else None,
+            chief_editor_report_id=(
+                UUID(state.chief_editor_report_id) if state.chief_editor_report_id else None
+            ),
+            lore_report_id=UUID(state.lore_report_id) if state.lore_report_id else None,
+        )
+        required_count = 3 if state.chief_editor_required else 2
+        if len(expected) != required_count:
+            raise _invalid()
+        rows = list(
+            await self.session.scalars(
+                select(ReviewReport)
+                .execution_options(populate_existing=True)
+                .where(
+                    ReviewReport.project_id == run.project_id,
+                    ReviewReport.chapter_id == run.chapter_id,
+                    ReviewReport.workflow_run_id == run.id,
+                    ReviewReport.target_document_id == document.id,
+                    ReviewReport.target_version_id == version.id,
+                    ReviewReport.review_mode.in_(
+                        (
+                            ReviewMode.CHAPTER_EDITOR.value,
+                            ReviewMode.CHAPTER_CHIEF_FINAL.value,
+                            ReviewMode.CHAPTER_FINAL_LORE.value,
+                        )
+                    ),
+                )
+                .with_for_update()
+            )
+        )
+        if len(rows) != required_count or {row.id for row in rows} != {
+            item[0] for item in expected
+        }:
+            raise ChapterProductionV2ReconciliationError()
+        by_id = {row.id: row for row in rows}
+        bindings: dict[ChapterReviewStage, ChapterReviewBinding] = {}
+        for report_id, mode, role in expected:
+            row = by_id[report_id]
+            stage = {
+                ReviewMode.CHAPTER_EDITOR.value: ChapterReviewStage.EDITOR,
+                ReviewMode.CHAPTER_CHIEF_FINAL.value: ChapterReviewStage.CHIEF_EDITOR,
+                ReviewMode.CHAPTER_FINAL_LORE.value: ChapterReviewStage.LORE,
+            }[mode]
+            if (
+                row.review_mode != mode
+                or row.reviewer_agent_role != role
+                or row.passed is not True
+                or row.target_document_id != document.id
+                or row.target_version_id != version.id
+            ):
+                raise ChapterProductionV2ReconciliationError()
+            await self._validated_persisted_review_report(
+                row=row,
+                run=run,
+                document=document,
+                version=version,
+                stage=stage,
+            )
+            bindings[stage] = ChapterReviewBinding(
+                report_id=str(row.id),
+                stage=stage,
+                workflow_run_id=str(run.id),
+                chapter_id=str(run.chapter_id),
+                document_id=str(document.id),
+                document_version_id=str(version.id),
+                review_mode=row.review_mode,
+                reviewer_agent_role=row.reviewer_agent_role,
+                passed=row.passed,
+            )
+        return (
+            policy,
+            bindings[ChapterReviewStage.EDITOR],
+            bindings.get(ChapterReviewStage.CHIEF_EDITOR),
+            bindings[ChapterReviewStage.LORE],
+        )
+
+    async def _enter_revision_ready_locked(
+        self,
+        *,
+        run: WorkflowRun,
+        checkpoint: WorkflowCheckpoint,
+        state: ChapterProductionState,
+        document: Document,
+        version: DocumentVersion,
+    ) -> ChapterProductionState:
+        policy, editor, chief, lore = await self._live_review_bindings_locked(
+            run=run, state=state, document=document, version=version
+        )
+        try:
+            ready = state.finalize_revision_ready(
+                policy=policy,
+                document_id=str(document.id),
+                current_document_version_id=str(version.id),
+                version_content_hash=version.content_hash,
+                editor_report=editor,
+                chief_editor_report=chief,
+                lore_report=lore,
+            )
+        except ChapterProductionValidationError:
+            raise _invalid() from None
+        pairs = await self._validated_ready_pairs_locked(run)
+        semantic_key = (str(run.id), str(version.id), policy.review_policy_version)
+        matches = [pair for pair in pairs if pair.state.semantic_ready_key == semantic_key]
+        if not matches:
+            ready_checkpoint = WorkflowCheckpoint(
+                workflow_run_id=run.id,
+                checkpoint_index=checkpoint.checkpoint_index + 1,
+                node_name=ready.current_node,
+                state_json=ready.to_checkpoint(),
+            )
+            self.session.add(ready_checkpoint)
+            await self.session.flush()
+            self.session.add(
+                WorkflowEvent(
+                    workflow_run_id=run.id,
+                    event_type=_READY_EVENT_TYPE,
+                    node_name=ready.current_node,
+                    payload={
+                        "chapter_id": str(run.chapter_id),
+                        "checkpoint_id": str(ready_checkpoint.id),
+                        "checkpoint_index": ready_checkpoint.checkpoint_index,
+                        "document_id": str(document.id),
+                        "document_version_id": str(version.id),
+                        "content_hash": version.content_hash,
+                        "review_policy_version": policy.review_policy_version,
+                        "status": ChapterProductionStatus.REVISION_READY.value,
+                    },
+                )
+            )
+            self._project_state(run, ready)
+            return ready
+        if len(matches) == 1:
+            ready_checkpoint = matches[0].checkpoint
+            event = matches[0].event
+            expected_payload = {
+                "chapter_id": str(run.chapter_id),
+                "checkpoint_id": str(ready_checkpoint.id),
+                "checkpoint_index": ready_checkpoint.checkpoint_index,
+                "document_id": str(document.id),
+                "document_version_id": str(version.id),
+                "content_hash": version.content_hash,
+                "review_policy_version": policy.review_policy_version,
+                "status": ChapterProductionStatus.REVISION_READY.value,
+            }
+            if (
+                ready_checkpoint.node_name != ready.current_node
+                or ready_checkpoint.state_json != ready.to_checkpoint()
+                or event.node_name != ready.current_node
+                or event.payload != expected_payload
+            ):
+                raise ChapterProductionV2ReconciliationError()
+            self._project_state(run, ready)
+            return ready
+        raise ChapterProductionV2ReconciliationError()
+
+    async def _validated_ready_pairs_locked(
+        self, run: WorkflowRun
+    ) -> tuple[_ReadyPair, ...]:
+        checkpoints = list(
+            await self.session.scalars(
+                select(WorkflowCheckpoint)
+                .execution_options(populate_existing=True)
+                .where(WorkflowCheckpoint.workflow_run_id == run.id)
+                .order_by(WorkflowCheckpoint.checkpoint_index)
+                .with_for_update()
+            )
+        )
+        markers = [
+            item
+            for item in checkpoints
+            if item.node_name == ChapterProductionStatus.REVISION_READY.value
+            or (
+                type(item.state_json) is dict
+                and item.state_json.get("status")
+                == ChapterProductionStatus.REVISION_READY.value
+            )
+        ]
+        restored: list[tuple[ChapterProductionState, WorkflowCheckpoint]] = []
+        for marker in markers:
+            if (
+                marker.node_name != ChapterProductionStatus.REVISION_READY.value
+                or type(marker.state_json) is not dict
+                or marker.state_json.get("status")
+                != ChapterProductionStatus.REVISION_READY.value
+                or sum(
+                    item.checkpoint_index == marker.checkpoint_index - 1
+                    for item in checkpoints
+                )
+                != 1
+            ):
+                raise ChapterProductionV2ReconciliationError()
+            restored.append((await self._restore_ready_marker_locked(run, marker), marker))
+
+        events = list(
+            await self.session.scalars(
+                select(WorkflowEvent)
+                .execution_options(populate_existing=True)
+                .where(
+                    WorkflowEvent.workflow_run_id == run.id,
+                    WorkflowEvent.event_type == _READY_EVENT_TYPE,
+                )
+                .with_for_update()
+            )
+        )
+        expected_event_keys = {
+            "chapter_id",
+            "checkpoint_id",
+            "checkpoint_index",
+            "document_id",
+            "document_version_id",
+            "content_hash",
+            "review_policy_version",
+            "status",
+        }
+        if len(events) != len(restored) or any(
+            type(item.payload) is not dict or set(item.payload) != expected_event_keys
+            for item in events
+        ):
+            raise ChapterProductionV2ReconciliationError()
+        pairs: list[_ReadyPair] = []
+        used_events: set[UUID] = set()
+        for state, marker in restored:
+            matching = [
+                item
+                for item in events
+                if item.payload.get("checkpoint_id") == str(marker.id)
+            ]
+            expected_payload = {
+                "chapter_id": str(run.chapter_id),
+                "checkpoint_id": str(marker.id),
+                "checkpoint_index": marker.checkpoint_index,
+                "document_id": state.document_id,
+                "document_version_id": state.document_version_id,
+                "content_hash": state.content_hash,
+                "review_policy_version": state.review_policy_version,
+                "status": ChapterProductionStatus.REVISION_READY.value,
+            }
+            if (
+                len(matching) != 1
+                or matching[0].id in used_events
+                or matching[0].node_name != ChapterProductionStatus.REVISION_READY.value
+                or matching[0].payload != expected_payload
+            ):
+                raise ChapterProductionV2ReconciliationError()
+            used_events.add(matching[0].id)
+            pairs.append(_ReadyPair(state, marker, matching[0]))
+        return tuple(pairs)
+
+    async def _restore_ready_marker_locked(
+        self, run: WorkflowRun, checkpoint: WorkflowCheckpoint
+    ) -> ChapterProductionState:
+        payload = checkpoint.state_json
+        try:
+            if type(payload) is not dict:
+                raise ChapterProductionValidationError("READY payload is malformed.")
+            references = _ReviewStateReferences(
+                review_policy_version=payload["review_policy_version"],
+                chief_editor_required=payload["chief_editor_required"],
+                editor_report_id=payload["editor_report_id"],
+                chief_editor_report_id=payload["chief_editor_report_id"],
+                lore_report_id=payload["lore_report_id"],
+            )
+            document_id = UUID(payload["document_id"])
+            version_id = UUID(payload["document_version_id"])
+            document = await self.session.scalar(
+                select(Document)
+                .options(selectinload(Document.project))
+                .execution_options(populate_existing=True)
+                .where(
+                    Document.id == document_id,
+                    Document.project_id == run.project_id,
+                    Document.chapter_id == run.chapter_id,
+                    Document.type == DocumentType.CHAPTER_DRAFT.value,
+                )
+                .with_for_update()
+            )
+            version = await self.session.scalar(
+                select(DocumentVersion)
+                .execution_options(populate_existing=True)
+                .where(
+                    DocumentVersion.id == version_id,
+                    DocumentVersion.document_id == document_id,
+                    DocumentVersion.content_hash == payload["content_hash"],
+                )
+                .with_for_update()
+            )
+            if document is None or version is None:
+                raise ChapterProductionValidationError("READY version is stale.")
+            policy, editor, chief, lore = await self._live_review_bindings_locked(
+                run=run,
+                state=references,
+                document=document,
+                version=version,
+            )
+            return ChapterProductionState.from_revision_ready_checkpoint(
+                payload,
+                policy=policy,
+                workflow_run_id=str(run.id),
+                chapter_id=str(run.chapter_id),
+                run_workflow_type=run.workflow_type,
+                run_status=ChapterProductionStatus.REVISION_READY.value,
+                run_current_node=ChapterProductionStatus.REVISION_READY.value,
+                run_awaiting_user=False,
+                checkpoint_workflow_run_id=str(checkpoint.workflow_run_id),
+                checkpoint_node_name=checkpoint.node_name,
+                document_id=str(document.id),
+                current_document_version_id=str(version.id),
+                version_content_hash=version.content_hash,
+                editor_report=editor,
+                chief_editor_report=chief,
+                lore_report=lore,
+            )
+        except ChapterProductionV2ReconciliationError:
+            raise
+        except (ChapterProductionValidationError, KeyError, TypeError, ValueError):
+            raise ChapterProductionV2ReconciliationError() from None
+
+    @staticmethod
+    def _final_operation_key(
+        run: WorkflowRun, state: ChapterProductionState
+    ) -> str:
+        if state.document_version_id is None:
+            raise _invalid()
+        return sha256_content(
+            ":".join(
+                (
+                    _CONTRACT_VERSION,
+                    str(run.id),
+                    state.document_version_id,
+                    state.review_policy_version,
+                    "non-panel-final-promotion",
+                )
+            )
+        )
+
+    @staticmethod
+    def _final_document_path(*, chapter: Chapter, run: WorkflowRun) -> str:
+        return f"chapters/chapter-{chapter.chapter_number:04d}-{run.id}-final.md"
+
+    @classmethod
+    def _valid_final_document_paths(
+        cls,
+        *,
+        chapter: Chapter,
+        run: WorkflowRun,
+        document: Document,
+        version: DocumentVersion,
+    ) -> bool:
+        return (
+            document.path == cls._final_document_path(chapter=chapter, run=run)
+            and type(version.version_number) is int
+            and version.version_number == 1
+            and version.file_path == document.path
+            and version.snapshot_path
+            == version_snapshot_path(str(document.id), version.version_number).as_posix()
+        )
+
+    def _verify_final_artifacts(
+        self, *, document: Document, version: DocumentVersion
+    ) -> None:
+        read_failed = False
+        try:
+            snapshot_content = self._verified_snapshot_content(document, version)
+            current_content = MarkdownStore(
+                Path(document.project.workspace_root)
+            ).read_bounded(
+                document.path,
+                max_bytes=MAX_CHAPTER_CONTENT_BYTES,
+            )
+        except Exception:
+            read_failed = True
+            snapshot_content = ""
+            current_content = ""
+        if read_failed:
+            raise ChapterProductionV2ReconciliationError()
+        if (
+            current_content != snapshot_content
+            or len(current_content.encode("utf-8")) != version.byte_size
+            or sha256_content(current_content) != version.content_hash
+        ):
+            raise ChapterProductionV2ReconciliationError()
+
+    async def _finalized_result_locked(
+        self,
+        *,
+        chapter: Chapter,
+        run: WorkflowRun,
+        state: ChapterProductionState,
+    ) -> ChapterProductionV2Finalized:
+        if chapter.final_document_id is None or state.content_hash is None:
+            raise ChapterProductionV2ReconciliationError()
+        documents = list(
+            await self.session.scalars(
+                select(Document)
+                .options(selectinload(Document.project))
+                .execution_options(populate_existing=True)
+                .where(
+                    Document.project_id == run.project_id,
+                    Document.chapter_id == chapter.id,
+                    Document.type == DocumentType.CHAPTER_FINAL.value,
+                )
+                .with_for_update()
+            )
+        )
+        if len(documents) != 1 or documents[0].id != chapter.final_document_id:
+            raise ChapterProductionV2ReconciliationError()
+        document = documents[0]
+        version = await self._locked_current_document_version(document)
+        if (
+            version is None
+            or document.current_version_id != version.id
+            or version.document_id != document.id
+            or not self._valid_final_document_paths(
+                chapter=chapter,
+                run=run,
+                document=document,
+                version=version,
+            )
+            or version.content_hash != state.content_hash
+            or version.workflow_run_id != run.id
+            or version.source != DocumentSource.SYSTEM.value
+            or version.parent_version_id is not None
+            or version.metadata_
+            != {
+                "contract_version": _CONTRACT_VERSION,
+                "operation_key": self._final_operation_key(run, state),
+            }
+        ):
+            raise ChapterProductionV2ReconciliationError()
+        self._verify_final_artifacts(document=document, version=version)
+        return ChapterProductionV2Finalized(run.id, document.id, version.id)
+
+    async def _locked_current_document_version(
+        self, document: Document
+    ) -> DocumentVersion:
+        if document.current_version_id is None:
+            raise ChapterProductionV2ReconciliationError()
+        version = await self.session.scalar(
+            select(DocumentVersion)
+            .execution_options(populate_existing=True)
+            .where(
+                DocumentVersion.id == document.current_version_id,
+                DocumentVersion.document_id == document.id,
+            )
+            .with_for_update()
+        )
+        if version is None:
+            raise ChapterProductionV2ReconciliationError()
+        return version
+
     async def _finalize_review_revision(
         self,
         *,
@@ -2005,6 +4158,28 @@ class ChapterProductionV2Service:
                 or attempt.get("status") != _ATTEMPT_STATUS_CLAIMED
             ):
                 raise ChapterProductionV2ReconciliationError()
+            source_document = await self.session.scalar(
+                select(Document)
+                .execution_options(populate_existing=True)
+                .where(
+                    Document.id == document_id,
+                    Document.project_id == project_id,
+                    Document.chapter_id == chapter_id,
+                    Document.type == DocumentType.CHAPTER_DRAFT.value,
+                )
+                .with_for_update()
+            )
+            source_version = await self.session.scalar(
+                select(DocumentVersion)
+                .execution_options(populate_existing=True)
+                .where(
+                    DocumentVersion.id == expected_parent_version_id,
+                    DocumentVersion.document_id == document_id,
+                )
+                .with_for_update()
+            )
+            if source_document is None or source_version is None:
+                raise ChapterProductionV2ReconciliationError()
             reports: list[ReviewReport] = []
             for report_id, expected_mode, expected_role in report_slots:
                 report = await self.session.scalar(
@@ -2024,7 +4199,31 @@ class ChapterProductionV2Service:
                 )
                 if report is None:
                     raise ChapterProductionV2ReconciliationError()
+                stage = {
+                    ReviewMode.CHAPTER_EDITOR.value: ChapterReviewStage.EDITOR,
+                    ReviewMode.CHAPTER_CHIEF_FINAL.value: ChapterReviewStage.CHIEF_EDITOR,
+                    ReviewMode.CHAPTER_FINAL_LORE.value: ChapterReviewStage.LORE,
+                }[expected_mode]
+                await self._validated_persisted_review_report(
+                    row=report,
+                    run=run,
+                    document=source_document,
+                    version=source_version,
+                    stage=stage,
+                )
                 reports.append(report)
+            trigger_mode = report_slots[-1][1]
+            await self._validated_resolved_review_action(
+                run=run,
+                document=source_document,
+                version=source_version,
+                report=reports[-1],
+                stage={
+                    ReviewMode.CHAPTER_EDITOR.value: ChapterReviewStage.EDITOR,
+                    ReviewMode.CHAPTER_CHIEF_FINAL.value: ChapterReviewStage.CHIEF_EDITOR,
+                    ReviewMode.CHAPTER_FINAL_LORE.value: ChapterReviewStage.LORE,
+                }[trigger_mode],
+            )
             if self._review_report_input_hash(reports) != report_input_hash:
                 raise ChapterProductionV2ReconciliationError()
             document, version = await self._locked_current_revision(
@@ -2370,6 +4569,7 @@ class ChapterProductionV2Service:
                 "warnings": report.warnings,
                 "notes": report.notes,
                 "suggested_actions": report.suggested_actions,
+                "raw_report": report.raw_report,
             }
             for report in reports
         ]
@@ -3416,7 +5616,7 @@ class ChapterProductionV2Service:
             raise _invalid()
         statement = (
             select(Document)
-            .options(selectinload(Document.project), selectinload(Document.current_version))
+            .options(selectinload(Document.project))
             .where(
                 Document.id == chapter.current_outline_document_id,
                 Document.project_id == project_id,
@@ -3430,7 +5630,7 @@ class ChapterProductionV2Service:
             )
         )
         if lock:
-            statement = statement.with_for_update()
+            statement = statement.with_for_update().execution_options(populate_existing=True)
         outline = await self.session.scalar(statement)
         if outline is None or outline.current_version_id is None:
             raise _invalid()
@@ -3439,7 +5639,9 @@ class ChapterProductionV2Service:
             DocumentVersion.document_id == outline.id,
         )
         if lock:
-            version_statement = version_statement.with_for_update()
+            version_statement = version_statement.with_for_update().execution_options(
+                populate_existing=True
+            )
         version = await self.session.scalar(version_statement)
         if version is None:
             raise _invalid()
@@ -3461,7 +5663,7 @@ class ChapterProductionV2Service:
             Chapter.id == chapter_id, Chapter.project_id == project_id
         )
         if lock:
-            statement = statement.with_for_update()
+            statement = statement.with_for_update().execution_options(populate_existing=True)
         chapter = await self.session.scalar(statement)
         if chapter is None:
             raise _invalid()
@@ -3485,7 +5687,7 @@ class ChapterProductionV2Service:
             WorkflowRun.workflow_type == WorkflowType.CHAPTER_PRODUCTION.value,
         )
         if lock:
-            statement = statement.with_for_update()
+            statement = statement.with_for_update().execution_options(populate_existing=True)
         run = await self.session.scalar(statement)
         if run is None or run.metadata_.get("contract_version") != _CONTRACT_VERSION:
             raise _invalid()
@@ -3528,9 +5730,11 @@ class ChapterProductionV2Service:
     async def _locked_state(
         self, run: WorkflowRun
     ) -> tuple[ChapterProductionState, WorkflowCheckpoint]:
+        self._run_metadata(run)
         checkpoints = list(
             await self.session.scalars(
                 select(WorkflowCheckpoint)
+                .execution_options(populate_existing=True)
                 .where(WorkflowCheckpoint.workflow_run_id == run.id)
                 .order_by(WorkflowCheckpoint.checkpoint_index.desc())
                 .limit(2)
@@ -3544,9 +5748,78 @@ class ChapterProductionV2Service:
             checkpoint.checkpoint_index != checkpoints[1].checkpoint_index + 1
         ):
             raise _invalid()
+        payload = checkpoint.state_json
+        finalized_statuses = {
+            ChapterProductionStatus.REVISION_READY.value,
+            ChapterProductionStatus.ARCHIVE_UPDATE.value,
+            ChapterProductionStatus.COMPLETED.value,
+        }
+        finalized = type(payload) is dict and (
+            payload.get("status") in finalized_statuses
+            or (
+                payload.get("status") == ChapterProductionStatus.FAILED.value
+                and payload.get("failed_from_status") in finalized_statuses
+            )
+        )
         try:
-            state = ChapterProductionState.from_checkpoint(checkpoint.state_json)
-            state.validate_persistence_binding(
+            if not finalized:
+                state = ChapterProductionState.from_checkpoint(payload)
+                state.validate_persistence_binding(
+                    workflow_run_id=str(run.id),
+                    chapter_id=str(run.chapter_id),
+                    run_workflow_type=run.workflow_type,
+                    run_status=run.status,
+                    run_current_node=run.current_node,
+                    run_awaiting_user=run.awaiting_user,
+                    checkpoint_workflow_run_id=str(checkpoint.workflow_run_id),
+                    checkpoint_node_name=checkpoint.node_name,
+                )
+                return state, checkpoint
+            if run.project_id is None or run.chapter_id is None:
+                raise ChapterProductionValidationError("Finalized scope is incomplete.")
+            references = _ReviewStateReferences(
+                review_policy_version=payload["review_policy_version"],
+                chief_editor_required=payload["chief_editor_required"],
+                editor_report_id=payload["editor_report_id"],
+                chief_editor_report_id=payload["chief_editor_report_id"],
+                lore_report_id=payload["lore_report_id"],
+            )
+            document_id = UUID(payload["document_id"])
+            version_id = UUID(payload["document_version_id"])
+            document = await self.session.scalar(
+                select(Document)
+                .options(selectinload(Document.project), selectinload(Document.current_version))
+                .execution_options(populate_existing=True)
+                .where(
+                    Document.id == document_id,
+                    Document.project_id == run.project_id,
+                    Document.chapter_id == run.chapter_id,
+                    Document.type == DocumentType.CHAPTER_DRAFT.value,
+                    Document.current_version_id == version_id,
+                )
+                .with_for_update()
+            )
+            version = await self.session.scalar(
+                select(DocumentVersion)
+                .execution_options(populate_existing=True)
+                .where(
+                    DocumentVersion.id == version_id,
+                    DocumentVersion.document_id == document_id,
+                    DocumentVersion.content_hash == payload["content_hash"],
+                )
+                .with_for_update()
+            )
+            if document is None or version is None:
+                raise ChapterProductionValidationError("Finalized version is stale.")
+            policy, editor, chief, lore = await self._live_review_bindings_locked(
+                run=run,
+                state=references,
+                document=document,
+                version=version,
+            )
+            state = ChapterProductionState.from_finalized_checkpoint(
+                payload,
+                policy=policy,
                 workflow_run_id=str(run.id),
                 chapter_id=str(run.chapter_id),
                 run_workflow_type=run.workflow_type,
@@ -3555,10 +5828,82 @@ class ChapterProductionV2Service:
                 run_awaiting_user=run.awaiting_user,
                 checkpoint_workflow_run_id=str(checkpoint.workflow_run_id),
                 checkpoint_node_name=checkpoint.node_name,
+                document_id=str(document.id),
+                current_document_version_id=str(version.id),
+                version_content_hash=version.content_hash,
+                editor_report=editor,
+                chief_editor_report=chief,
+                lore_report=lore,
             )
-        except ChapterProductionValidationError:
+            await self._validate_existing_ready_pair_locked(
+                run=run,
+                state=state,
+                policy=policy,
+                document=document,
+                version=version,
+                editor=editor,
+                chief=chief,
+                lore=lore,
+            )
+        except (ChapterProductionValidationError, KeyError, TypeError, ValueError):
             raise _invalid() from None
         return state, checkpoint
+
+    async def _validate_existing_ready_pair_locked(
+        self,
+        *,
+        run: WorkflowRun,
+        state: ChapterProductionState,
+        policy: ChapterReviewPolicyBinding,
+        document: Document,
+        version: DocumentVersion,
+        editor: ChapterReviewBinding,
+        chief: ChapterReviewBinding | None,
+        lore: ChapterReviewBinding,
+    ) -> None:
+        semantic_key = (str(run.id), str(version.id), policy.review_policy_version)
+        matches = [
+            pair
+            for pair in await self._validated_ready_pairs_locked(run)
+            if pair.state.semantic_ready_key == semantic_key
+        ]
+        if len(matches) != 1:
+            raise ChapterProductionV2ReconciliationError()
+        ready_checkpoint = matches[0].checkpoint
+        event = matches[0].event
+        ready = ChapterProductionState.from_revision_ready_checkpoint(
+            ready_checkpoint.state_json,
+            policy=policy,
+            workflow_run_id=str(run.id),
+            chapter_id=str(run.chapter_id),
+            run_workflow_type=run.workflow_type,
+            run_status=ChapterProductionStatus.REVISION_READY.value,
+            run_current_node="REVISION_READY",
+            run_awaiting_user=False,
+            checkpoint_workflow_run_id=str(ready_checkpoint.workflow_run_id),
+            checkpoint_node_name=ready_checkpoint.node_name,
+            document_id=str(document.id),
+            current_document_version_id=str(version.id),
+            version_content_hash=version.content_hash,
+            editor_report=editor,
+            chief_editor_report=chief,
+            lore_report=lore,
+        )
+        if ready.semantic_ready_key != (
+            str(run.id),
+            str(version.id),
+            policy.review_policy_version,
+        ) or event.payload != {
+            "chapter_id": str(run.chapter_id),
+            "checkpoint_id": str(ready_checkpoint.id),
+            "checkpoint_index": ready_checkpoint.checkpoint_index,
+            "document_id": str(document.id),
+            "document_version_id": str(version.id),
+            "content_hash": version.content_hash,
+            "review_policy_version": policy.review_policy_version,
+            "status": ChapterProductionStatus.REVISION_READY.value,
+        }:
+            raise ChapterProductionV2ReconciliationError()
 
     async def _committed_draft(
         self, run_id: UUID, operation_key: str
@@ -3660,16 +6005,24 @@ class ChapterProductionV2Service:
             "segmenter_version",
             "operation_key",
             "provider_attempt",
+            "reviewer_claim",
         }
+        legacy_expected = expected - {"reviewer_claim"}
+        if type(metadata) is dict and set(metadata) == legacy_expected:
+            metadata = {**metadata, "reviewer_claim": None}
+            run.metadata_ = metadata
         if (
             type(metadata) is not dict
             or set(metadata) != expected
             or metadata.get("contract_version") != _CONTRACT_VERSION
             or metadata.get("review_policy_version") != _REVIEW_POLICY_VERSION
-            or metadata.get("chief_editor_required") is not True
+            or type(metadata.get("chief_editor_required")) is not bool
             or metadata.get("segmenter_version") != CURRENT_CHAPTER_SEGMENTER_VERSION
             or not ChapterProductionV2Service._attempt_metadata_is_valid(
                 metadata.get("provider_attempt")
+            )
+            or not ChapterProductionV2Service._reviewer_claim_metadata_is_valid(
+                metadata.get("reviewer_claim")
             )
             or any(
                 type(metadata.get(key)) is not str
@@ -3683,6 +6036,40 @@ class ChapterProductionV2Service:
         ):
             raise _invalid()
         return metadata  # type: ignore[return-value]
+
+    @staticmethod
+    def _reviewer_claim_metadata_is_valid(value: object) -> bool:
+        if value is None:
+            return True
+        if type(value) is not dict or set(value) != {
+            "claim_id",
+            "operation_key",
+            "stage",
+            "checkpoint_index",
+            "document_id",
+            "document_version_id",
+            "content_hash",
+            "review_policy_version",
+            "segment_map_hash",
+            "request_hash",
+            "status",
+        }:
+            return False
+        return (
+            _valid_nonzero_uuid(value.get("claim_id"))
+            and _valid_sha256(value.get("operation_key"))
+            and value.get("stage") in {item.value for item in ChapterReviewStage}
+            and type(value.get("checkpoint_index")) is int
+            and value["checkpoint_index"] >= 0
+            and _valid_nonzero_uuid(value.get("document_id"))
+            and _valid_nonzero_uuid(value.get("document_version_id"))
+            and _valid_sha256(value.get("content_hash"))
+            and value.get("review_policy_version") == _REVIEW_POLICY_VERSION
+            and _valid_sha256(value.get("segment_map_hash"))
+            and _valid_sha256(value.get("request_hash"))
+            and value.get("status")
+            in {_REVIEWER_CLAIM_STATUS_CLAIMED, _REVIEWER_CLAIM_STATUS_FAILED}
+        )
 
     @staticmethod
     def _attempt_metadata_is_valid(value: object) -> bool:
@@ -3793,7 +6180,9 @@ class ChapterProductionV2Service:
 
 __all__ = [
     "ChapterProductionV2CommitIndeterminateError",
+    "ChapterProductionV2Finalized",
     "ChapterProductionV2ProviderError",
+    "ChapterProductionV2ReviewProviderError",
     "ChapterProductionV2ReconciliationError",
     "ChapterProductionV2Service",
     "ChapterProductionV2Started",

@@ -318,6 +318,16 @@ async def seeded_review_revision(
         .order_by(WorkflowCheckpoint.checkpoint_index.desc())
     )
     assert run is not None and document is not None and version is not None and latest is not None
+    segment_map = await DocumentService(session).derive_chapter_segment_map(
+        project_id=project.id,
+        chapter_id=chapter.id,
+        document_id=document.id,
+        version_id=version.id,
+    )
+    evidence_segment_id = next(
+        item.segment_id for item in segment_map.segments if item.kind.value == "paragraph"
+    )
+    suggested_action = "Address the blocking review finding in a new candidate."
     report = ReviewReport(
         project_id=project.id,
         chapter_id=chapter.id,
@@ -328,6 +338,30 @@ async def seeded_review_revision(
         target_version_id=version.id,
         passed=False,
         summary="The consequence needs a concrete cost.",
+        blocking_issues=[
+            {
+                "sequence": 1,
+                "code": "seeded_blocking_finding",
+                "severity": "blocking",
+                "required": True,
+                "evidence_segment_ids": [str(evidence_segment_id)],
+                "rationale": "The consequence needs a concrete cost.",
+                "suggested_action": suggested_action,
+                "segmenter_version": segment_map.segmenter_version,
+                "segment_map_hash": segment_map.map_hash,
+            }
+        ],
+        warnings=[],
+        notes=[],
+        suggested_actions=[suggested_action],
+        raw_report={
+            "claim_id": str(uuid4()),
+            "contract_version": "chapter-production-v2",
+            "operation_key": "b" * 64,
+            "request_hash": "d" * 64,
+            "segment_map_hash": segment_map.map_hash,
+            "segmenter_version": segment_map.segmenter_version,
+        },
     )
     action = ActionRequest(
         workflow_run_id=run.id,
@@ -349,6 +383,11 @@ async def seeded_review_revision(
     )
     session.add_all((report, action))
     await session.flush()
+    action.metadata_ = {
+        **action.metadata_,
+        "review_report_id": str(report.id),
+        "review_stage": ChapterReviewStage.EDITOR.value,
+    }
     review_binding = ChapterReviewBinding(
         report_id=str(report.id),
         stage=ChapterReviewStage.EDITOR,
@@ -456,6 +495,7 @@ async def test_start_from_approved_outline_persists_exact_v2_draft_gate_and_repl
         "segmenter_version": "markdown-v1",
         "operation_key": run.metadata_["operation_key"],
         "provider_attempt": None,
+        "reviewer_claim": None,
     }
     assert draft.project_id == project.id and draft.chapter_id == chapter.id
     assert draft.type == DocumentType.CHAPTER_DRAFT.value
@@ -1335,6 +1375,24 @@ async def test_warning_passed_report_can_drive_an_explicit_revision(
         async_session, tmp_path
     )
     report.passed = True
+    warning = {
+        **report.blocking_issues[0],
+        "severity": "warning",
+        "required": False,
+    }
+    report.blocking_issues = []
+    report.warnings = [warning]
+    action = await async_session.scalar(
+        select(ActionRequest).where(
+            ActionRequest.workflow_run_id == started.workflow_run_id,
+            ActionRequest.status == ActionRequestStatus.REVISED.value,
+        )
+    )
+    assert action is not None
+    action.request_type = "chapter_review_warning"
+    action.options = ["accept_warning", "request_revision"]
+    action.default_option = None
+    action.metadata_ = {**action.metadata_, "action_kind": "review_warning"}
     await async_session.commit()
     segment_map = await DocumentService(async_session).derive_chapter_segment_map(
         project_id=project.id,
@@ -1883,7 +1941,7 @@ async def test_review_report_summary_mutation_invalidates_claimed_work_identity(
 
 @pytest.mark.integration
 @pytest.mark.anyio
-async def test_review_finalize_rechecks_claimed_report_content_after_document_commit(
+async def test_review_finalize_revalidates_claimed_report_after_document_commit(
     async_session: AsyncSession,
     integration_database_url: str,
     tmp_path: Path,
@@ -1909,7 +1967,10 @@ async def test_review_finalize_rechecks_claimed_report_content_after_document_co
         async with sessions() as mutation:
             current = await mutation.get(ReviewReport, report.id)
             assert current is not None
-            current.summary = "Mutated after the document version commit."
+            current.raw_report = {
+                **current.raw_report,
+                "provider_envelope": "mutated after the document version commit",
+            }
             await mutation.commit()
         return await original_finalize(**kwargs)  # type: ignore[arg-type]
 
@@ -1963,6 +2024,206 @@ async def test_review_claim_commit_indeterminate_propagates_unchanged(
 
     monkeypatch.setattr(service, "_commit", indeterminate_commit)
     with pytest.raises(ChapterProductionV2CommitIndeterminateError):
+        await service.execute_review_revision(
+            project.id,
+            chapter.id,
+            started.workflow_run_id,
+            actor_user_id=owner.id,
+            report_ids=(report.id,),
+            target_segment_ids=(target,),
+        )
+    assert provider.review_calls == 0
+
+
+@pytest.mark.integration
+@pytest.mark.anyio
+async def test_legacy_run_metadata_without_reviewer_claim_loads_normalizes_and_resumes(
+    async_session: AsyncSession, tmp_path: Path
+) -> None:
+    project, chapter, owner, service, started, _ = await owned_started_chapter(
+        async_session, tmp_path
+    )
+    run = await async_session.get(WorkflowRun, started.workflow_run_id)
+    assert run is not None
+    legacy_metadata = dict(run.metadata_)
+    legacy_metadata.pop("reviewer_claim")
+    run.metadata_ = legacy_metadata
+    await async_session.commit()
+
+    loaded = await service.load_state(
+        project.id,
+        chapter.id,
+        started.workflow_run_id,
+        actor_user_id=owner.id,
+    )
+    assert loaded.status is ChapterProductionStatus.AUTHOR_REVISION
+    await async_session.refresh(run)
+    assert run.metadata_ == {**legacy_metadata, "reviewer_claim": None}
+
+    await service.resolve_author_action(
+        project.id,
+        chapter.id,
+        started.workflow_run_id,
+        started.action_request_id,
+        actor_user_id=owner.id,
+        decision="accept",
+    )
+    resumed = await service.load_state(
+        project.id,
+        chapter.id,
+        started.workflow_run_id,
+        actor_user_id=owner.id,
+    )
+    assert resumed.status is ChapterProductionStatus.EDITOR_REVIEW
+
+
+@pytest.mark.integration
+@pytest.mark.anyio
+@pytest.mark.parametrize("malformation", ["missing_other_key", "unexpected_key"])
+async def test_legacy_run_metadata_compatibility_rejects_other_malformed_shapes(
+    async_session: AsyncSession, tmp_path: Path, malformation: str
+) -> None:
+    project, chapter, owner, service, started, _ = await owned_started_chapter(
+        async_session, tmp_path / malformation
+    )
+    run = await async_session.get(WorkflowRun, started.workflow_run_id)
+    assert run is not None
+    metadata = dict(run.metadata_)
+    metadata.pop("reviewer_claim")
+    if malformation == "missing_other_key":
+        metadata.pop("operation_key")
+    else:
+        metadata["unexpected"] = "value"
+    run.metadata_ = metadata
+    await async_session.commit()
+
+    with pytest.raises(ChapterProductionV2ValidationError):
+        await service.load_state(
+            project.id,
+            chapter.id,
+            started.workflow_run_id,
+            actor_user_id=owner.id,
+        )
+
+
+@pytest.mark.integration
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "tamper",
+    [
+        "raw_report_shape",
+        "raw_report_provenance",
+        "finding_shape",
+        "evidence",
+        "severity",
+        "passed",
+    ],
+)
+async def test_review_revision_revalidates_persisted_report_before_provider(
+    async_session: AsyncSession, tmp_path: Path, tamper: str
+) -> None:
+    project, chapter, owner, service, started, provider, report = (
+        await seeded_review_revision(async_session, tmp_path / tamper)
+    )
+    segment_map = await DocumentService(async_session).derive_chapter_segment_map(
+        project_id=project.id,
+        chapter_id=chapter.id,
+        document_id=started.draft_document_id,
+        version_id=started.draft_version_id,
+    )
+    target = next(
+        item.segment_id for item in segment_map.segments if item.kind.value == "paragraph"
+    )
+    if tamper == "raw_report_shape":
+        report.raw_report = {**report.raw_report, "provider_envelope": "forbidden"}
+    elif tamper == "raw_report_provenance":
+        report.raw_report = {**report.raw_report, "request_hash": "not-a-hash"}
+    elif tamper == "finding_shape":
+        report.blocking_issues = [{**report.blocking_issues[0], "unexpected": True}]
+    elif tamper == "evidence":
+        report.blocking_issues = [
+            {**report.blocking_issues[0], "evidence_segment_ids": [str(uuid4())]}
+        ]
+    elif tamper == "severity":
+        report.blocking_issues = [{**report.blocking_issues[0], "severity": "warning"}]
+    else:
+        report.passed = True
+    await async_session.commit()
+
+    with pytest.raises(ChapterProductionV2ReconciliationError):
+        await service.execute_review_revision(
+            project.id,
+            chapter.id,
+            started.workflow_run_id,
+            actor_user_id=owner.id,
+            report_ids=(report.id,),
+            target_segment_ids=(target,),
+        )
+    assert provider.review_calls == 0
+    assert (
+        await async_session.scalar(
+            select(func.count())
+            .select_from(DocumentVersion)
+            .where(DocumentVersion.parent_version_id == started.draft_version_id)
+        )
+        == 0
+    )
+
+
+@pytest.mark.integration
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "tamper", ["missing", "decision", "report_binding", "duplicate"]
+)
+async def test_review_revision_requires_exact_resolved_review_action_gate(
+    async_session: AsyncSession, tmp_path: Path, tamper: str
+) -> None:
+    project, chapter, owner, service, started, provider, report = (
+        await seeded_review_revision(async_session, tmp_path / tamper)
+    )
+    segment_map = await DocumentService(async_session).derive_chapter_segment_map(
+        project_id=project.id,
+        chapter_id=chapter.id,
+        document_id=started.draft_document_id,
+        version_id=started.draft_version_id,
+    )
+    target = next(
+        item.segment_id for item in segment_map.segments if item.kind.value == "paragraph"
+    )
+    action = await async_session.scalar(
+        select(ActionRequest).where(
+            ActionRequest.workflow_run_id == started.workflow_run_id,
+            ActionRequest.status == ActionRequestStatus.REVISED.value,
+        )
+    )
+    assert action is not None
+    if tamper == "missing":
+        await async_session.delete(action)
+    elif tamper == "decision":
+        action.user_decision = ChapterActionDecision.ACCEPT_WARNING.value
+    elif tamper == "report_binding":
+        action.metadata_ = {**action.metadata_, "review_report_id": str(uuid4())}
+    else:
+        async_session.add(
+            ActionRequest(
+                workflow_run_id=action.workflow_run_id,
+                project_id=action.project_id,
+                chapter_id=action.chapter_id,
+                request_type=action.request_type,
+                status=action.status,
+                prompt=action.prompt,
+                options=list(action.options),
+                default_option=action.default_option,
+                user_decision=action.user_decision,
+                user_feedback=action.user_feedback,
+                resolved_by_id=action.resolved_by_id,
+                resolved_at=action.resolved_at,
+                metadata_=dict(action.metadata_),
+            )
+        )
+    await async_session.commit()
+
+    with pytest.raises(ChapterProductionV2ReconciliationError):
         await service.execute_review_revision(
             project.id,
             chapter.id,
