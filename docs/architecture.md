@@ -406,11 +406,24 @@ The rollout preserves the same facade and PostgreSQL artifacts throughout:
    typed outcomes, reconstruction adapter, and content-safe test helpers. No Chapter Production V2
    run is migrated, and the existing service-backed scheduler remains the default. A graph runtime
    execution state can be deleted without affecting a run.
-2. **Prerequisites before graph composition.** An independent behavior-preserving extraction Issue
-   is created and completed before #149 begins; it moves the repository, draft/revision, review,
-   readiness, finalization, attempt, and recovery boundaries behind the stable facade while the
-   service scheduler stays in sole use. The P0 schema-and-compatibility Issue and separate P0 CI
-   hardening Issue also land here.
+2. **Prerequisites before graph composition.** The numbered behavior-preserving extraction sequence
+   is completed before #149 begins while the service scheduler stays in sole use:
+
+   - **#153 - scoped repository.** Extract shared project/chapter/run/outline/current-version reads,
+     lock order, forced refresh, and exact-cardinality checks behind the stable facade.
+   - **#154 - provider attempts and draft/revision.** Extract attempt ownership and the transaction-free
+     provider handoff together with initial, author, feedback, and corrective revision coordination.
+   - **#155 - deterministic review.** Extract reviewer claims, typed report validation, deterministic
+     policy evaluation, and exact warning/blocking action bindings.
+   - **#156 - revision readiness.** Extract the exact READY semantic key, complete checkpoint/event
+     cardinality, reconstruction, and create-or-reuse persistence.
+   - **#157 - finalization saga.** Extract READY consumption, final document staging, filesystem
+     materialization, replay, and completion evidence.
+   - **#158 - recovery and thin facade.** Extract cross-boundary recovery decisions, finish facade
+     delegation, and remove only private scheduling duplication proven redundant.
+
+   Each Issue moves only its named responsibility; no step pre-implements a later boundary. The P0
+   schema-and-compatibility Issue and separate P0 CI hardening Issue also land before graph composition.
    Extraction tests prove identical artifacts, errors, locks, provider calls, and recovery without
    importing or composing LangGraph.
 3. **#149 - internal orchestration migration.** #149 only composes the graph from the already

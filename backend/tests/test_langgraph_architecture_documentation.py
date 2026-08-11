@@ -363,10 +363,15 @@ def test_langgraph_rollout_orders_migration_and_proves_rollback_parity() -> None
     )
 
     assert section.index("#148") < section.index("#149") < section.index("#150")
+    extraction_positions = [section.index(f"#{issue}") for issue in range(153, 159)]
+    assert extraction_positions == sorted(extraction_positions)
+    assert section.index("#148") < extraction_positions[0]
+    assert extraction_positions[-1] < section.index("3. **#149")
     assert "existing service-backed scheduler remains the default" in section
     assert "stable `ChapterProductionV2Service` facade" in section
-    assert "independent behavior-preserving extraction Issue" in section
+    assert "numbered behavior-preserving extraction sequence" in section
     assert "completed before #149 begins" in section
+    assert "Each Issue moves only its named responsibility" in section
     assert "#149 only composes the graph" in section
     assert "import-boundary tests" in section
     assert "rollback switch" in section
