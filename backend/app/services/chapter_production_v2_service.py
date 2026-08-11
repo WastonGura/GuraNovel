@@ -46,7 +46,6 @@ from app.agents import (
     UserFeedbackRevisionRequest,
     WriterAgent,
 )
-from app.core.errors import AppError
 from app.documents.chapter_segments import (
     CURRENT_CHAPTER_SEGMENTER_VERSION,
     MAX_CHAPTER_CONTENT_BYTES,
@@ -81,6 +80,16 @@ from app.services.chapter_production_repository import (
     ChapterProductionRepository,
     _ChapterProductionRepositoryReconciliationError,
     _ChapterProductionRepositoryValidationError,
+)
+from app.services.chapter_production_v2_contracts import (
+    ChapterProductionV2CommitIndeterminateError,
+    ChapterProductionV2Finalized,
+    ChapterProductionV2ProviderError,
+    ChapterProductionV2ReconciliationError,
+    ChapterProductionV2ReviewProviderError,
+    ChapterProductionV2Started,
+    ChapterProductionV2Updated,
+    ChapterProductionV2ValidationError,
 )
 from app.services.document_service import (
     DocumentCommitIndeterminateError,
@@ -145,81 +154,6 @@ def _new_attempt_id() -> str:
     """Create a content-free provider-attempt generation identifier."""
 
     return str(uuid4())
-
-
-class ChapterProductionV2ValidationError(AppError):
-    """A fixed, content-free failure at the V2 orchestration boundary."""
-
-    code = "chapter_production_v2_invalid"
-    default_message = "Chapter production input is invalid."
-
-    def __init__(self) -> None:
-        super().__init__()
-
-
-class ChapterProductionV2ProviderError(AppError):
-    """A provider failure whose text and causal chain are intentionally fixed."""
-
-    status_code = 503
-    code = "chapter_production_v2_provider_failed"
-    default_message = "Chapter drafting failed safely."
-
-    def __init__(self) -> None:
-        super().__init__()
-
-
-class ChapterProductionV2ReviewProviderError(AppError):
-    """A fixed advisory-review provider failure with no untrusted causal data."""
-
-    status_code = 503
-    code = "chapter_production_v2_review_provider_failed"
-    default_message = "Chapter review failed safely."
-
-    def __init__(self) -> None:
-        super().__init__()
-
-
-class ChapterProductionV2CommitIndeterminateError(AppError):
-    status_code = 500
-    code = "chapter_production_v2_commit_indeterminate"
-    default_message = "Chapter drafting requires reconciliation before retrying."
-
-    def __init__(self) -> None:
-        super().__init__()
-
-
-class ChapterProductionV2ReconciliationError(AppError):
-    status_code = 409
-    code = "chapter_production_v2_reconciliation_required"
-    default_message = "Chapter production requires explicit reconciliation."
-
-    def __init__(self) -> None:
-        super().__init__()
-
-
-@dataclass(frozen=True, slots=True)
-class ChapterProductionV2Started:
-    workflow_run_id: UUID
-    action_request_id: UUID
-    outline_document_id: UUID
-    outline_version_id: UUID
-    draft_document_id: UUID
-    draft_version_id: UUID
-
-
-@dataclass(frozen=True, slots=True)
-class ChapterProductionV2Updated:
-    workflow_run_id: UUID
-    draft_document_id: UUID
-    draft_version_id: UUID
-    action_request_id: UUID | None
-
-
-@dataclass(frozen=True, slots=True)
-class ChapterProductionV2Finalized:
-    workflow_run_id: UUID
-    final_document_id: UUID
-    final_version_id: UUID
 
 
 @dataclass(frozen=True, slots=True)
