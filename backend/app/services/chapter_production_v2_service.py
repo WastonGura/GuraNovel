@@ -15,7 +15,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from uuid import UUID, uuid4
 
-from sqlalchemy import func, select, text
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -70,13 +70,17 @@ from app.models import (
     DocumentSource,
     DocumentType,
     DocumentVersion,
-    Project,
     ReviewMode,
     ReviewReport,
     WorkflowCheckpoint,
     WorkflowEvent,
     WorkflowRun,
     WorkflowType,
+)
+from app.services.chapter_production_repository import (
+    ChapterProductionRepository,
+    _ChapterProductionRepositoryReconciliationError,
+    _ChapterProductionRepositoryValidationError,
 )
 from app.services.document_service import (
     DocumentCommitIndeterminateError,
@@ -440,6 +444,16 @@ class ChapterProductionV2Service:
         self.lore_agent = lore_agent
         self.chief_editor_required = chief_editor_required
         self.documents = DocumentService(session)
+        self.repository = ChapterProductionRepository(
+            session,
+            contract_version=_CONTRACT_VERSION,
+            inactive_run_statuses=frozenset(
+                {
+                    ChapterProductionStatus.COMPLETED.value,
+                    ChapterProductionStatus.CANCELLED.value,
+                }
+            ),
+        )
 
     async def start_from_approved_outline(
         self,
@@ -469,7 +483,7 @@ class ChapterProductionV2Service:
                 outline_version_id=outline_version.id,
                 outline_content_hash=outline_version.content_hash,
             )
-            existing = await self._operation_run(chapter_id, operation_key)
+            existing = await self._operation_run(project_id, chapter_id, operation_key)
             if existing is None:
                 run = WorkflowRun(
                     project_id=project_id,
@@ -4083,20 +4097,20 @@ class ChapterProductionV2Service:
     async def _locked_current_document_version(
         self, document: Document
     ) -> DocumentVersion:
-        if document.current_version_id is None:
+        if not isinstance(document, Document):
             raise ChapterProductionV2ReconciliationError()
-        version = await self.session.scalar(
-            select(DocumentVersion)
-            .execution_options(populate_existing=True)
-            .where(
-                DocumentVersion.id == document.current_version_id,
-                DocumentVersion.document_id == document.id,
+        try:
+            result = await self.repository.locked_current_document_version(
+                project_id=document.project_id,
+                chapter_id=document.chapter_id,
+                document_id=document.id,
+                expected_document_type=DocumentType.CHAPTER_FINAL,
             )
-            .with_for_update()
-        )
-        if version is None:
-            raise ChapterProductionV2ReconciliationError()
-        return version
+        except _ChapterProductionRepositoryReconciliationError:
+            pass
+        else:
+            return result
+        raise ChapterProductionV2ReconciliationError()
 
     async def _finalize_review_revision(
         self,
@@ -4997,16 +5011,15 @@ class ChapterProductionV2Service:
     async def _require_project_owner(
         self, project_id: UUID, actor_user_id: UUID, *, lock: bool = True
     ) -> None:
-        self._validated_ids(project_id, actor_user_id)
-        statement = select(Project.id).where(
-            Project.id == project_id,
-            Project.owner_id == actor_user_id,
-        )
-        if lock:
-            statement = statement.with_for_update()
-        authorized = await self.session.scalar(statement)
-        if authorized is None:
-            raise _invalid()
+        try:
+            await self.repository.require_project_owner(
+                project_id, actor_user_id, lock=lock
+            )
+        except _ChapterProductionRepositoryValidationError:
+            pass
+        else:
+            return
+        raise _invalid()
 
     @staticmethod
     def _validated_ids(*values: UUID) -> tuple[UUID, ...]:
@@ -5605,127 +5618,63 @@ class ChapterProductionV2Service:
     async def _approved_outline(
         self, project_id: UUID, chapter_id: UUID, *, lock: bool
     ) -> tuple[Chapter, Document, DocumentVersion]:
-        chapter = await self._chapter(project_id, chapter_id, lock=lock)
-        outline, version = await self._outline_for_chapter(chapter, project_id, lock=lock)
-        return chapter, outline, version
+        try:
+            result = await self.repository.approved_outline(project_id, chapter_id, lock=lock)
+        except _ChapterProductionRepositoryValidationError:
+            pass
+        else:
+            return result
+        raise _invalid()
 
     async def _outline_for_chapter(
         self, chapter: Chapter, project_id: UUID, *, lock: bool
     ) -> tuple[Document, DocumentVersion]:
-        if chapter.status != "OUTLINE_APPROVED" or chapter.current_outline_document_id is None:
+        if not isinstance(chapter, Chapter):
             raise _invalid()
-        statement = (
-            select(Document)
-            .options(selectinload(Document.project))
-            .where(
-                Document.id == chapter.current_outline_document_id,
-                Document.project_id == project_id,
-                Document.chapter_id == chapter.id,
-                Document.type.in_(
-                    (
-                        DocumentType.CHAPTER_SELECTED_OUTLINE.value,
-                        DocumentType.CHAPTER_OUTLINE_OPTIONS.value,
-                    )
-                ),
+        try:
+            result = await self.repository.outline_for_chapter(
+                project_id, chapter.id, lock=lock
             )
-        )
-        if lock:
-            statement = statement.with_for_update().execution_options(populate_existing=True)
-        outline = await self.session.scalar(statement)
-        if outline is None or outline.current_version_id is None:
-            raise _invalid()
-        version_statement = select(DocumentVersion).where(
-            DocumentVersion.id == outline.current_version_id,
-            DocumentVersion.document_id == outline.id,
-        )
-        if lock:
-            version_statement = version_statement.with_for_update().execution_options(
-                populate_existing=True
-            )
-        version = await self.session.scalar(version_statement)
-        if version is None:
-            raise _invalid()
-        return outline, version
+        except _ChapterProductionRepositoryValidationError:
+            pass
+        else:
+            return result
+        raise _invalid()
 
     async def _chapter(self, project_id: UUID, chapter_id: UUID, *, lock: bool) -> Chapter:
         try:
-            project_id, chapter_id = (UUID(str(value)) for value in (project_id, chapter_id))
-        except (AttributeError, TypeError, ValueError):
-            raise _invalid() from None
-        if any(value.int == 0 for value in (project_id, chapter_id)):
-            raise _invalid()
-        if lock:
-            await self.session.execute(
-                text("SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))"),
-                {"key": f"chapter-production-v2:{chapter_id}"},
-            )
-        statement = select(Chapter).where(
-            Chapter.id == chapter_id, Chapter.project_id == project_id
-        )
-        if lock:
-            statement = statement.with_for_update().execution_options(populate_existing=True)
-        chapter = await self.session.scalar(statement)
-        if chapter is None:
-            raise _invalid()
-        return chapter
+            result = await self.repository.chapter(project_id, chapter_id, lock=lock)
+        except _ChapterProductionRepositoryValidationError:
+            pass
+        else:
+            return result
+        raise _invalid()
 
     async def _run(
         self, project_id: UUID, chapter_id: UUID, workflow_run_id: UUID, *, lock: bool
     ) -> WorkflowRun:
         try:
-            project_id, chapter_id, workflow_run_id = (
-                UUID(str(value)) for value in (project_id, chapter_id, workflow_run_id)
+            result = await self.repository.run(
+                project_id, chapter_id, workflow_run_id, lock=lock
             )
-        except (AttributeError, TypeError, ValueError):
-            raise _invalid() from None
-        if any(value.int == 0 for value in (project_id, chapter_id, workflow_run_id)):
-            raise _invalid()
-        statement = select(WorkflowRun).where(
-            WorkflowRun.id == workflow_run_id,
-            WorkflowRun.project_id == project_id,
-            WorkflowRun.chapter_id == chapter_id,
-            WorkflowRun.workflow_type == WorkflowType.CHAPTER_PRODUCTION.value,
-        )
-        if lock:
-            statement = statement.with_for_update().execution_options(populate_existing=True)
-        run = await self.session.scalar(statement)
-        if run is None or run.metadata_.get("contract_version") != _CONTRACT_VERSION:
-            raise _invalid()
-        return run
+        except _ChapterProductionRepositoryValidationError:
+            pass
+        else:
+            return result
+        raise _invalid()
 
-    async def _operation_run(self, chapter_id: UUID, operation_key: str) -> WorkflowRun | None:
-        runs = list(
-            await self.session.scalars(
-                select(WorkflowRun)
-                .where(
-                    WorkflowRun.chapter_id == chapter_id,
-                    WorkflowRun.workflow_type == WorkflowType.CHAPTER_PRODUCTION.value,
-                )
-                .with_for_update()
+    async def _operation_run(
+        self, project_id: UUID, chapter_id: UUID, operation_key: str
+    ) -> WorkflowRun | None:
+        try:
+            result = await self.repository.operation_run(
+                project_id, chapter_id, operation_key
             )
-        )
-        matches = [
-            run
-            for run in runs
-            if run.metadata_.get("contract_version") == _CONTRACT_VERSION
-            and run.metadata_.get("operation_key") == operation_key
-        ]
-        if len(matches) > 1:
-            raise _invalid()
-        active_other = [
-            run
-            for run in runs
-            if run.metadata_.get("contract_version") == _CONTRACT_VERSION
-            and run.metadata_.get("operation_key") != operation_key
-            and run.status
-            not in {
-                ChapterProductionStatus.COMPLETED.value,
-                ChapterProductionStatus.CANCELLED.value,
-            }
-        ]
-        if active_other:
-            raise _invalid()
-        return matches[0] if matches else None
+        except _ChapterProductionRepositoryValidationError:
+            pass
+        else:
+            return result
+        raise _invalid()
 
     async def _locked_state(
         self, run: WorkflowRun
