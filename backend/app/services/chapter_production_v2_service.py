@@ -81,6 +81,8 @@ from app.services.chapter_production_repository import (
     _ChapterProductionRepositoryReconciliationError,
     _ChapterProductionRepositoryValidationError,
 )
+from app.services.chapter_phase_session_lease import ChapterPhaseSessionLease
+from app.services.chapter_phase_session_source import ChapterPhaseSessionSource
 from app.services.chapter_production_v2_contracts import (
     ChapterProductionV2CommitIndeterminateError,
     ChapterProductionV2Finalized,
@@ -367,6 +369,7 @@ class ChapterProductionV2Service:
         chief_editor_agent: ChiefEditorChapterFinalAgent | None = None,
         lore_agent: LoreChapterFinalAgent | None = None,
         chief_editor_required: bool = True,
+        phase_session_source: ChapterPhaseSessionSource | None = None,
     ) -> None:
         if type(chief_editor_required) is not bool:
             raise _invalid() from None
@@ -377,6 +380,11 @@ class ChapterProductionV2Service:
         self.chief_editor_agent = chief_editor_agent
         self.lore_agent = lore_agent
         self.chief_editor_required = chief_editor_required
+        self._phase_sessions = (
+            ChapterPhaseSessionLease(phase_session_source)
+            if phase_session_source is not None
+            else None
+        )
         self.documents = DocumentService(session)
         self.repository = ChapterProductionRepository(
             session,
