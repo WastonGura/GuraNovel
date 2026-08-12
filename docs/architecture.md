@@ -229,6 +229,91 @@ locks. A commit-indeterminate result is never guessed from the graph cursor or r
 routes to the persisted reconciliation contract. No graph node owns or reuses an `AsyncSession`, and
 no session or transaction crosses a provider call.
 
+### Constructed phase-session trust boundary
+
+Chapter provider phases use **construction, not attestation**. Stopped Issues #174, #176, and #178
+tried to prove that an arbitrary mutable Python/SQLAlchemy session was intrinsically trustworthy by
+enumerating instance storage, accessors, descriptors, and builtins. Each design admitted another
+route by which runtime behavior could diverge from the claimed bind or work state. That approach is
+closed: no production boundary accepts an arbitrary session and attempts to certify it for phase use.
+
+The replacement has an explicit threat model:
+
+| Boundary | Contract |
+| --- | --- |
+| `Trusted runtime integrity` | The deployed application trusts unmodified CPython builtins, the pinned SQLAlchemy package loaded from the lockfile, loaded GuraNovel module code, and the application composition root. These are supply-chain and process-integrity assumptions, not request data. |
+| `Untrusted application inputs` | Client and provider values, arbitrary callables, caller-supplied factories, caller-supplied `AsyncSession` or sync sessions, aliases, ORM instances, and mutable database or filesystem state are not authority. |
+
+Arbitrary post-import monkeypatching of CPython, SQLAlchemy classes, imported module globals, or
+function internals is not an application authorization boundary that a Python object inspector can
+soundly defend. A process that permits such mutation has crossed the trusted runtime boundary. It
+must restart or fail deployment health rather than asking chapter workflow code to infer which
+patched descriptors remain safe. Unit tests may monkeypatch collaborators to exercise fixed failure
+semantics, but that test technique does not widen the production threat model or turn an arbitrary
+object into an accepted capability.
+
+The authority and lifetime flow is closed and one-way:
+
+| Stage | Owner and invariant |
+| --- | --- |
+| `Composition` | The application composition root creates one `ChapterPhaseSessionSource` from the exact server-owned `AsyncEngine`. Routes and production services receive that application-owned capability; an HTTP request cannot select or replace it. |
+| `Construction` | The source uses one private `async_sessionmaker` with the exact standard `AsyncSession` class, one engine bind, `expire_on_commit=False`, and the server-owned session configuration. Every call creates new exact async and sync session identities. |
+| `Fresh-state invariant` | Before a candidate can be leased, the dedicated invariant layer verifies the just-created source candidate has no active transaction, empty new, dirty, deleted, and identity-map state, the expected configuration, and the one source engine. It never validates an arbitrary caller candidate. |
+| `Lease lifecycle` | `ChapterPhaseSessionLease` receives candidates only as the immediate result of its private source call, rejects identity reuse or aliasing, yields once, and closes only the source-owned candidate. Cancellation and cleanup rules remain its sole responsibility. |
+| `Coordinator phase` | A coordinator opens a lease for one database phase, uses repositories and `DocumentService` only inside that lease, commits or rolls back according to the domain contract, and exits the lease before returning a pure-value snapshot or result. |
+| `Provider handoff` | The provider receives only validated pure values after the prior lease has closed. No session, ORM instance, repository, or filesystem handle enters the provider request or survives as provider-call authority. |
+
+`ChapterPhaseSessionSource` does not accept a caller-supplied `AsyncSession`, sync session,
+`AsyncConnection`, caller-supplied factory, mapper bind, or per-entity bind registry. It does not
+derive authority from `session.bind`, a caller identity map, facade state, or an overridable accessor.
+The private `async_sessionmaker` is created inside the source from the composition root's engine and
+is not exposed as a resettable property. Production composition never derives this engine or source
+from the existing facade session. Tests may construct the same source explicitly from their isolated
+test `AsyncEngine`; they do not inject an arbitrary session-producing callable.
+
+Ownership is proven by control flow, not a forgeable data token: the lease itself invokes its private
+source, receives the candidate without an intervening public adoption API, and records the returned
+async/sync identities in its provider-lifetime registry before yielding. There is no method that
+accepts an outside session and labels it owned. The existing facade/caller session remains a separate
+compatibility dependency for code not yet extracted; it is never adopted, closed, committed, rolled
+back, or expired by the source, invariant, or lease layers. Pending caller work and active caller
+transactions therefore remain untouched.
+
+Construction and lifecycle failures use the existing fixed content-free V2 error boundary. A source
+configuration or candidate invariant failure occurs before a repository, provider, or domain write
+and closes only the source-owned candidate when one was actually created. It never closes a caller
+session or guesses ownership from matching engine identities. `CancelledError` remains cancellation;
+#177 owns the exact factory/source cancellation, body cancellation, close failure, and combined
+failure precedence. Raw database URLs, exception text, session reprs, object addresses, and caller
+state never enter the fixed error, event, checkpoint, or log.
+
+Implementation remains split into three small Issues with the dependency direction
+`source <- invariants <- lease <- facade/coordinators`; a module on the left must not import back
+through a module on the right:
+
+1. **#181 - owned phase-session construction.** Add `chapter_phase_session_source.py` only. It owns
+   exact engine acceptance at the trusted composition root, the private maker, and creation of a
+   private source-result type. It has no state inspection beyond construction facts, cleanup,
+   context manager, facade, ORM, repository, provider, or business authority. Budget: one production
+   file and <=180 production lines.
+2. **#182 - source-candidate fresh-state invariants.** Add
+   `chapter_phase_session_invariants.py` only. It consumes the internal source result and validates
+   expected standard configuration, one bind, inactive transaction, empty unit-of-work collections,
+   and empty identity map before yield. It cannot create, close, reset, or adopt sessions and cannot
+   accept a bare caller session. Budget: one production file and <=160 production lines.
+3. **#177 - cancellation-safe lease lifecycle.** Add `chapter_phase_session_lease.py` and the minimal
+   stable-facade composition hook. It owns source invocation, lifetime identity registries, yield,
+   cleanup, cancellation, and fixed-error precedence; it consumes #181 and #182 rather than
+   duplicating them. Budget: <=3 production files and <=300 production lines.
+
+Each implementation Issue starts from current `origin/main`, has its own worktree and squash PR,
+uses RED/GREEN, and receives independent Correctness and Security review only after full local GREEN.
+The existing public methods, DTOs, fixed exceptions, and export paths of
+`ChapterProductionV2Service` remain compatible. A future optional constructor composition hook is
+server-owned and does not add a public HTTP API. Provider attempts, draft/revision behavior, schema,
+frontend, LangGraph, Agent contracts, the workflow state machine, and `DocumentService` behavior are
+non-goals of this session-boundary sequence.
+
 ### Typed node contracts
 
 Node inputs are freshly reconstructed typed references, while node outputs use the separate closed
