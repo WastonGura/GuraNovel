@@ -207,8 +207,10 @@ class InitialCandidatePersistence:
     async def _persist(
         self, session: AsyncSession, result: InitialProviderResult, content: str,
     ) -> InitialCandidateIdentity:
+        commit_indeterminate = False
         try:
             phase = _InitialEvidencePhase(session, self.chief_editor_required)
+            documents = DocumentService(session)
             scope = result.generation.scope
             evidence = await phase.load(
                 scope.project_id, scope.chapter_id, scope.actor_user_id
@@ -229,25 +231,33 @@ class InitialCandidatePersistence:
                 document, version = candidates[0]
                 writes = self._writes(document, version, content)
             else:
-                document, writes, version = await self._stage(
-                    phase, result, content, expected_title, expected_path
+                document = await self._create(
+                    documents, result, content, expected_title, expected_path
                 )
+                version = document.current_version
+                if version is None:
+                    raise _reconcile() from None
+                writes = ()
             self._validate_candidate(
                 document, version, result, content, expected_title, expected_path
             )
             identity = self._identity(document, version, result)
-            await _commit(session)
+            if writes:
+                documents.write_staged_files(document, writes)
+                await _commit(session)
+            return identity
         except ChapterProductionV2CommitIndeterminateError:
             raise
+        except DocumentCommitIndeterminateError:
+            await _rollback(session)
+            commit_indeterminate = True
         except (ChapterProductionV2ValidationError, ChapterProductionV2ReconciliationError):
             await _rollback(session)
             raise
         except Exception:
             await _rollback(session)
             raise _reconcile() from None
-        try:
-            DocumentService(session).write_staged_files(document, writes)
-        except DocumentCommitIndeterminateError:
+        if commit_indeterminate:
             raise ChapterProductionV2CommitIndeterminateError() from None
         return identity
 
@@ -297,32 +307,31 @@ class InitialCandidatePersistence:
         return [(by_id[version.document_id], version) for version in versions]
 
     @staticmethod
-    async def _stage(
-        phase: _InitialEvidencePhase, result: InitialProviderResult, content: str,
+    async def _create(
+        documents: DocumentService, result: InitialProviderResult, content: str,
         expected_title: str, expected_path: str,
-    ) -> tuple[Document, tuple[tuple[str, str], ...], DocumentVersion]:
+    ) -> Document:
         scope = result.generation.scope
-        document, current_write, snapshot_write = await phase.documents.stage_create_document(
-            project_id=scope.project_id,
-            chapter_id=scope.chapter_id,
-            document_type=DocumentType.CHAPTER_DRAFT,
-            title=expected_title,
-            path=expected_path,
-            content=content,
-            source=DocumentSource.WRITER_AGENT,
-            agent_role="writer_agent",
-            workflow_run_id=scope.workflow_run_id,
-            change_summary=_CHANGE_SUMMARY,
-            version_metadata={
-                "contract_version": CONTRACT_VERSION,
-                "operation_key": scope.operation_key,
-                "attempt_id": str(scope.attempt_id),
-            },
-        )
-        version = document.current_version
-        if version is None:
-            raise _reconcile() from None
-        return document, (current_write, snapshot_write), version
+        try:
+            return await documents.create_document(
+                project_id=scope.project_id,
+                chapter_id=scope.chapter_id,
+                document_type=DocumentType.CHAPTER_DRAFT,
+                title=expected_title,
+                path=expected_path,
+                content=content,
+                source=DocumentSource.WRITER_AGENT,
+                agent_role="writer_agent",
+                workflow_run_id=scope.workflow_run_id,
+                change_summary=_CHANGE_SUMMARY,
+                version_metadata={
+                    "contract_version": CONTRACT_VERSION,
+                    "operation_key": scope.operation_key,
+                    "attempt_id": str(scope.attempt_id),
+                },
+            )
+        except OSError:
+            raise DocumentCommitIndeterminateError() from None
 
     @staticmethod
     def _writes(
