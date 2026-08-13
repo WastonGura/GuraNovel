@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 from sqlalchemy import func, select
@@ -35,9 +35,21 @@ from app.services.initial_candidate_persistence import (
     InitialCandidatePersistence,
 )
 from app.services.initial_provider_handoff import InitialProviderHandoff
+from app.workspace.hashing import sha256_content
+from app.workspace.markdown_store import MarkdownStore
+from app.workspace.paths import version_snapshot_path
 
 
 pytestmark = pytest.mark.integration
+
+
+class CountingProvider(DeterministicChapterWriterProvider):
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def draft_initial(self, request: object, profile: object) -> object:
+        self.calls += 1
+        return await super().draft_initial(request, profile)  # type: ignore[arg-type]
 
 
 async def _approved(
@@ -74,10 +86,11 @@ async def _approved(
 
 async def _result(
     engine: object, project: Project, chapter: Chapter, owner: User,
+    provider: DeterministicChapterWriterProvider | None = None,
 ):
     lease = ChapterPhaseSessionLease(ChapterPhaseSessionSource(engine))  # type: ignore[arg-type]
     handoff = InitialProviderHandoff(
-        lease, WriterAgent(DeterministicChapterWriterProvider()), True
+        lease, WriterAgent(provider or DeterministicChapterWriterProvider()), True
     )
     return lease, await handoff.execute(
         project.id, chapter.id, actor_user_id=owner.id
@@ -127,6 +140,7 @@ async def test_commit_ack_replay_adopts_the_single_durable_candidate(
     try:
         lease, result = await _result(engine, project, chapter, owner)
         persistence = InitialCandidatePersistence(lease, True)
+        first = await persistence.persist(result)
         import app.services.initial_candidate_persistence as candidate_module
 
         original = candidate_module._commit
@@ -143,12 +157,95 @@ async def test_commit_ack_replay_adopts_the_single_durable_candidate(
         with pytest.raises(ChapterProductionV2CommitIndeterminateError):
             await persistence.persist(result)
         identity = await persistence.persist(result)
+        assert identity == first
         async with async_sessionmaker(engine, expire_on_commit=False)() as session:
             assert await session.scalar(select(func.count()).select_from(DocumentVersion).where(
                 DocumentVersion.workflow_run_id == identity.workflow_run_id
             )) == 1
     finally:
         await engine.dispose()
+
+
+@pytest.mark.anyio
+async def test_commit_ack_loss_survives_restart_without_provider_result(
+    async_session: AsyncSession, integration_database_url: str, tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project, chapter, owner = await _approved(async_session, tmp_path)
+    engine = create_async_engine(integration_database_url, pool_pre_ping=True)
+    run_id = None
+    provider = CountingProvider()
+    try:
+        lease, result = await _result(engine, project, chapter, owner, provider)
+        run_id = result.workflow_run_id
+        persistence = InitialCandidatePersistence(lease, True)
+        original = AsyncSession.commit
+        calls = 0
+
+        async def commit_then_lose_ack(session: AsyncSession) -> None:
+            nonlocal calls
+            calls += 1
+            await original(session)
+            if calls == 1:
+                raise ConnectionError("PRIVATE candidate commit acknowledgement")
+
+        with monkeypatch.context() as commit_patch:
+            commit_patch.setattr(AsyncSession, "commit", commit_then_lose_ack)
+            with pytest.raises(ChapterProductionV2CommitIndeterminateError) as raised:
+                await persistence.persist(result)
+        assert raised.value.__cause__ is None
+        assert raised.value.__context__ is None
+        assert "PRIVATE" not in repr(raised.value)
+        del result, persistence, lease
+    finally:
+        await engine.dispose()
+
+    assert run_id is not None
+    assert provider.calls == 1
+    restarted_engine = create_async_engine(integration_database_url, pool_pre_ping=True)
+    try:
+        async with async_sessionmaker(restarted_engine, expire_on_commit=False)() as session:
+            versions = list(await session.scalars(
+                select(DocumentVersion).where(DocumentVersion.workflow_run_id == run_id)
+            ))
+            assert len(versions) == 1
+            version = versions[0]
+            document = await session.get(Document, version.document_id)
+            assert document is not None and version.snapshot_path is not None
+            identity = InitialCandidateIdentity(
+                UUID(str(document.project_id)),
+                UUID(str(chapter.id)),
+                UUID(str(run_id)),
+                UUID(str(document.id)),
+                UUID(str(version.id)),
+                version.content_hash,
+                version.metadata_["operation_key"],
+                UUID(version.metadata_["attempt_id"]),
+            )
+            assert identity.version_id == UUID(str(version.id))
+            assert document.current_version_id == version.id
+            assert version.file_path == document.path
+            assert version.snapshot_path == version_snapshot_path(
+                str(document.id), 1
+            ).as_posix()
+            current_path = tmp_path / document.path
+            snapshot_path = tmp_path / version.snapshot_path
+            assert current_path.is_file() and snapshot_path.is_file()
+            current = current_path.read_bytes()
+            snapshot = snapshot_path.read_bytes()
+            assert current == snapshot
+            assert len(current) == version.byte_size
+            assert sha256_content(current.decode("utf-8")) == version.content_hash
+            segment_map = await DocumentService(session).derive_chapter_production_segment_map(
+                project_id=document.project_id,
+                chapter_id=chapter.id,
+                document_id=document.id,
+                version_id=version.id,
+            )
+            assert segment_map.content_hash == version.content_hash
+            assert provider.calls == 1
+    finally:
+        await restarted_engine.dispose()
 
 
 @pytest.mark.anyio
@@ -291,6 +388,33 @@ async def test_stale_generation_cannot_adopt_the_new_generation_candidate(
 
 
 @pytest.mark.anyio
+async def test_initial_file_failure_keeps_fixed_indeterminate_error(
+    async_session: AsyncSession, integration_database_url: str, tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project, chapter, owner = await _approved(async_session, tmp_path)
+    engine = create_async_engine(integration_database_url, pool_pre_ping=True)
+    try:
+        lease, result = await _result(engine, project, chapter, owner)
+
+        def fail_write(store: MarkdownStore, path: str, content: str) -> None:
+            del store, path, content
+            raise OSError("PRIVATE initial candidate file failure")
+
+        monkeypatch.setattr(MarkdownStore, "write", fail_write)
+        with pytest.raises(ChapterProductionV2CommitIndeterminateError) as raised:
+            await InitialCandidatePersistence(lease, True).persist(result)
+        assert raised.value.__cause__ is None
+        assert raised.value.__context__ is None
+        assert "PRIVATE" not in str(raised.value)
+        async with async_sessionmaker(engine, expire_on_commit=False)() as session:
+            assert await session.scalar(select(func.count(Document.id))) == 1
+            assert await session.scalar(select(func.count(DocumentVersion.id))) == 1
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.anyio
 async def test_file_materialization_failure_retries_the_durable_candidate(
     async_session: AsyncSession, integration_database_url: str, tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -300,6 +424,14 @@ async def test_file_materialization_failure_retries_the_durable_candidate(
     try:
         lease, result = await _result(engine, project, chapter, owner)
         persistence = InitialCandidatePersistence(lease, True)
+        identity = await persistence.persist(result)
+        async with async_sessionmaker(engine, expire_on_commit=False)() as session:
+            document = await session.get(Document, identity.document_id)
+            version = await session.get(DocumentVersion, identity.version_id)
+            assert document is not None and version is not None
+            (tmp_path / document.path).unlink()
+            assert version.snapshot_path is not None
+            (tmp_path / version.snapshot_path).unlink()
         original = DocumentService.write_staged_files
         calls = 0
 
@@ -316,7 +448,8 @@ async def test_file_materialization_failure_retries_the_durable_candidate(
         monkeypatch.setattr(DocumentService, "write_staged_files", fail_once)
         with pytest.raises(ChapterProductionV2CommitIndeterminateError):
             await persistence.persist(result)
-        identity = await persistence.persist(result)
+        replayed = await persistence.persist(result)
+        assert replayed == identity
         async with async_sessionmaker(engine, expire_on_commit=False)() as session:
             document = await session.get(Document, identity.document_id)
             version = await session.get(DocumentVersion, identity.version_id)
