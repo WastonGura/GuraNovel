@@ -94,6 +94,7 @@ from app.services.author_accept_coordination import (
     _StaleActionAdopted,
 )
 from app.services.initial_draft_lifecycle import InitialCandidateNotApplicable, InitialDraftLifecycle, InitialRecoveryRoute
+from app.services.manual_edit_saga import ManualEditCoordinator
 from app.workflows.chapter_production import (
     ChapterActionBinding,
     ChapterActionDecision,
@@ -378,6 +379,7 @@ class ChapterProductionV2Service:
         )
         self._initial_drafts = None if self._phase_sessions is None else InitialDraftLifecycle(self._phase_sessions, writer_agent, chief_editor_required)
         self._author_accept = AuthorAcceptCoordinator(self)
+        self._manual_edit = ManualEditCoordinator(self)
         self.documents = DocumentService(session)
         self.repository = ChapterProductionRepository(
             session,
@@ -710,50 +712,14 @@ class ChapterProductionV2Service:
         if type(content) is not str or len(content) > MAX_CHAPTER_CONTENT_BYTES:
             raise _invalid() from None
         try:
-            context = await self._author_context(
+            return await self._manual_edit.submit(
                 project_id=project_id,
                 chapter_id=chapter_id,
                 workflow_run_id=workflow_run_id,
                 action_request_id=action_request_id,
                 actor_user_id=actor_user_id,
+                content=content,
             )
-            normalized = normalize_chapter_content(content)
-            if normalized != content or not normalized.strip():
-                raise _invalid()
-            operation_key = self._decision_operation_key(
-                workflow_run_id, action_request_id, context.version.id, "manual"
-            )
-            self._resolve_action_row(
-                context.action,
-                status=ActionRequestStatus.REVISED,
-                decision=ChapterActionDecision.SUBMIT_MANUAL_EDIT,
-                actor_user_id=actor_user_id,
-            )
-            _validated_prospective_map(
-                project_id=project_id,
-                chapter_id=chapter_id,
-                document_id=context.document.id,
-                version_id=context.version.id,
-                content=normalized,
-            )
-            version = await self.documents.write_document(
-                document_id=context.document.id,
-                content=normalized,
-                source=DocumentSource.USER,
-                expected_current_version_id=context.version.id,
-                actor_user_id=actor_user_id,
-                workflow_run_id=workflow_run_id,
-                change_summary="Applied an authorized Chapter Production V2 manual edit.",
-                version_metadata={
-                    "contract_version": _CONTRACT_VERSION,
-                    "operation_key": operation_key,
-                },
-            )
-        except _StaleActionAdopted as adopted:
-            return adopted.result
-        except DocumentCommitIndeterminateError:
-            await self._rollback()
-            raise ChapterProductionV2CommitIndeterminateError() from None
         except ChapterProductionV2CommitIndeterminateError:
             raise
         except ChapterProductionV2ValidationError:
@@ -762,19 +728,6 @@ class ChapterProductionV2Service:
         except Exception:
             await self._rollback()
             raise _invalid() from None
-        return await self._finalize_manual_edit(
-            project_id=project_id,
-            chapter_id=chapter_id,
-            workflow_run_id=workflow_run_id,
-            action_request_id=action_request_id,
-            actor_user_id=actor_user_id,
-            document_id=context.document.id,
-            version_id=version.id,
-            old_binding=context.binding,
-            expected_parent_version_id=context.version.id,
-            operation_key=operation_key,
-            finalize_actor_user_id=actor_user_id,
-        )
 
     async def execute_review_revision(
         self,
@@ -1723,7 +1676,7 @@ class ChapterProductionV2Service:
             elif state.status is ChapterProductionStatus.AUTHOR_REVISION:
                 action = await self._resolved_source_action(run.id, state)
                 binding = self._binding_from_checkpoint_action(state, action)
-                await self._finalize_manual_edit(
+                await self._manual_edit._finalize_manual_edit(
                     project_id=project_id,
                     chapter_id=chapter_id,
                     workflow_run_id=run.id,
@@ -4667,94 +4620,6 @@ class ChapterProductionV2Service:
             raise
         except ChapterProductionV2ReconciliationError:
             await self._rollback()
-            raise
-        except ChapterProductionV2ValidationError:
-            await self._rollback()
-            raise
-        except Exception:
-            await self._rollback()
-            raise _invalid() from None
-
-    async def _finalize_manual_edit(
-        self,
-        *,
-        project_id: UUID,
-        chapter_id: UUID,
-        workflow_run_id: UUID,
-        action_request_id: UUID,
-        actor_user_id: UUID,
-        document_id: UUID,
-        version_id: UUID,
-        old_binding: ChapterActionBinding,
-        expected_parent_version_id: UUID,
-        operation_key: str,
-        finalize_actor_user_id: UUID,
-    ) -> ChapterProductionV2Updated:
-        try:
-            await self._require_project_owner(project_id, finalize_actor_user_id)
-            chapter = await self._chapter(project_id, chapter_id, lock=True)
-            await self._require_project_owner(project_id, actor_user_id)
-            run = await self._run(project_id, chapter_id, workflow_run_id, lock=True)
-            metadata = self._run_metadata(run)
-            state, checkpoint = await self._locked_state(run)
-            manual_key = self._decision_operation_key(run.id, action_request_id, expected_parent_version_id, "manual")
-            action = await self.session.scalar(
-                select(ActionRequest)
-                .where(
-                    ActionRequest.id == action_request_id,
-                    ActionRequest.workflow_run_id == run.id,
-                    ActionRequest.status == ActionRequestStatus.REVISED.value,
-                    ActionRequest.user_decision == ChapterActionDecision.SUBMIT_MANUAL_EDIT.value,
-                    ActionRequest.resolved_by_id == actor_user_id,
-                    ~select(ActionRequest.id).where(
-                        ActionRequest.workflow_run_id == run.id,
-                        ActionRequest.status == ActionRequestStatus.PENDING.value,
-                    ).exists(),
-                    select(func.count(DocumentVersion.id)).where(
-                        DocumentVersion.parent_version_id == expected_parent_version_id).scalar_subquery() == 1,
-                )
-                .with_for_update()
-            )
-            document, version = await self._locked_current_revision(
-                project_id=project_id,
-                chapter_id=chapter_id,
-                workflow_run_id=run.id,
-                document_id=document_id,
-                version_id=version_id,
-                parent_version_id=expected_parent_version_id,
-                source=DocumentSource.USER,
-                actor_user_id=actor_user_id,
-                agent_role=None,
-                operation_key=operation_key,
-            )
-            action_key = action.metadata_.get("operation_key") if action is not None and type(action.metadata_) is dict else None
-            expected_action = {"contract_version": _CONTRACT_VERSION, "action_kind": ChapterActionKind.AUTHOR_REVISION.value,
-                "document_id": old_binding.document_id, "document_version_id": old_binding.document_version_id,
-                "content_hash": old_binding.content_hash, "operation_key": action_key}
-            if (action is None or operation_key != manual_key or chapter.current_draft_document_id != document.id
-                    or any(metadata[key] is not None for key in ("provider_attempt", "reviewer_claim"))
-                    or action.project_id != project_id
-                    or action.chapter_id != chapter_id or action.request_type != _AUTHOR_ACTION_TYPE
-                    or action.prompt != "Review the current chapter draft." or action.options != ["accept", "request_revision", "submit_manual_edit"]
-                    or action.default_option != "accept" or action.user_feedback is not None or action.resolved_at is None
-                    or action.expires_at is not None or not _valid_sha256(action_key) or action.metadata_ != expected_action):
-                raise _invalid()
-            next_state = state.resolve_action(
-                action=old_binding,
-                decision=ChapterActionDecision.SUBMIT_MANUAL_EDIT,
-                document_id=str(document.id),
-                document_version_id=str(version.id),
-                content_hash=version.content_hash,
-            )
-            self._append_state(run, checkpoint, next_state)
-            await self._commit()
-            return ChapterProductionV2Updated(
-                workflow_run_id=run.id,
-                draft_document_id=document.id,
-                draft_version_id=version.id,
-                action_request_id=None,
-            )
-        except ChapterProductionV2CommitIndeterminateError:
             raise
         except ChapterProductionV2ValidationError:
             await self._rollback()

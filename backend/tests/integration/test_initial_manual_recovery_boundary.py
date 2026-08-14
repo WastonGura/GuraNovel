@@ -167,7 +167,7 @@ async def _manual_commit_crash(
             raise ChapterProductionV2CommitIndeterminateError() from None
 
         with monkeypatch.context() as patch:
-            patch.setattr(crashing, "_finalize_manual_edit", lose_finalize_ack)
+            patch.setattr(crashing._manual_edit, "_finalize_manual_edit", lose_finalize_ack)
             with pytest.raises(ChapterProductionV2CommitIndeterminateError):
                 await crashing.submit_manual_edit(
                     project.id,
