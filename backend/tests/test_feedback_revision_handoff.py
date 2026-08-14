@@ -85,7 +85,7 @@ def _handoff(service: object, revision_agent: object) -> FeedbackRevisionHandoff
     handoff = object.__new__(FeedbackRevisionHandoff)
     handoff.service = service
     handoff.phase_sessions = None
-    handoff.revision_agent = revision_agent
+    service.revision_agent = revision_agent  # type: ignore[attr-defined]
     return handoff
 
 
@@ -290,4 +290,61 @@ async def test_invalid_feedback_is_rejected_before_hashing(monkeypatch: pytest.M
         )
 
     assert "sha256" not in order
+
+
+
+class _TimeoutAgent:
+    def __init__(self) -> None:
+        self.calls: list[object] = []
+
+    async def user_feedback_revision(self, request: object) -> object:
+        self.calls.append(request)
+        raise ProviderTimeoutError()
+
+
+@pytest.mark.anyio
+async def test_provider_reads_the_facade_agent_not_a_captured_copy(monkeypatch: pytest.MonkeyPatch) -> None:
+    from app.agents import RevisionAgent
+
+    agent_a = RevisionAgent(object())
+    calls_a: list[object] = []
+
+    async def succeed(request: object) -> object:
+        calls_a.append(request)
+        return SimpleNamespace(segments=())
+
+    monkeypatch.setattr(agent_a, "user_feedback_revision", succeed)
+    agent_b = _TimeoutAgent()
+    service = _RecordingService()
+    service.revision_agent = agent_a  # type: ignore[attr-defined]
+    handoff = FeedbackRevisionHandoff(service, None, agent_a)
+    service.revision_agent = agent_b  # mutate AFTER construction
+
+    with pytest.raises(ChapterProductionV2ProviderError):
+        await handoff._provider(RUN_ID, _claim(SimpleNamespace()))
+
+    assert calls_a == []
+    assert len(agent_b.calls) == 1
+    assert service.release_calls == []
+    assert service.fail_calls[0][1] == ChapterFailureCode.PROVIDER_TIMEOUT
+
+
+@pytest.mark.anyio
+async def test_claim_reads_none_revision_agent_dynamically(monkeypatch: pytest.MonkeyPatch) -> None:
+    import app.services.feedback_revision_handoff as module
+    from app.agents import RevisionAgent
+
+    agent_a = RevisionAgent(object())
+    service = _RecordingService()
+    service.revision_agent = agent_a  # type: ignore[attr-defined]
+    handoff = FeedbackRevisionHandoff(service, None, agent_a)
+    service.revision_agent = None  # mutate AFTER construction
+
+    async def fake_author_context(self: object, *, scope: object) -> object:
+        return SimpleNamespace(action=SimpleNamespace(expires_at=None))
+
+    monkeypatch.setattr(module._FeedbackClaimPhase, "author_context", fake_author_context)
+
+    with pytest.raises(ChapterProductionV2ProviderError):
+        await handoff._claim_locked(SimpleNamespace(), SimpleNamespace())
 

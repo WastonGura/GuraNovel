@@ -422,7 +422,6 @@ class FeedbackRevisionHandoff:
             raise _invalid() from None
         self.service = service
         self.phase_sessions = phase_sessions
-        self.revision_agent = revision_agent
 
     async def execute(
         self, *, project_id: UUID, chapter_id: UUID, workflow_run_id: UUID,
@@ -470,7 +469,7 @@ class FeedbackRevisionHandoff:
         cancellation: asyncio.CancelledError | None = None
         provider_failure: ChapterFailureCode | None = None
         try:
-            return await self.revision_agent.user_feedback_revision(claim.request)
+            return await self.service.revision_agent.user_feedback_revision(claim.request)
         except asyncio.CancelledError as error:
             cancellation = _safe_cancelled_error(error)
         except ProviderTimeoutError:
@@ -525,7 +524,7 @@ class FeedbackRevisionHandoff:
     async def _claim_locked(self, session: AsyncSession, scope: _Scope) -> _Claim:
         phase = _FeedbackClaimPhase(session, self.service)
         context = await phase.author_context(scope=scope)
-        if self.revision_agent is None:
+        if self.service.revision_agent is None:
             raise ChapterProductionV2ProviderError() from None
         database_now = await session.scalar(select(func.clock_timestamp()))
         if _expiry_precludes_resolution(context.action.expires_at, database_now):
