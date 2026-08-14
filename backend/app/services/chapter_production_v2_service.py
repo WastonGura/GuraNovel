@@ -29,7 +29,6 @@ from app.agents import (
     ChiefEditorChapterFinalRequest,
     EditorAgent,
     EditorReviewRequest,
-    InitialDraftRequest,
     LoreChapterFinalAgent,
     LoreChapterFinalRequest,
     ReviewContextKind,
@@ -54,13 +53,7 @@ from app.documents.chapter_segments import (
     derive_chapter_segment_map,
     normalize_chapter_content,
 )
-from app.llm import (
-    ProviderConfigurationError,
-    ProviderInvalidOutputError,
-    ProviderRateLimitedError,
-    ProviderTimeoutError,
-    ProviderUnavailableError,
-)
+from app.llm import ProviderInvalidOutputError, ProviderTimeoutError
 from app.models import (
     ActionRequest,
     ActionRequestStatus,
@@ -74,7 +67,6 @@ from app.models import (
     WorkflowCheckpoint,
     WorkflowEvent,
     WorkflowRun,
-    WorkflowType,
 )
 from app.services.chapter_production_repository import (
     ChapterProductionRepository,
@@ -97,6 +89,7 @@ from app.services.document_service import (
     DocumentCommitIndeterminateError,
     DocumentService,
 )
+from app.services.initial_draft_lifecycle import InitialCandidateNotApplicable, InitialDraftLifecycle, InitialRecoveryRoute
 from app.workflows.chapter_production import (
     ChapterActionBinding,
     ChapterActionDecision,
@@ -385,6 +378,7 @@ class ChapterProductionV2Service:
             if phase_session_source is not None
             else None
         )
+        self._initial_drafts = None if self._phase_sessions is None else InitialDraftLifecycle(self._phase_sessions, writer_agent, chief_editor_required)
         self.documents = DocumentService(session)
         self.repository = ChapterProductionRepository(
             session,
@@ -405,94 +399,9 @@ class ChapterProductionV2Service:
         actor_user_id: UUID,
     ) -> ChapterProductionV2Started:
         """Create or resume the one V2 draft operation for the approved outline."""
-
-        try:
-            self._validated_ids(project_id, chapter_id, actor_user_id)
-            await self._require_project_owner(project_id, actor_user_id)
-            chapter, outline, outline_version = await self._approved_outline(
-                project_id, chapter_id, lock=True
-            )
-            outline_map = await self.documents.derive_chapter_production_segment_map(
-                project_id=project_id,
-                chapter_id=chapter_id,
-                document_id=outline.id,
-                version_id=outline_version.id,
-            )
-            operation_key = self._operation_key(
-                project_id=project_id,
-                chapter_id=chapter_id,
-                outline_document_id=outline.id,
-                outline_version_id=outline_version.id,
-                outline_content_hash=outline_version.content_hash,
-            )
-            existing = await self._operation_run(project_id, chapter_id, operation_key)
-            if existing is None:
-                run = WorkflowRun(
-                    project_id=project_id,
-                    chapter_id=chapter_id,
-                    workflow_type=WorkflowType.CHAPTER_PRODUCTION.value,
-                    status=ChapterProductionStatus.DRAFTING.value,
-                    current_node="drafting",
-                    next_node=None,
-                    awaiting_user=False,
-                    metadata_={
-                        "contract_version": _CONTRACT_VERSION,
-                        "review_policy_version": _REVIEW_POLICY_VERSION,
-                        "chief_editor_required": self.chief_editor_required,
-                        "outline_document_id": str(outline.id),
-                        "outline_version_id": str(outline_version.id),
-                        "outline_content_hash": outline_version.content_hash,
-                        "segmenter_version": CURRENT_CHAPTER_SEGMENTER_VERSION,
-                        "operation_key": operation_key,
-                        "provider_attempt": None,
-                        "reviewer_claim": None,
-                    },
-                )
-                self.session.add(run)
-                await self.session.flush()
-                state = ChapterProductionState.initial(
-                    chapter_workflow_run_id=str(run.id),
-                    chapter_id=str(chapter_id),
-                    review_policy_version=_REVIEW_POLICY_VERSION,
-                    chief_editor_required=self.chief_editor_required,
-                )
-                self.session.add(
-                    WorkflowCheckpoint(
-                        workflow_run_id=run.id,
-                        checkpoint_index=0,
-                        node_name=state.current_node,
-                        state_json=state.to_checkpoint(),
-                    )
-                )
-                await self._commit()
-                run_id = run.id
-                resume_existing = False
-            else:
-                run_id = existing.id
-                resume_existing = True
-                await self.session.commit()
-        except ChapterProductionV2CommitIndeterminateError:
-            raise
-        except ChapterProductionV2ValidationError:
-            await self._rollback()
-            raise
-        except Exception:
-            await self._rollback()
+        if self._initial_drafts is None:
             raise _invalid() from None
-        if resume_existing:
-            return await self.resume_drafting(
-                project_id,
-                chapter_id,
-                run_id,
-                actor_user_id=actor_user_id,
-            )
-        return await self._resume_with_outline_map(
-            project_id=project_id,
-            chapter_id=chapter_id,
-            workflow_run_id=run_id,
-            outline_map=outline_map,
-            actor_user_id=actor_user_id,
-        )
+        return await self._initial_drafts.start(project_id, chapter_id, actor_user_id=actor_user_id)
 
     async def resume_drafting(
         self,
@@ -503,58 +412,9 @@ class ChapterProductionV2Service:
         actor_user_id: UUID,
     ) -> ChapterProductionV2Started:
         """Resume an exact V2 draft without duplicating committed artifacts."""
-
-        try:
-            self._validated_ids(project_id, chapter_id, workflow_run_id, actor_user_id)
-            await self._require_project_owner(project_id, actor_user_id)
-            chapter = await self._chapter(project_id, chapter_id, lock=True)
-            run = await self._run(project_id, chapter_id, workflow_run_id, lock=True)
-            metadata = self._run_metadata(run)
-            if run.status == ChapterProductionStatus.AUTHOR_REVISION.value:
-                result = await self._completed_result(run, metadata)
-                await self.session.commit()
-                return result
-            if run.status not in {
-                ChapterProductionStatus.DRAFTING.value,
-                ChapterProductionStatus.FAILED.value,
-            }:
-                raise _invalid()
-            outline, outline_version = await self._outline_for_chapter(
-                chapter, project_id, lock=True
-            )
-            self._validate_outline_metadata(metadata, outline, outline_version)
-            outline_map = await self.documents.derive_chapter_production_segment_map(
-                project_id=project_id,
-                chapter_id=chapter_id,
-                document_id=outline.id,
-                version_id=outline_version.id,
-            )
-            committed = await self._committed_draft(run.id, metadata["operation_key"])
-            await self.session.commit()
-            if committed is not None:
-                return await self._finalize_draft(
-                    project_id=project_id,
-                    chapter_id=chapter_id,
-                    workflow_run_id=run.id,
-                    draft=committed[0],
-                    version=committed[1],
-                    actor_user_id=actor_user_id,
-                )
-        except ChapterProductionV2CommitIndeterminateError:
-            raise
-        except ChapterProductionV2ValidationError:
-            await self._rollback()
-            raise
-        except Exception:
-            await self._rollback()
+        if self._initial_drafts is None:
             raise _invalid() from None
-        return await self._resume_with_outline_map(
-            project_id=project_id,
-            chapter_id=chapter_id,
-            workflow_run_id=workflow_run_id,
-            outline_map=outline_map,
-            actor_user_id=actor_user_id,
-        )
+        return await self._initial_drafts.resume(project_id, chapter_id, workflow_run_id, actor_user_id=actor_user_id)
 
     async def resolve_author_action(
         self,
@@ -1769,7 +1629,11 @@ class ChapterProductionV2Service:
         actor_user_id: UUID,
     ) -> ChapterProductionState:
         """Reconcile one exact committed child without invoking a provider."""
-
+        if self._initial_drafts is None:
+            raise _invalid() from None
+        initial = await self._initial_drafts.reconcile(project_id, chapter_id, workflow_run_id, actor_user_id=actor_user_id)
+        if initial is not InitialRecoveryRoute.LEGACY:
+            return initial
         try:
             self._validated_ids(project_id, chapter_id, workflow_run_id, actor_user_id)
             await self._require_project_owner(project_id, actor_user_id)
@@ -1792,9 +1656,10 @@ class ChapterProductionV2Service:
             if not candidates:
                 if type(attempt) is dict and attempt.get("status") == _ATTEMPT_STATUS_CLAIMED:
                     raise ChapterProductionV2ReconciliationError()
+                if state.status is ChapterProductionStatus.AUTHOR_REVISION:
+                    raise ChapterProductionV2ReconciliationError()
                 if state.document_id is None:
-                    if chapter.current_draft_document_id is not None:
-                        raise ChapterProductionV2ReconciliationError()
+                    raise ChapterProductionV2ReconciliationError()
                 else:
                     canonical = await self.session.scalar(
                         select(Document)
@@ -1813,16 +1678,9 @@ class ChapterProductionV2Service:
                 await self.session.commit()
                 return state
             document, version = candidates[0]
-            initial_candidate = (
-                state.status is ChapterProductionStatus.DRAFTING and state.document_id is None
-            )
             if (
                 document.current_version_id != version.id
-                or (
-                    initial_candidate
-                    and chapter.current_draft_document_id not in {None, document.id}
-                )
-                or (not initial_candidate and chapter.current_draft_document_id != document.id)
+                or chapter.current_draft_document_id != document.id
             ):
                 raise ChapterProductionV2ReconciliationError()
             operation_key = version.metadata_.get("operation_key")
@@ -1846,14 +1704,7 @@ class ChapterProductionV2Service:
             await self.session.commit()
             if state.status is ChapterProductionStatus.DRAFTING:
                 if state.document_id is None:
-                    await self._finalize_draft(
-                        project_id=project_id,
-                        chapter_id=chapter_id,
-                        workflow_run_id=run.id,
-                        draft=document,
-                        version=version,
-                        actor_user_id=actor_user_id,
-                    )
+                    raise ChapterProductionV2ReconciliationError()
                 else:
                     old_action = await self._resolved_source_action(run.id, state)
                     await self._finalize_feedback_revision(
@@ -1917,10 +1768,9 @@ class ChapterProductionV2Service:
             raise
         except ChapterProductionV2ValidationError:
             await self._rollback()
-            raise ChapterProductionV2ReconciliationError() from None
         except Exception:
             await self._rollback()
-            raise ChapterProductionV2ReconciliationError() from None
+        raise ChapterProductionV2ReconciliationError() from None
 
     async def acknowledge_provider_no_write(
         self,
@@ -1933,15 +1783,19 @@ class ChapterProductionV2Service:
         expected_attempt_id: str,
     ) -> ChapterProductionState:
         """Authorize retry after an operator verifies a claimed attempt wrote nothing."""
-
+        self._validated_ids(project_id, chapter_id, workflow_run_id, actor_user_id)
+        if (self._initial_drafts is None or not _valid_sha256(expected_attempt_key)
+                or not _valid_nonzero_uuid(expected_attempt_id)):
+            raise _invalid() from None
         try:
-            self._validated_ids(project_id, chapter_id, workflow_run_id, actor_user_id)
-            if not _valid_sha256(expected_attempt_key) or not _valid_nonzero_uuid(
-                expected_attempt_id
-            ):
-                raise _invalid()
+            return await self._initial_drafts.acknowledge_no_write(
+                project_id, chapter_id, workflow_run_id, actor_user_id=actor_user_id,
+                operation_key=expected_attempt_key, attempt_id=UUID(expected_attempt_id))
+        except InitialCandidateNotApplicable:
+            pass
+        try:
             await self._require_project_owner(project_id, actor_user_id)
-            chapter = await self._chapter(project_id, chapter_id, lock=True)
+            await self._chapter(project_id, chapter_id, lock=True)
             run = await self._run(project_id, chapter_id, workflow_run_id, lock=True)
             state, checkpoint = await self._locked_state(run)
             attempt = self._run_metadata(run)["provider_attempt"]
@@ -1960,11 +1814,7 @@ class ChapterProductionV2Service:
             ):
                 raise ChapterProductionV2ReconciliationError()
             if state.document_id is None:
-                if (
-                    chapter.current_draft_document_id is not None
-                    or attempt.get("kind") != "initial"
-                ):
-                    raise ChapterProductionV2ReconciliationError()
+                raise ChapterProductionV2ReconciliationError()
             else:
                 canonical = await self.session.scalar(
                     select(Document.id)
@@ -2003,356 +1853,6 @@ class ChapterProductionV2Service:
             raise
         except ChapterProductionV2ReconciliationError:
             await self._rollback()
-            raise
-        except ChapterProductionV2ValidationError:
-            await self._rollback()
-            raise
-        except Exception:
-            await self._rollback()
-            raise _invalid() from None
-
-    async def _resume_with_outline_map(
-        self,
-        *,
-        project_id: UUID,
-        chapter_id: UUID,
-        workflow_run_id: UUID,
-        outline_map: ChapterSegmentMap,
-        actor_user_id: UUID,
-    ) -> ChapterProductionV2Started:
-        request_failed = False
-        try:
-            request = InitialDraftRequest(
-                project_id=project_id,
-                chapter_id=chapter_id,
-                workflow_run_id=workflow_run_id,
-                approved_outline=ApprovedOutlineReference(
-                    project_id=project_id,
-                    chapter_id=chapter_id,
-                    document_id=outline_map.document_id,
-                    version_id=outline_map.version_id,
-                ),
-                allowed_segments=tuple(
-                    AllowedChapterSegment(
-                        segment_id=item.segment_id,
-                        index=item.ordinal,
-                        title=item.structural_path,
-                        brief=item.content,
-                    )
-                    for item in outline_map.segments
-                ),
-            )
-        except Exception:
-            request_failed = True
-        if request_failed:
-            raise ChapterProductionV2ProviderError() from None
-
-        attempt_key, attempt_checkpoint_index, attempt_id = await self._claim_initial_attempt(
-            project_id=project_id,
-            chapter_id=chapter_id,
-            workflow_run_id=workflow_run_id,
-            actor_user_id=actor_user_id,
-        )
-        cancellation = None
-        provider_failure: ChapterFailureCode | None = None
-        try:
-            candidate = await self.writer_agent.initial_draft(request)
-        except asyncio.CancelledError as error:
-            cancellation = _safe_cancelled_error(error)
-        except ProviderTimeoutError:
-            provider_failure = ChapterFailureCode.PROVIDER_TIMEOUT
-        except ProviderInvalidOutputError:
-            provider_failure = ChapterFailureCode.INVALID_PROVIDER_OUTPUT
-        except (
-            ProviderConfigurationError,
-            ProviderRateLimitedError,
-            ProviderUnavailableError,
-        ):
-            provider_failure = ChapterFailureCode.PROVIDER_UNAVAILABLE
-        except Exception:
-            provider_failure = ChapterFailureCode.PROVIDER_UNAVAILABLE
-        if cancellation is not None:
-            await self._release_attempt(
-                workflow_run_id,
-                expected_key=attempt_key,
-                expected_attempt_id=attempt_id,
-                expected_kind="initial",
-                expected_checkpoint_index=attempt_checkpoint_index,
-            )
-            raise cancellation from None
-        if provider_failure is not None:
-            await self._fail_provider(
-                workflow_run_id,
-                provider_failure,
-                expected_status=ChapterProductionStatus.DRAFTING,
-                expected_checkpoint_index=attempt_checkpoint_index,
-                expected_attempt_key=attempt_key,
-                expected_attempt_id=attempt_id,
-            )
-            raise ChapterProductionV2ProviderError() from None
-
-        try:
-            content = compose_initial_markdown(
-                tuple(segment.content for segment in candidate.segments)
-            )
-            await self._require_project_owner(project_id, actor_user_id)
-            chapter = await self._chapter(project_id, chapter_id, lock=True)
-            run = await self._run(project_id, chapter_id, workflow_run_id, lock=True)
-            metadata = self._run_metadata(run)
-            state, checkpoint = await self._locked_state(run)
-            attempt = metadata["provider_attempt"]
-            if state.status is not ChapterProductionStatus.DRAFTING:
-                if state.status is ChapterProductionStatus.AUTHOR_REVISION:
-                    result = await self._completed_result(run, metadata)
-                    await self.session.commit()
-                    return result
-                raise _invalid()
-            if (
-                checkpoint.checkpoint_index != attempt_checkpoint_index
-                or type(attempt) is not dict
-                or attempt.get("key") != attempt_key
-                or attempt.get("attempt_id") != attempt_id
-                or attempt.get("kind") != "initial"
-                or attempt.get("checkpoint_index") != attempt_checkpoint_index
-                or attempt.get("status") != _ATTEMPT_STATUS_CLAIMED
-            ):
-                raise ChapterProductionV2ReconciliationError()
-            outline, outline_version = await self._outline_for_chapter(
-                chapter, project_id, lock=True
-            )
-            self._validate_outline_metadata(metadata, outline, outline_version)
-            current_map = await self.documents.derive_chapter_production_segment_map(
-                project_id=project_id,
-                chapter_id=chapter_id,
-                document_id=outline.id,
-                version_id=outline_version.id,
-            )
-            if current_map.canonical_bytes() != outline_map.canonical_bytes():
-                raise _invalid()
-            operation_key = metadata["operation_key"]
-            if operation_key != attempt_key:
-                raise ChapterProductionV2ReconciliationError()
-            committed = await self._committed_draft(run.id, operation_key)
-            if committed is not None:
-                await self.session.commit()
-                return await self._finalize_draft(
-                    project_id=project_id,
-                    chapter_id=chapter_id,
-                    workflow_run_id=run.id,
-                    draft=committed[0],
-                    version=committed[1],
-                    actor_user_id=actor_user_id,
-                )
-            _validated_prospective_map(
-                project_id=project_id,
-                chapter_id=chapter_id,
-                document_id=outline.id,
-                version_id=outline_version.id,
-                content=content,
-            )
-            draft = await self.documents.create_document(
-                project_id=project_id,
-                chapter_id=chapter_id,
-                document_type=DocumentType.CHAPTER_DRAFT,
-                title=f"Chapter {chapter.chapter_number} draft",
-                path=f"chapters/chapter-{chapter.chapter_number:04d}-{run.id}-draft.md",
-                content=content,
-                source=DocumentSource.WRITER_AGENT,
-                agent_role="writer_agent",
-                workflow_run_id=run.id,
-                change_summary="Generated Chapter Production V2 draft.",
-                version_metadata={
-                    "contract_version": _CONTRACT_VERSION,
-                    "operation_key": operation_key,
-                    "attempt_id": attempt_id,
-                },
-            )
-            version = draft.current_version
-            if version is None:
-                raise _invalid()
-        except DocumentCommitIndeterminateError:
-            await self._rollback()
-            raise ChapterProductionV2CommitIndeterminateError() from None
-        except ChapterProductionV2CommitIndeterminateError:
-            raise
-        except ChapterProductionV2ReconciliationError:
-            await self._release_attempt(
-                workflow_run_id,
-                expected_key=attempt_key,
-                expected_attempt_id=attempt_id,
-                expected_kind="initial",
-                expected_checkpoint_index=attempt_checkpoint_index,
-            )
-            raise
-        except ChapterProductionV2ValidationError:
-            await self._release_attempt(
-                workflow_run_id,
-                expected_key=attempt_key,
-                expected_attempt_id=attempt_id,
-                expected_kind="initial",
-                expected_checkpoint_index=attempt_checkpoint_index,
-            )
-            raise
-        except Exception:
-            await self._release_attempt(
-                workflow_run_id,
-                expected_key=attempt_key,
-                expected_attempt_id=attempt_id,
-                expected_kind="initial",
-                expected_checkpoint_index=attempt_checkpoint_index,
-            )
-            raise _invalid() from None
-        return await self._finalize_draft(
-            project_id=project_id,
-            chapter_id=chapter_id,
-            workflow_run_id=workflow_run_id,
-            draft=draft,
-            version=version,
-            actor_user_id=actor_user_id,
-        )
-
-    async def _finalize_draft(
-        self,
-        *,
-        project_id: UUID,
-        chapter_id: UUID,
-        workflow_run_id: UUID,
-        draft: Document,
-        version: DocumentVersion,
-        actor_user_id: UUID,
-    ) -> ChapterProductionV2Started:
-        try:
-            await self._require_project_owner(project_id, actor_user_id)
-            chapter = await self._chapter(project_id, chapter_id, lock=True)
-            run = await self._run(project_id, chapter_id, workflow_run_id, lock=True)
-            metadata = self._run_metadata(run)
-            state, checkpoint = await self._locked_state(run)
-            if state.status is ChapterProductionStatus.AUTHOR_REVISION:
-                result = await self._completed_result(run, metadata)
-                await self.session.commit()
-                return result
-            if state.status is not ChapterProductionStatus.DRAFTING:
-                raise _invalid()
-            attempt = metadata["provider_attempt"]
-            if (
-                type(attempt) is not dict
-                or attempt.get("kind") != "initial"
-                or attempt.get("status") != _ATTEMPT_STATUS_CLAIMED
-                or attempt.get("checkpoint_index") != checkpoint.checkpoint_index
-            ):
-                raise ChapterProductionV2ReconciliationError()
-            live_document = await self.session.scalar(
-                select(Document)
-                .options(selectinload(Document.project), selectinload(Document.current_version))
-                .where(
-                    Document.id == draft.id,
-                    Document.project_id == project_id,
-                    Document.chapter_id == chapter_id,
-                    Document.type == DocumentType.CHAPTER_DRAFT.value,
-                    Document.current_version_id == version.id,
-                )
-                .with_for_update()
-            )
-            live_version = await self.session.scalar(
-                select(DocumentVersion)
-                .where(
-                    DocumentVersion.id == version.id,
-                    DocumentVersion.document_id == draft.id,
-                    DocumentVersion.workflow_run_id == run.id,
-                    DocumentVersion.source == DocumentSource.WRITER_AGENT.value,
-                    DocumentVersion.agent_role == "writer_agent",
-                    DocumentVersion.parent_version_id.is_(None),
-                )
-                .with_for_update()
-            )
-            if live_document is None or live_version is None:
-                raise _invalid()
-            if live_version.metadata_ != {
-                "contract_version": _CONTRACT_VERSION,
-                "operation_key": metadata["operation_key"],
-                "attempt_id": attempt["attempt_id"],
-            }:
-                raise _invalid()
-            await self.documents.derive_chapter_production_segment_map(
-                project_id=project_id,
-                chapter_id=chapter_id,
-                document_id=live_document.id,
-                version_id=live_version.id,
-            )
-            pending = list(
-                await self.session.scalars(
-                    select(ActionRequest)
-                    .where(
-                        ActionRequest.workflow_run_id == run.id,
-                        ActionRequest.status == ActionRequestStatus.PENDING.value,
-                    )
-                    .with_for_update()
-                )
-            )
-            if pending:
-                raise _invalid()
-            action = ActionRequest(
-                workflow_run_id=run.id,
-                project_id=project_id,
-                chapter_id=chapter_id,
-                request_type=_AUTHOR_ACTION_TYPE,
-                status=ActionRequestStatus.PENDING.value,
-                prompt="Review the current chapter draft.",
-                options=["accept", "request_revision", "submit_manual_edit"],
-                default_option="accept",
-                metadata_={
-                    "contract_version": _CONTRACT_VERSION,
-                    "action_kind": ChapterActionKind.AUTHOR_REVISION.value,
-                    "document_id": str(live_document.id),
-                    "document_version_id": str(live_version.id),
-                    "content_hash": live_version.content_hash,
-                    "operation_key": metadata["operation_key"],
-                },
-            )
-            self.session.add(action)
-            await self.session.flush()
-            binding = ChapterActionBinding(
-                action_request_id=str(action.id),
-                workflow_run_id=str(run.id),
-                chapter_id=str(chapter.id),
-                request_type=action.request_type,
-                kind=ChapterActionKind.AUTHOR_REVISION,
-                status=ActionRequestStatus.PENDING,
-                pending_count=1,
-                document_id=str(live_document.id),
-                document_version_id=str(live_version.id),
-                content_hash=live_version.content_hash,
-                current_document_id=str(live_document.id),
-                current_document_version_id=str(live_version.id),
-                current_content_hash=live_version.content_hash,
-            )
-            next_state = state.submit_draft(
-                document_id=str(live_document.id),
-                document_version_id=str(live_version.id),
-                content_hash=live_version.content_hash,
-                action=binding,
-            )
-            chapter.current_draft_document_id = live_document.id
-            self._set_attempt(run, None)
-            self._project_state(run, next_state)
-            self.session.add(
-                WorkflowCheckpoint(
-                    workflow_run_id=run.id,
-                    checkpoint_index=checkpoint.checkpoint_index + 1,
-                    node_name=next_state.current_node,
-                    state_json=next_state.to_checkpoint(),
-                )
-            )
-            await self._commit()
-            return ChapterProductionV2Started(
-                workflow_run_id=run.id,
-                action_request_id=action.id,
-                outline_document_id=UUID(metadata["outline_document_id"]),
-                outline_version_id=UUID(metadata["outline_version_id"]),
-                draft_document_id=live_document.id,
-                draft_version_id=live_version.id,
-            )
-        except ChapterProductionV2CommitIndeterminateError:
             raise
         except ChapterProductionV2ValidationError:
             await self._rollback()
@@ -4287,16 +3787,9 @@ class ChapterProductionV2Service:
             or document.current_version_id != version.id
         ):
             return False
-        kind = attempt.get("kind")
         if state.document_id is None:
-            return (
-                kind == "initial"
-                and version.parent_version_id is None
-                and version.source == DocumentSource.WRITER_AGENT.value
-                and version.actor_user_id is None
-                and version.agent_role == "writer_agent"
-                and attempt.get("key") == self._run_metadata(run)["operation_key"]
-            )
+            return False
+        kind = attempt.get("kind")
         if (
             attempt.get("source_document_id") != state.document_id
             or attempt.get("source_version_id") != state.document_version_id
@@ -4363,7 +3856,6 @@ class ChapterProductionV2Service:
                 select(ActionRequest)
                 .where(
                     ActionRequest.workflow_run_id == run_id,
-                    ActionRequest.status == ActionRequestStatus.REVISED.value,
                 )
                 .with_for_update()
             )
@@ -4371,10 +3863,11 @@ class ChapterProductionV2Service:
         matches = [
             action
             for action in actions
-            if action.metadata_.get("document_id") == state.document_id
+            if action.status == ActionRequestStatus.REVISED.value
+            and action.metadata_.get("document_id") == state.document_id
             and action.metadata_.get("document_version_id") == state.document_version_id
         ]
-        if len(matches) != 1:
+        if len(matches) != 1 or any(action.status == ActionRequestStatus.PENDING.value for action in actions):
             raise ChapterProductionV2ReconciliationError()
         return matches[0]
 
@@ -4538,69 +4031,6 @@ class ChapterProductionV2Service:
         metadata = dict(run.metadata_)
         metadata["provider_attempt"] = attempt
         run.metadata_ = metadata
-
-    async def _claim_initial_attempt(
-        self,
-        *,
-        project_id: UUID,
-        chapter_id: UUID,
-        workflow_run_id: UUID,
-        actor_user_id: UUID,
-    ) -> tuple[str, int, str]:
-        await self._require_project_owner(project_id, actor_user_id)
-        await self._chapter(project_id, chapter_id, lock=True)
-        run = await self._run(project_id, chapter_id, workflow_run_id, lock=True)
-        state, checkpoint = await self._locked_state(run)
-        metadata = self._run_metadata(run)
-        key = metadata["operation_key"]
-        attempt = metadata["provider_attempt"]
-        if state.status is ChapterProductionStatus.FAILED:
-            failed_attempt_checkpoint = (
-                attempt.get("checkpoint_index") if type(attempt) is dict else None
-            )
-            if (
-                state.failed_from_status is not ChapterProductionStatus.DRAFTING
-                or state.document_id is not None
-                or state.document_version_id is not None
-                or state.failure_code
-                not in {
-                    ChapterFailureCode.PROVIDER_UNAVAILABLE,
-                    ChapterFailureCode.PROVIDER_TIMEOUT,
-                    ChapterFailureCode.INVALID_PROVIDER_OUTPUT,
-                }
-                or type(attempt) is not dict
-                or attempt.get("key") != key
-                or attempt.get("kind") != "initial"
-                or attempt.get("status") != _ATTEMPT_STATUS_FAILED
-                or type(failed_attempt_checkpoint) is not int
-                or checkpoint.checkpoint_index != failed_attempt_checkpoint + 1
-            ):
-                raise ChapterProductionV2ReconciliationError()
-            state = state.recover()
-            self._append_state(run, checkpoint, state)
-            checkpoint_index = checkpoint.checkpoint_index + 1
-        else:
-            if (
-                state.status is not ChapterProductionStatus.DRAFTING
-                or state.document_id is not None
-            ):
-                raise _invalid()
-            checkpoint_index = checkpoint.checkpoint_index
-            if attempt is not None:
-                raise ChapterProductionV2ReconciliationError()
-        attempt_id = _new_attempt_id()
-        self._set_attempt(
-            run,
-            self._attempt_payload(
-                attempt_id=attempt_id,
-                key=key,
-                kind="initial",
-                checkpoint_index=checkpoint_index,
-            ),
-        )
-        await self._commit()
-        return key, checkpoint_index, attempt_id
-
     async def _recover_failed_attempt(
         self,
         *,
@@ -5286,7 +4716,9 @@ class ChapterProductionV2Service:
             chapter = await self._chapter(project_id, chapter_id, lock=True)
             await self._require_project_owner(project_id, actor_user_id)
             run = await self._run(project_id, chapter_id, workflow_run_id, lock=True)
+            metadata = self._run_metadata(run)
             state, checkpoint = await self._locked_state(run)
+            manual_key = self._decision_operation_key(run.id, action_request_id, expected_parent_version_id, "manual")
             action = await self.session.scalar(
                 select(ActionRequest)
                 .where(
@@ -5295,6 +4727,12 @@ class ChapterProductionV2Service:
                     ActionRequest.status == ActionRequestStatus.REVISED.value,
                     ActionRequest.user_decision == ChapterActionDecision.SUBMIT_MANUAL_EDIT.value,
                     ActionRequest.resolved_by_id == actor_user_id,
+                    ~select(ActionRequest.id).where(
+                        ActionRequest.workflow_run_id == run.id,
+                        ActionRequest.status == ActionRequestStatus.PENDING.value,
+                    ).exists(),
+                    select(func.count(DocumentVersion.id)).where(
+                        DocumentVersion.parent_version_id == expected_parent_version_id).scalar_subquery() == 1,
                 )
                 .with_for_update()
             )
@@ -5310,7 +4748,17 @@ class ChapterProductionV2Service:
                 agent_role=None,
                 operation_key=operation_key,
             )
-            if action is None or chapter.current_draft_document_id != document.id:
+            action_key = action.metadata_.get("operation_key") if action is not None and type(action.metadata_) is dict else None
+            expected_action = {"contract_version": _CONTRACT_VERSION, "action_kind": ChapterActionKind.AUTHOR_REVISION.value,
+                "document_id": old_binding.document_id, "document_version_id": old_binding.document_version_id,
+                "content_hash": old_binding.content_hash, "operation_key": action_key}
+            if (action is None or operation_key != manual_key or chapter.current_draft_document_id != document.id
+                    or any(metadata[key] is not None for key in ("provider_attempt", "reviewer_claim"))
+                    or action.project_id != project_id
+                    or action.chapter_id != chapter_id or action.request_type != _AUTHOR_ACTION_TYPE
+                    or action.prompt != "Review the current chapter draft." or action.options != ["accept", "request_revision", "submit_manual_edit"]
+                    or action.default_option != "accept" or action.user_feedback is not None or action.resolved_at is None
+                    or action.expires_at is not None or not _valid_sha256(action_key) or action.metadata_ != expected_action):
                 raise _invalid()
             next_state = state.resolve_action(
                 action=old_binding,
@@ -5556,18 +5004,6 @@ class ChapterProductionV2Service:
                 )
             )
         )
-
-    async def _approved_outline(
-        self, project_id: UUID, chapter_id: UUID, *, lock: bool
-    ) -> tuple[Chapter, Document, DocumentVersion]:
-        try:
-            result = await self.repository.approved_outline(project_id, chapter_id, lock=lock)
-        except _ChapterProductionRepositoryValidationError:
-            pass
-        else:
-            return result
-        raise _invalid()
-
     async def _outline_for_chapter(
         self, chapter: Chapter, project_id: UUID, *, lock: bool
     ) -> tuple[Document, DocumentVersion]:
@@ -5604,20 +5040,6 @@ class ChapterProductionV2Service:
         else:
             return result
         raise _invalid()
-
-    async def _operation_run(
-        self, project_id: UUID, chapter_id: UUID, operation_key: str
-    ) -> WorkflowRun | None:
-        try:
-            result = await self.repository.operation_run(
-                project_id, chapter_id, operation_key
-            )
-        except _ChapterProductionRepositoryValidationError:
-            pass
-        else:
-            return result
-        raise _invalid()
-
     async def _locked_state(
         self, run: WorkflowRun
     ) -> tuple[ChapterProductionState, WorkflowCheckpoint]:
@@ -5795,94 +5217,12 @@ class ChapterProductionV2Service:
             "status": ChapterProductionStatus.REVISION_READY.value,
         }:
             raise ChapterProductionV2ReconciliationError()
-
-    async def _committed_draft(
-        self, run_id: UUID, operation_key: str
-    ) -> tuple[Document, DocumentVersion] | None:
-        versions = list(
-            await self.session.scalars(
-                select(DocumentVersion).where(DocumentVersion.workflow_run_id == run_id)
-            )
-        )
-        matches = [
-            version
-            for version in versions
-            if version.metadata_.get("contract_version") == _CONTRACT_VERSION
-            and version.metadata_.get("operation_key") == operation_key
-            and _valid_nonzero_uuid(version.metadata_.get("attempt_id"))
-            and set(version.metadata_) == {"contract_version", "operation_key", "attempt_id"}
-        ]
-        if len(matches) > 1:
-            raise _invalid()
-        if not matches:
-            return None
-        version = matches[0]
-        document = await self.session.get(Document, version.document_id)
-        if document is None or document.current_version_id != version.id:
-            raise _invalid()
-        return document, version
-
-    async def _completed_result(
-        self, run: WorkflowRun, metadata: dict[str, str]
-    ) -> ChapterProductionV2Started:
-        state, _ = await self._locked_state(run)
-        if (
-            state.status is not ChapterProductionStatus.AUTHOR_REVISION
-            or state.action_request_id is None
-            or state.document_id is None
-            or state.document_version_id is None
-        ):
-            raise _invalid()
-        pending = list(
-            await self.session.scalars(
-                select(ActionRequest).where(
-                    ActionRequest.id == UUID(state.action_request_id),
-                    ActionRequest.workflow_run_id == run.id,
-                    ActionRequest.status == ActionRequestStatus.PENDING.value,
-                )
-            )
-        )
-        if len(pending) != 1:
-            raise _invalid()
-        return ChapterProductionV2Started(
-            workflow_run_id=run.id,
-            action_request_id=pending[0].id,
-            outline_document_id=UUID(metadata["outline_document_id"]),
-            outline_version_id=UUID(metadata["outline_version_id"]),
-            draft_document_id=UUID(state.document_id),
-            draft_version_id=UUID(state.document_version_id),
-        )
-
     @staticmethod
     def _project_state(run: WorkflowRun, state: ChapterProductionState) -> None:
         run.status = state.status.value
         run.current_node = state.current_node
         run.awaiting_user = state.awaiting_user
         run.next_node = None
-
-    @staticmethod
-    def _operation_key(
-        *,
-        project_id: UUID,
-        chapter_id: UUID,
-        outline_document_id: UUID,
-        outline_version_id: UUID,
-        outline_content_hash: str,
-    ) -> str:
-        return sha256_content(
-            ":".join(
-                (
-                    _CONTRACT_VERSION,
-                    str(project_id),
-                    str(chapter_id),
-                    str(outline_document_id),
-                    str(outline_version_id),
-                    outline_content_hash,
-                    CURRENT_CHAPTER_SEGMENTER_VERSION,
-                )
-            )
-        )
-
     @staticmethod
     def _run_metadata(run: WorkflowRun) -> dict[str, str]:
         metadata = run.metadata_

@@ -320,13 +320,6 @@ def test_operation_keys_match_existing_mechanical_contracts() -> None:
         "aa63bb48f0ead83ac031a78bf5e5584fee293cfc1bd78bd33ee5c6ea7b070632",
         "8dd2fb61fe01674c3ba76f88b72ae128fd58c6f1dd2552ca95738188f8c7a7c8",
     )
-    assert initial == ChapterProductionV2Service._operation_key(
-        project_id=UUID("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"),
-        chapter_id=UUID("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"),
-        outline_document_id=UUID("cccccccc-cccc-4ccc-8ccc-cccccccccccc"),
-        outline_version_id=UUID("dddddddd-dddd-4ddd-8ddd-dddddddddddd"),
-        outline_content_hash=HASH_A,
-    )
     assert feedback == ChapterProductionV2Service._decision_operation_key(
         RUN_ID,
         ACTION_ID,

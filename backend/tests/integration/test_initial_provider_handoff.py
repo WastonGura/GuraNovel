@@ -32,11 +32,13 @@ from app.services.chapter_production_v2_contracts import (
 )
 from app.services.document_service import DocumentService
 from app.services import initial_provider_handoff as handoff_module
+from app.services.initial_candidate_persistence import InitialCandidatePersistence
 from app.services.initial_provider_handoff import (
     InitialProviderHandoff,
     InitialProviderResult,
 )
 from app.services.initial_run_bootstrap import InitialRunBootstrap
+from app.workflows.chapter_production import ChapterProductionStatus
 
 
 pytestmark = pytest.mark.integration
@@ -398,6 +400,74 @@ async def test_late_generation_ack_cannot_clear_current_generation(
 
 
 @pytest.mark.anyio
+async def test_identity_ack_clears_exact_zero_write_generation_without_checkpoint(
+    async_session: AsyncSession, integration_database_url: str, tmp_path: Path
+) -> None:
+    project, chapter, owner = await _approved(async_session, tmp_path)
+    engine = create_async_engine(integration_database_url, pool_pre_ping=True)
+    handoff = _handoff(engine, DeterministicChapterWriterProvider())
+    try:
+        result = await handoff.execute(project.id, chapter.id, actor_user_id=owner.id)
+        scope = result.generation.scope
+
+        state = await handoff.acknowledge_no_write_identity(
+            project.id,
+            chapter.id,
+            result.workflow_run_id,
+            actor_user_id=owner.id,
+            operation_key=scope.operation_key,
+            attempt_id=scope.attempt_id,
+        )
+
+        assert state.status is ChapterProductionStatus.DRAFTING
+        async with async_sessionmaker(engine, expire_on_commit=False)() as session:
+            run = await session.get(WorkflowRun, result.workflow_run_id)
+            checkpoints = tuple(
+                await session.scalars(
+                    select(WorkflowCheckpoint)
+                    .where(WorkflowCheckpoint.workflow_run_id == result.workflow_run_id)
+                    .order_by(WorkflowCheckpoint.checkpoint_index)
+                )
+            )
+        assert run is not None and run.metadata_["provider_attempt"] is None
+        assert tuple(item.checkpoint_index for item in checkpoints) == (0,)
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.anyio
+async def test_identity_ack_rejects_durable_candidate_without_clearing_attempt(
+    async_session: AsyncSession, integration_database_url: str, tmp_path: Path
+) -> None:
+    project, chapter, owner = await _approved(async_session, tmp_path)
+    engine = create_async_engine(integration_database_url, pool_pre_ping=True)
+    handoff = _handoff(engine, DeterministicChapterWriterProvider())
+    try:
+        result = await handoff.execute(project.id, chapter.id, actor_user_id=owner.id)
+        scope = result.generation.scope
+        await InitialCandidatePersistence(handoff.phase_sessions, True).persist(result)
+
+        with pytest.raises(ChapterProductionV2ReconciliationError):
+            await handoff.acknowledge_no_write_identity(
+                project.id,
+                chapter.id,
+                result.workflow_run_id,
+                actor_user_id=owner.id,
+                operation_key=scope.operation_key,
+                attempt_id=scope.attempt_id,
+            )
+
+        async with async_sessionmaker(engine, expire_on_commit=False)() as session:
+            run = await session.get(WorkflowRun, result.workflow_run_id)
+            assert run is not None
+            assert run.metadata_["provider_attempt"]["attempt_id"] == str(
+                scope.attempt_id
+            )
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.anyio
 async def test_wrong_owner_fails_before_run_or_provider(
     async_session: AsyncSession, integration_database_url: str, tmp_path: Path
 ) -> None:
@@ -418,6 +488,50 @@ async def test_wrong_owner_fails_before_run_or_provider(
                     WorkflowRun.chapter_id == chapter.id
                 )
             ) == 0
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.anyio
+async def test_expected_run_mismatch_fails_before_claim_or_provider(
+    async_session: AsyncSession, integration_database_url: str, tmp_path: Path
+) -> None:
+    project, chapter, owner = await _approved(async_session, tmp_path)
+    engine = create_async_engine(integration_database_url, pool_pre_ping=True)
+    lease = ChapterPhaseSessionLease(ChapterPhaseSessionSource(engine))
+    provider = _FailOnce()
+    handoff = InitialProviderHandoff(lease, WriterAgent(provider), True)
+    try:
+        with pytest.raises(ChapterProductionV2ValidationError):
+            await handoff.execute(
+                project.id,
+                chapter.id,
+                actor_user_id=owner.id,
+                expected_run_id=uuid4(),
+            )
+        async with async_sessionmaker(engine, expire_on_commit=False)() as session:
+            assert await session.scalar(select(func.count()).select_from(WorkflowRun)) == 0
+
+        run_id = await InitialRunBootstrap(lease, True).start_or_resume(
+            project.id, chapter.id, actor_user_id=owner.id
+        )
+        with pytest.raises(ChapterProductionV2ValidationError):
+            await handoff.execute(
+                project.id,
+                chapter.id,
+                actor_user_id=owner.id,
+                expected_run_id=uuid4(),
+            )
+        assert provider.calls == 0
+        async with async_sessionmaker(engine, expire_on_commit=False)() as session:
+            run = await session.get(WorkflowRun, run_id)
+            version_count = await session.scalar(
+                select(func.count()).select_from(DocumentVersion).where(
+                    DocumentVersion.workflow_run_id == run_id
+                )
+            )
+        assert run is not None and run.metadata_["provider_attempt"] is None
+        assert version_count == 0
     finally:
         await engine.dispose()
 
