@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from uuid import UUID, uuid4
 
@@ -775,6 +775,71 @@ async def test_accept_author_action_enters_editor_review_and_cannot_replay(
             actor_user_id=owner.id,
             decision="accept",
         )
+
+
+@pytest.mark.integration
+@pytest.mark.anyio
+async def test_accept_resolves_future_expiry_within_the_database_clock_and_calls_no_provider(
+    async_session: AsyncSession, tmp_path: Path
+) -> None:
+    project, chapter, owner, service, started, provider = await owned_started_chapter(
+        async_session, tmp_path
+    )
+    action = await async_session.get(ActionRequest, started.action_request_id)
+    assert action is not None
+    action.expires_at = datetime.now(UTC) + timedelta(hours=1)
+    await async_session.commit()
+
+    await service.resolve_author_action(
+        project.id,
+        chapter.id,
+        started.workflow_run_id,
+        started.action_request_id,
+        actor_user_id=owner.id,
+        decision="accept",
+    )
+
+    assert provider.calls == 0 and provider.review_calls == 0
+    run = await async_session.get(WorkflowRun, started.workflow_run_id)
+    resolved = await async_session.get(ActionRequest, started.action_request_id)
+    assert run is not None and resolved is not None
+    assert run.status == ChapterProductionStatus.EDITOR_REVIEW.value
+    assert run.awaiting_user is False
+    assert resolved.status == ActionRequestStatus.APPROVED.value
+    assert resolved.resolved_at is not None and resolved.user_decision == "accept"
+
+
+@pytest.mark.integration
+@pytest.mark.anyio
+async def test_accept_fails_closed_when_the_database_clock_passed_expiry(
+    async_session: AsyncSession, tmp_path: Path
+) -> None:
+    project, chapter, owner, service, started, provider = await owned_started_chapter(
+        async_session, tmp_path
+    )
+    action = await async_session.get(ActionRequest, started.action_request_id)
+    assert action is not None
+    action.expires_at = datetime.now(UTC) - timedelta(hours=1)
+    await async_session.commit()
+
+    with pytest.raises(ChapterProductionV2ValidationError):
+        await service.resolve_author_action(
+            project.id,
+            chapter.id,
+            started.workflow_run_id,
+            started.action_request_id,
+            actor_user_id=owner.id,
+            decision="accept",
+        )
+
+    assert provider.calls == 0 and provider.review_calls == 0
+    run = await async_session.get(WorkflowRun, started.workflow_run_id)
+    pending = await async_session.get(ActionRequest, started.action_request_id)
+    assert run is not None and pending is not None
+    assert run.status == ChapterProductionStatus.AUTHOR_REVISION.value
+    assert run.awaiting_user is True
+    assert pending.status == ActionRequestStatus.PENDING.value
+    assert pending.resolved_at is None and pending.user_decision is None
 
 
 @pytest.mark.integration
