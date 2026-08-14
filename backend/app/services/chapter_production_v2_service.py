@@ -95,6 +95,7 @@ from app.services.author_accept_coordination import (
 )
 from app.services.initial_draft_lifecycle import InitialCandidateNotApplicable, InitialDraftLifecycle, InitialRecoveryRoute
 from app.services.manual_edit_saga import ManualEditCoordinator
+from app.services.feedback_revision_handoff import FeedbackRevisionHandoff
 from app.workflows.chapter_production import (
     ChapterActionBinding,
     ChapterActionDecision,
@@ -380,6 +381,7 @@ class ChapterProductionV2Service:
         self._initial_drafts = None if self._phase_sessions is None else InitialDraftLifecycle(self._phase_sessions, writer_agent, chief_editor_required)
         self._author_accept = AuthorAcceptCoordinator(self)
         self._manual_edit = ManualEditCoordinator(self)
+        self._feedback_handoff = FeedbackRevisionHandoff(self, self._phase_sessions, self.revision_agent)
         self.documents = DocumentService(session)
         self.repository = ChapterProductionRepository(
             session,
@@ -478,166 +480,57 @@ class ChapterProductionV2Service:
         target_segment_ids = self._validated_uuid_sequence(target_segment_ids, maximum=64)
         if type(feedback) is not str or len(feedback) > 8000:
             raise _invalid() from None
-        feedback_hash = sha256_content(feedback)
-        await self._recover_failed_attempt(
-            project_id=project_id,
-            chapter_id=chapter_id,
-            workflow_run_id=workflow_run_id,
-            actor_user_id=actor_user_id,
-            kind="feedback",
-            action_request_id=action_request_id,
-            target_segment_ids=target_segment_ids,
-            feedback_hash=feedback_hash,
-            restore_feedback=True,
-        )
         try:
-            context = await self._author_context(
+            plan = await self._feedback_handoff.execute(
                 project_id=project_id,
                 chapter_id=chapter_id,
                 workflow_run_id=workflow_run_id,
                 action_request_id=action_request_id,
                 actor_user_id=actor_user_id,
-            )
-            feedback = self._validated_feedback(feedback)
-            if self.revision_agent is None:
-                raise ChapterProductionV2ProviderError() from None
-            segment_map = await self.documents.derive_chapter_segment_map(
-                project_id=project_id,
-                chapter_id=chapter_id,
-                document_id=context.document.id,
-                version_id=context.version.id,
-            )
-            request = self._feedback_request(
-                context=context,
-                project_id=project_id,
-                chapter_id=chapter_id,
                 feedback=feedback,
                 target_segment_ids=target_segment_ids,
-                segment_map=segment_map,
             )
-            next_state = context.state.resolve_action(
-                action=context.binding,
-                decision=ChapterActionDecision.REQUEST_REVISION,
-            )
-            operation_key = self._decision_operation_key(
-                workflow_run_id,
-                action_request_id,
-                context.version.id,
-                "feedback",
-                target_segment_ids=target_segment_ids,
-                feedback_hash=feedback_hash,
-            )
-            attempt_id = _new_attempt_id()
-            self._resolve_action_row(
-                context.action,
-                status=ActionRequestStatus.REVISED,
-                decision=ChapterActionDecision.REQUEST_REVISION,
-                actor_user_id=actor_user_id,
-                feedback=feedback,
-            )
-            self._append_state(context.run, context.checkpoint, next_state)
-            attempt_checkpoint_index = context.checkpoint.checkpoint_index + 1
-            self._set_attempt(
-                context.run,
-                self._attempt_payload(
-                    attempt_id=attempt_id,
-                    key=operation_key,
-                    kind="feedback",
-                    checkpoint_index=attempt_checkpoint_index,
-                    source_document_id=context.document.id,
-                    source_version_id=context.version.id,
-                    action_request_id=action_request_id,
-                    target_segment_ids=target_segment_ids,
-                    feedback_hash=feedback_hash,
-                ),
-            )
-            await self._commit()
         except _StaleActionAdopted as adopted:
             return adopted.result
-        except ChapterProductionV2CommitIndeterminateError:
-            raise
-        except ChapterProductionV2ProviderError:
-            await self._rollback()
-            raise
-        except ChapterProductionV2ValidationError:
-            await self._rollback()
-            raise
-        except Exception:
-            await self._rollback()
-            raise _invalid() from None
-
-        cancellation: asyncio.CancelledError | None = None
-        provider_failure: ChapterFailureCode | None = None
-        try:
-            candidate = await self.revision_agent.user_feedback_revision(request)
-        except asyncio.CancelledError as error:
-            cancellation = _safe_cancelled_error(error)
-        except ProviderTimeoutError:
-            provider_failure = ChapterFailureCode.PROVIDER_TIMEOUT
-        except ProviderInvalidOutputError:
-            provider_failure = ChapterFailureCode.INVALID_PROVIDER_OUTPUT
-        except Exception:
-            provider_failure = ChapterFailureCode.PROVIDER_UNAVAILABLE
-        if cancellation is not None:
-            await self._release_attempt(
-                workflow_run_id,
-                expected_key=operation_key,
-                expected_attempt_id=attempt_id,
-                expected_kind="feedback",
-                expected_checkpoint_index=attempt_checkpoint_index,
-                restore_feedback=True,
-            )
-            raise cancellation from None
-        if provider_failure is not None:
-            await self._fail_provider(
-                workflow_run_id,
-                provider_failure,
-                expected_status=ChapterProductionStatus.DRAFTING,
-                expected_checkpoint_index=attempt_checkpoint_index,
-                expected_attempt_key=operation_key,
-                expected_attempt_id=attempt_id,
-            )
-            raise ChapterProductionV2ProviderError() from None
-
-        replacements = {item.segment_id: item.content for item in candidate.segments}
+        replacements = {item.segment_id: item.content for item in plan.candidate.segments}
         try:
             source_content = await self.documents.read_version_content(
-                context.document.id, context.version.id
+                plan.source_document_id, plan.source_version_id
             )
-            revised_content = merge_segment_replacements(source_content, segment_map, replacements)
+            revised_content = merge_segment_replacements(source_content, plan.segment_map, replacements)
             await self._revalidate_revision_prewrite(
                 project_id=project_id,
                 chapter_id=chapter_id,
                 workflow_run_id=workflow_run_id,
                 action_request_id=action_request_id,
-                source_document_id=context.document.id,
-                source_version_id=context.version.id,
-                source_content_hash=context.version.content_hash,
-                feedback=feedback,
+                source_document_id=plan.source_document_id,
+                source_version_id=plan.source_version_id,
+                source_content_hash=plan.source_content_hash,
+                feedback=plan.feedback,
                 actor_user_id=actor_user_id,
-                expected_attempt_key=operation_key,
-                expected_attempt_id=attempt_id,
-                expected_checkpoint_index=attempt_checkpoint_index,
+                expected_attempt_key=plan.operation_key,
+                expected_attempt_id=plan.attempt_id,
+                expected_checkpoint_index=plan.attempt_checkpoint_index,
             )
             _validated_prospective_map(
                 project_id=project_id,
                 chapter_id=chapter_id,
-                document_id=context.document.id,
-                version_id=context.version.id,
+                document_id=plan.source_document_id,
+                version_id=plan.source_version_id,
                 content=revised_content,
             )
             version = await self.documents.write_document(
-                document_id=context.document.id,
+                document_id=plan.source_document_id,
                 content=revised_content,
                 source=DocumentSource.WRITER_AGENT,
-                expected_current_version_id=context.version.id,
+                expected_current_version_id=plan.source_version_id,
                 agent_role="revision_agent",
                 workflow_run_id=workflow_run_id,
                 change_summary="Applied a Chapter Production V2 feedback revision.",
                 version_metadata={
                     "contract_version": _CONTRACT_VERSION,
-                    "operation_key": operation_key,
-                    "attempt_id": attempt_id,
+                    "operation_key": plan.operation_key,
+                    "attempt_id": plan.attempt_id,
                 },
             )
         except _StaleActionAdopted as adopted:
@@ -650,30 +543,30 @@ class ChapterProductionV2Service:
         except ChapterProductionV2ReconciliationError:
             await self._release_attempt(
                 workflow_run_id,
-                expected_key=operation_key,
-                expected_attempt_id=attempt_id,
+                expected_key=plan.operation_key,
+                expected_attempt_id=plan.attempt_id,
                 expected_kind="feedback",
-                expected_checkpoint_index=attempt_checkpoint_index,
+                expected_checkpoint_index=plan.attempt_checkpoint_index,
                 restore_feedback=True,
             )
             raise
         except ChapterProductionV2ValidationError:
             await self._release_attempt(
                 workflow_run_id,
-                expected_key=operation_key,
-                expected_attempt_id=attempt_id,
+                expected_key=plan.operation_key,
+                expected_attempt_id=plan.attempt_id,
                 expected_kind="feedback",
-                expected_checkpoint_index=attempt_checkpoint_index,
+                expected_checkpoint_index=plan.attempt_checkpoint_index,
                 restore_feedback=True,
             )
             raise
         except Exception:
             await self._release_attempt(
                 workflow_run_id,
-                expected_key=operation_key,
-                expected_attempt_id=attempt_id,
+                expected_key=plan.operation_key,
+                expected_attempt_id=plan.attempt_id,
                 expected_kind="feedback",
-                expected_checkpoint_index=attempt_checkpoint_index,
+                expected_checkpoint_index=plan.attempt_checkpoint_index,
                 restore_feedback=True,
             )
             raise _invalid() from None
@@ -682,11 +575,11 @@ class ChapterProductionV2Service:
             chapter_id=chapter_id,
             workflow_run_id=workflow_run_id,
             old_action_request_id=action_request_id,
-            document_id=context.document.id,
+            document_id=plan.source_document_id,
             version_id=version.id,
-            expected_parent_version_id=context.version.id,
-            operation_key=operation_key,
-            attempt_id=attempt_id,
+            expected_parent_version_id=plan.source_version_id,
+            operation_key=plan.operation_key,
+            attempt_id=plan.attempt_id,
             actor_user_id=actor_user_id,
         )
 
