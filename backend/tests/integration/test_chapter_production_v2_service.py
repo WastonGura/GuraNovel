@@ -949,7 +949,7 @@ async def test_post_feedback_manual_commit_crash_uses_legacy_recovery_without_pr
         raise ChapterProductionV2CommitIndeterminateError() from None
 
     with monkeypatch.context() as patch:
-        patch.setattr(service, "_finalize_manual_edit", lose_finalize_ack)
+        patch.setattr(service._manual_edit, "_finalize_manual_edit", lose_finalize_ack)
         with pytest.raises(ChapterProductionV2CommitIndeterminateError):
             await service.submit_manual_edit(
                 project.id,

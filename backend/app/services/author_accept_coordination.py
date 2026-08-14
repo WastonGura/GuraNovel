@@ -60,6 +60,10 @@ class AuthorAcceptCoordinator:
                 actor_user_id=actor_user_id,
             )
         except _StaleActionAdopted as adopted:
+            # The gate was already replaced by the author's own committed direct
+            # USER edit (old action cancelled, child adopted) rather than an
+            # APPROVED resolution of this gate, so the expiry check below is
+            # intentionally skipped for this committed adoption path.
             return adopted.result
         database_now = await service.session.scalar(select(func.clock_timestamp()))
         if _expiry_precludes_resolution(context.action.expires_at, database_now):
