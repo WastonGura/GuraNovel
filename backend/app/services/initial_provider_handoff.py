@@ -6,7 +6,7 @@ import asyncio
 from dataclasses import dataclass, field
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agents.chapter_writer_agents import WriterAgent
@@ -24,7 +24,7 @@ from app.llm import (
     ProviderTimeoutError,
     ProviderUnavailableError,
 )
-from app.models import WorkflowCheckpoint, WorkflowRun
+from app.models import DocumentVersion, WorkflowCheckpoint, WorkflowRun
 from app.services.chapter_phase_session_lease import ChapterPhaseSessionLease
 from app.services.chapter_production_repository import (
     ChapterProductionRepository,
@@ -161,8 +161,8 @@ class _InitialEvidencePhase:
         )
         self.attempts = ProviderAttemptStore(session, self.repository)
 
-    async def load(
-        self, project_id: UUID, chapter_id: UUID, actor_user_id: UUID
+    async def load(self, project_id: UUID, chapter_id: UUID, actor_user_id: UUID,
+        expected_run_id: UUID | None = None,
     ) -> _Evidence:
         await self.repository.require_project_owner(project_id, actor_user_id, lock=True)
         _, outline, version = await self.repository.approved_outline(
@@ -181,7 +181,9 @@ class _InitialEvidencePhase:
         )
         run = await self.repository.operation_run(project_id, chapter_id, key)
         if run is None:
-            raise _reconcile() from None
+            raise (_invalid() if expected_run_id is not None else _reconcile()) from None
+        if expected_run_id is not None and UUID(str(run.id)) != expected_run_id:
+            raise _invalid() from None
         checkpoints = tuple(await self.session.scalars(
             select(WorkflowCheckpoint)
             .where(WorkflowCheckpoint.workflow_run_id == run.id)
@@ -313,18 +315,20 @@ class InitialProviderHandoff:
         self.writer_agent = writer_agent
         self.chief_editor_required = chief_editor_required
         self.bootstrap = InitialRunBootstrap(phase_sessions, chief_editor_required)
-
-    async def execute(
-        self, project_id: UUID, chapter_id: UUID, *, actor_user_id: UUID
+    async def execute(self, project_id: UUID, chapter_id: UUID, *, actor_user_id: UUID,
+        expected_run_id: UUID | None = None,
     ) -> InitialProviderResult:
         self._ids(project_id, chapter_id, actor_user_id)
-        try:
-            await self.bootstrap.start_or_resume(
-                project_id, chapter_id, actor_user_id=actor_user_id
-            )
-        except ChapterProductionV2ValidationError:
-            pass
-        generation, request = await self._claim(project_id, chapter_id, actor_user_id)
+        if expected_run_id is not None:
+            expected_run_id = self._ids(expected_run_id)[0]
+        if expected_run_id is None:
+            try:
+                await self.bootstrap.start_or_resume(
+                    project_id, chapter_id, actor_user_id=actor_user_id)
+            except ChapterProductionV2ValidationError:
+                pass
+        generation, request = await self._claim(
+            project_id, chapter_id, actor_user_id, expected_run_id)
         cancellation: asyncio.CancelledError | None = None
         failure: ChapterFailureCode | None = None
         try:
@@ -346,19 +350,61 @@ class InitialProviderHandoff:
             await self._cleanup(generation, failure=failure, acknowledge=False)
             raise ChapterProductionV2ProviderError() from None
         return InitialProviderResult(generation, request, candidate)
-
     async def acknowledge_no_write(self, generation: InitialGenerationSnapshot) -> None:
         if type(generation) is not InitialGenerationSnapshot:
             raise _invalid() from None
         await self._cleanup(generation, failure=None, acknowledge=True)
-
-    async def _claim(
-        self, project_id: UUID, chapter_id: UUID, actor_user_id: UUID
+    async def acknowledge_no_write_identity(
+        self, project_id: UUID, chapter_id: UUID, workflow_run_id: UUID, *,
+        actor_user_id: UUID, operation_key: str, attempt_id: UUID,
+    ) -> ChapterProductionState | None:
+        project_id, chapter_id, workflow_run_id, actor_user_id, attempt_id = self._ids(
+            project_id, chapter_id, workflow_run_id, actor_user_id, attempt_id)
+        if type(operation_key) is not str:
+            raise _invalid() from None
+        async with self.phase_sessions.lease() as session:
+            try:
+                phase = _InitialEvidencePhase(session, self.chief_editor_required)
+                await phase.repository.require_project_owner(project_id, actor_user_id, lock=True)
+                scoped = await phase.repository.run(
+                    project_id, chapter_id, workflow_run_id, lock=True)
+                payload = scoped.metadata_.get("provider_attempt") if type(scoped.metadata_) is dict else None
+                routed = ProviderAttempt.from_payload(payload)
+                if routed is None:
+                    raise _reconcile() from None
+                if routed.kind is not ProviderAttemptKind.INITIAL:
+                    await _commit(session)
+                    return None
+                evidence = await phase.load(project_id, chapter_id, actor_user_id)
+                attempt = evidence.attempt
+                if UUID(str(evidence.run.id)) != workflow_run_id or attempt is None:
+                    raise _reconcile() from None
+                scope = InitialGenerationScope(
+                    project_id, chapter_id, workflow_run_id, actor_user_id,
+                    operation_key, attempt.checkpoint_index, attempt_id)
+                await self._acknowledge_locked(session, phase, scope)
+                await _commit(session)
+                return evidence.state
+            except ChapterProductionV2CommitIndeterminateError:
+                raise
+            except _ChapterProductionRepositoryValidationError:
+                error = _invalid()
+            except (ChapterProductionV2ValidationError,
+                    ChapterProductionV2ReconciliationError):
+                await _rollback(session)
+                raise
+            except Exception:
+                error = _reconcile()
+            await _rollback(session)
+            raise error from None
+    async def _claim(self, project_id: UUID, chapter_id: UUID, actor_user_id: UUID,
+        expected_run_id: UUID | None,
     ) -> tuple[InitialGenerationSnapshot, InitialDraftRequest]:
         async with self.phase_sessions.lease() as session:
             try:
                 phase = _InitialEvidencePhase(session, self.chief_editor_required)
-                evidence = await phase.load(project_id, chapter_id, actor_user_id)
+                evidence = await phase.load(
+                    project_id, chapter_id, actor_user_id, expected_run_id)
                 if evidence.attempt is not None:
                     if evidence.attempt.status is not ProviderAttemptStatus.FAILED:
                         raise _reconcile() from None
@@ -406,7 +452,6 @@ class InitialProviderHandoff:
             except Exception:
                 await _rollback(session)
                 raise _reconcile() from None
-
     async def _cleanup(
         self, generation: InitialGenerationSnapshot,
         *, failure: ChapterFailureCode | None, acknowledge: bool,
@@ -419,6 +464,9 @@ class InitialProviderHandoff:
                     scope.project_id, scope.chapter_id, scope.actor_user_id
                 )
                 if evidence.attempt != generation.attempt:
+                    if not acknowledge:
+                        await _rollback(session)
+                        return
                     raise _reconcile() from None
                 store_scope = phase.store_scope(scope)
                 if failure is not None:
@@ -429,7 +477,7 @@ class InitialProviderHandoff:
                         evidence.state.fail(failure),
                     )
                 elif acknowledge:
-                    await phase.attempts.acknowledge_no_write(store_scope)
+                    await self._acknowledge_locked(session, phase, generation.scope)
                 elif not await phase.attempts.release(store_scope):
                     raise _reconcile() from None
                 await _commit(session)
@@ -444,11 +492,21 @@ class InitialProviderHandoff:
             except Exception:
                 await _rollback(session)
                 raise _reconcile() from None
-
     @staticmethod
-    def _ids(*values: UUID) -> None:
-        if not all(type(value) is UUID and value.int != 0 for value in values):
+    async def _acknowledge_locked(session: AsyncSession, phase: _InitialEvidencePhase,
+        scope: InitialGenerationScope,
+    ) -> None:
+        query = select(DocumentVersion).where(or_(
+            DocumentVersion.workflow_run_id == scope.workflow_run_id,
+            DocumentVersion.metadata_.contains({"operation_key": scope.operation_key}),
+            DocumentVersion.metadata_.contains({"attempt_id": str(scope.attempt_id)}),
+        )).with_for_update().execution_options(populate_existing=True)
+        if tuple(await session.scalars(query)):
+            raise _reconcile() from None
+        await phase.attempts.acknowledge_no_write(phase.store_scope(scope))
+    @staticmethod
+    def _ids(*values: UUID) -> tuple[UUID, ...]:
+        if not all(isinstance(value, UUID) and value.int != 0 for value in values):
             raise _invalid() from None
-
-
+        return tuple(UUID(str(value)) for value in values)
 __all__ = ["InitialProviderHandoff", "InitialProviderResult"]

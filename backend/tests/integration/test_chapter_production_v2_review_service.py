@@ -40,6 +40,7 @@ from app.services.chapter_production_v2_service import (
     ChapterProductionV2Service,
     ChapterProductionV2ValidationError,
 )
+from app.services.chapter_phase_session_source import ChapterPhaseSessionSource
 from app.services.document_service import DocumentCommitIndeterminateError, DocumentService
 from app.workflows.chapter_production import ChapterProductionStatus
 
@@ -175,6 +176,7 @@ async def review_ready_chapter(
         chief_editor_agent=ChiefEditorChapterFinalAgent(chief_provider),
         lore_agent=LoreChapterFinalAgent(lore_provider),
         chief_editor_required=chief_editor_required,
+        phase_session_source=ChapterPhaseSessionSource(session.bind),
     )
     started = await service.start_from_approved_outline(
         project.id, chapter.id, actor_user_id=owner.id

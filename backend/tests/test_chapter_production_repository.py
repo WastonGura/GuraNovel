@@ -96,11 +96,9 @@ def test_service_keeps_compatibility_delegates_and_injects_the_contract() -> Non
     assert "contract_version=_CONTRACT_VERSION" in methods["__init__"]
     for helper, delegate in (
         ("_require_project_owner", "require_project_owner"),
-        ("_approved_outline", "approved_outline"),
         ("_outline_for_chapter", "outline_for_chapter"),
         ("_chapter", "chapter"),
         ("_run", "run"),
-        ("_operation_run", "operation_run"),
         ("_locked_current_document_version", "locked_current_document_version"),
     ):
         body = methods[helper]
@@ -223,9 +221,6 @@ async def test_every_service_delegate_clears_internal_error_context() -> None:
         async def require_project_owner(self, *args: object, **kwargs: object) -> None:
             raise module._ChapterProductionRepositoryValidationError()
 
-        async def approved_outline(self, *args: object, **kwargs: object) -> object:
-            raise module._ChapterProductionRepositoryValidationError()
-
         async def outline_for_chapter(self, *args: object, **kwargs: object) -> object:
             raise module._ChapterProductionRepositoryValidationError()
 
@@ -233,9 +228,6 @@ async def test_every_service_delegate_clears_internal_error_context() -> None:
             raise module._ChapterProductionRepositoryValidationError()
 
         async def run(self, *args: object, **kwargs: object) -> object:
-            raise module._ChapterProductionRepositoryValidationError()
-
-        async def operation_run(self, *args: object, **kwargs: object) -> object:
             raise module._ChapterProductionRepositoryValidationError()
 
         async def locked_current_document_version(
@@ -254,11 +246,9 @@ async def test_every_service_delegate_clears_internal_error_context() -> None:
     chapter = Chapter(id=chapter_id, project_id=project_id, chapter_number=1)
     validation_calls = (
         lambda: service._require_project_owner(project_id, uuid4()),
-        lambda: service._approved_outline(project_id, chapter_id, lock=False),
         lambda: service._outline_for_chapter(chapter, project_id, lock=False),
         lambda: service._chapter(project_id, chapter_id, lock=False),
         lambda: service._run(project_id, chapter_id, run_id, lock=False),
-        lambda: service._operation_run(project_id, chapter_id, "a" * 64),
     )
     for call in validation_calls:
         with pytest.raises(ChapterProductionV2ValidationError) as captured:

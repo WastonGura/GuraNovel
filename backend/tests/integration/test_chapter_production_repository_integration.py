@@ -27,7 +27,9 @@ from app.services.chapter_production_v2_service import (
     ChapterProductionV2Service,
     ChapterProductionV2ValidationError,
 )
+from app.services.chapter_phase_session_source import ChapterPhaseSessionSource
 from app.services.document_service import DocumentService
+from app.services.provider_attempt_contracts import initial_operation_key
 from app.workflows.chapter_production import ChapterProductionStatus
 
 
@@ -324,14 +326,6 @@ async def test_approved_outline_fails_closed_for_every_parent_binding(
     with pytest.raises(module._ChapterProductionRepositoryValidationError):
         await _repository(async_session).approved_outline(project.id, chapter.id, lock=False)
 
-    service = ChapterProductionV2Service(
-        async_session,
-        writer_agent=WriterAgent(DeterministicChapterWriterProvider()),
-    )
-    with pytest.raises(ChapterProductionV2ValidationError):
-        await service._approved_outline(project.id, chapter.id, lock=False)
-
-
 async def test_lock_free_authoritative_reads_refresh_status_pointer_and_run(
     async_session: AsyncSession,
     integration_database_url: str,
@@ -564,16 +558,20 @@ async def test_facade_rejects_exact_operation_with_malformed_remaining_metadata_
             return await super().draft_initial(request, profile)  # type: ignore[arg-type]
 
     provider = CountingProvider()
+    bind = async_session.bind
+    assert bind is not None
     service = ChapterProductionV2Service(
         async_session,
         writer_agent=WriterAgent(provider),
+        phase_session_source=ChapterPhaseSessionSource(bind),
     )
-    operation_key = service._operation_key(
+    operation_key = initial_operation_key(
         project_id=project.id,
         chapter_id=chapter.id,
         outline_document_id=outline.id,
         outline_version_id=outline_version.id,
         outline_content_hash=outline_version.content_hash,
+        segmenter_version="markdown-v1",
     )
     run = _run(project_id=project.id, chapter_id=chapter.id, operation_key=operation_key)
     run.metadata_ = {

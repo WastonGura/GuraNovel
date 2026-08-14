@@ -42,12 +42,16 @@ from app.services.chapter_production_v2_service import (
     ChapterProductionV2Updated,
     ChapterProductionV2ValidationError,
 )
+from app.services.chapter_phase_session_lease import ChapterPhaseSessionLease
+from app.services.chapter_phase_session_source import ChapterPhaseSessionSource
 from app.services.document_service import DocumentService
+from app.services.initial_candidate_persistence import InitialCandidatePersistence
+from app.services.initial_provider_handoff import InitialProviderHandoff
+from app.services.initial_run_bootstrap import InitialRunBootstrap
 from app.workflows.chapter_production import (
     ChapterActionBinding,
     ChapterActionDecision,
     ChapterActionKind,
-    ChapterFailureCode,
     ChapterProductionStatus,
     ChapterReviewBinding,
     ChapterReviewOutcome,
@@ -64,6 +68,25 @@ class TransactionCheckingProvider(DeterministicChapterWriterProvider):
         assert self.session.in_transaction() is False
         self.calls += 1
         return await super().draft_initial(request, profile)  # type: ignore[arg-type]
+
+
+class CallerStateCheckingProvider(DeterministicChapterWriterProvider):
+    def __init__(self, session: AsyncSession, pending: User) -> None:
+        self.session = session
+        self.pending = pending
+        self.calls = 0
+
+    async def draft_initial(self, request: object, profile: object) -> object:
+        assert self.session.in_transaction() is True
+        assert self.pending in self.session.new
+        self.calls += 1
+        return await super().draft_initial(request, profile)  # type: ignore[arg-type]
+
+
+def phase_source(session: AsyncSession) -> ChapterPhaseSessionSource:
+    bind = session.bind
+    assert bind is not None
+    return ChapterPhaseSessionSource(bind)
 
 
 class UnsafeFailingProvider(DeterministicChapterWriterProvider):
@@ -269,11 +292,13 @@ async def owned_started_chapter(
     owner = await session.get(User, project.owner_id)
     assert owner is not None
     owner.id = UUID(str(owner.id))
+    await session.commit()
     provider = TransactionCheckingRevisionProvider(session)
     service = ChapterProductionV2Service(
         session,
         writer_agent=WriterAgent(TransactionCheckingProvider(session)),
         revision_agent=RevisionAgent(provider),
+        phase_session_source=phase_source(session),
     )
     started = await service.start_from_approved_outline(
         project.id, chapter.id, actor_user_id=owner.id
@@ -442,12 +467,128 @@ async def seeded_review_revision(
 
 @pytest.mark.integration
 @pytest.mark.anyio
+async def test_initial_start_requires_owned_phase_source_before_caller_side_effects(
+    async_session: AsyncSession, tmp_path: Path
+) -> None:
+    project, chapter, _, _ = await approved_chapter(async_session, tmp_path)
+    assert project.owner_id is not None
+    provider = TransactionCheckingProvider(async_session)
+    pending = User(username=f"pending-{uuid4().hex}", display_name="Pending")
+    async_session.add(pending)
+
+    with pytest.raises(ChapterProductionV2ValidationError) as raised:
+        await ChapterProductionV2Service(
+            async_session, writer_agent=WriterAgent(provider)
+        ).start_from_approved_outline(
+            project.id, chapter.id, actor_user_id=project.owner_id
+        )
+
+    assert type(raised.value) is ChapterProductionV2ValidationError
+    assert raised.value.__cause__ is None and raised.value.__context__ is None
+    assert provider.calls == 0
+    assert async_session.in_transaction() is True and pending in async_session.new
+
+
+@pytest.mark.integration
+@pytest.mark.anyio
+@pytest.mark.parametrize("entrypoint", ("resume", "reconcile", "ack"))
+async def test_initial_owned_phase_entrypoints_require_source_before_side_effects(
+    async_session: AsyncSession, tmp_path: Path, entrypoint: str
+) -> None:
+    project, chapter, _, _ = await approved_chapter(async_session, tmp_path)
+    assert project.owner_id is not None
+    provider = TransactionCheckingProvider(async_session)
+    pending = User(username=f"pending-{uuid4().hex}", display_name="Pending")
+    async_session.add(pending)
+    service = ChapterProductionV2Service(async_session, writer_agent=WriterAgent(provider))
+    run_id = uuid4()
+
+    with pytest.raises(ChapterProductionV2ValidationError) as raised:
+        if entrypoint == "resume":
+            await service.resume_drafting(
+                project.id, chapter.id, run_id, actor_user_id=project.owner_id
+            )
+        elif entrypoint == "reconcile":
+            await service.reconcile_indeterminate(
+                project.id, chapter.id, run_id, actor_user_id=project.owner_id
+            )
+        else:
+            await service.acknowledge_provider_no_write(
+                project.id,
+                chapter.id,
+                run_id,
+                actor_user_id=project.owner_id,
+                expected_attempt_key="a" * 64,
+                expected_attempt_id=str(uuid4()),
+            )
+
+    assert type(raised.value) is ChapterProductionV2ValidationError
+    assert raised.value.__cause__ is None and raised.value.__context__ is None
+    assert provider.calls == 0
+    assert async_session.in_transaction() is True and pending in async_session.new
+
+
+@pytest.mark.integration
+@pytest.mark.anyio
+async def test_initial_start_keeps_caller_transaction_and_pending_objects_untouched(
+    async_session: AsyncSession, tmp_path: Path
+) -> None:
+    project, chapter, _, _ = await approved_chapter(async_session, tmp_path)
+    assert project.owner_id is not None
+    pending = User(username=f"pending-{uuid4().hex}", display_name="Pending")
+    async_session.add(pending)
+    provider = CallerStateCheckingProvider(async_session, pending)
+    service = ChapterProductionV2Service(
+        async_session,
+        writer_agent=WriterAgent(provider),
+        phase_session_source=phase_source(async_session),
+    )
+
+    started = await service.start_from_approved_outline(
+        project.id, chapter.id, actor_user_id=project.owner_id
+    )
+
+    assert started.workflow_run_id.int != 0 and provider.calls == 1
+    assert async_session.in_transaction() is True and pending in async_session.new
+
+
+@pytest.mark.integration
+@pytest.mark.anyio
+async def test_initial_reconcile_rejects_pristine_run_without_candidate(
+    async_session: AsyncSession, tmp_path: Path
+) -> None:
+    project, chapter, _, _ = await approved_chapter(async_session, tmp_path)
+    assert project.owner_id is not None
+    source = phase_source(async_session)
+    run_id = await InitialRunBootstrap(
+        ChapterPhaseSessionLease(source), True
+    ).start_or_resume(project.id, chapter.id, actor_user_id=project.owner_id)
+    provider = TransactionCheckingProvider(async_session)
+    service = ChapterProductionV2Service(
+        async_session,
+        writer_agent=WriterAgent(provider),
+        phase_session_source=source,
+    )
+
+    with pytest.raises(ChapterProductionV2ReconciliationError):
+        await service.reconcile_indeterminate(
+            project.id, chapter.id, run_id, actor_user_id=project.owner_id
+        )
+    assert provider.calls == 0
+
+
+@pytest.mark.integration
+@pytest.mark.anyio
 async def test_start_from_approved_outline_persists_exact_v2_draft_gate_and_replays(
     async_session: AsyncSession, tmp_path: Path
 ) -> None:
     project, chapter, outline, outline_version = await approved_chapter(async_session, tmp_path)
     provider = TransactionCheckingProvider(async_session)
-    service = ChapterProductionV2Service(async_session, writer_agent=WriterAgent(provider))
+    service = ChapterProductionV2Service(
+        async_session,
+        writer_agent=WriterAgent(provider),
+        phase_session_source=phase_source(async_session),
+    )
 
     # #113's public evidence boundary remains draft/final-only; V2 gets a narrow helper.
     with pytest.raises(NotFoundError):
@@ -464,6 +605,7 @@ async def test_start_from_approved_outline_persists_exact_v2_draft_gate_and_repl
         version_id=outline_version.id,
     )
     assert production_map.content_hash == outline_version.content_hash
+    await async_session.commit()
 
     assert project.owner_id is not None
     started = await service.start_from_approved_outline(
@@ -478,6 +620,7 @@ async def test_start_from_approved_outline_persists_exact_v2_draft_gate_and_repl
 
     assert replayed == started
     assert provider.calls == 1
+    await async_session.refresh(chapter)
     run = await async_session.get(WorkflowRun, started.workflow_run_id)
     draft = await async_session.get(Document, started.draft_document_id)
     version = await async_session.get(DocumentVersion, started.draft_version_id)
@@ -561,7 +704,9 @@ async def test_start_rejects_foreign_outline_and_provider_failure_is_safe(
     await async_session.commit()
     with pytest.raises(ChapterProductionV2ValidationError):
         await ChapterProductionV2Service(
-            async_session, writer_agent=WriterAgent(UnsafeFailingProvider())
+            async_session,
+            writer_agent=WriterAgent(UnsafeFailingProvider()),
+            phase_session_source=phase_source(async_session),
         ).start_from_approved_outline(project.id, chapter.id, actor_user_id=project.owner_id)
 
     # Restore the exact approved outline and prove arbitrary provider details never escape.
@@ -570,7 +715,9 @@ async def test_start_rejects_foreign_outline_and_provider_failure_is_safe(
     assert safe_chapter is not None and safe_project.owner_id is not None
     with pytest.raises(ChapterProductionV2ProviderError) as raised:
         await ChapterProductionV2Service(
-            async_session, writer_agent=WriterAgent(UnsafeFailingProvider())
+            async_session,
+            writer_agent=WriterAgent(UnsafeFailingProvider()),
+            phase_session_source=phase_source(async_session),
         ).start_from_approved_outline(
             outline.project_id,
             safe_chapter,
@@ -701,6 +848,73 @@ async def test_feedback_revision_uses_current_locators_merges_target_and_reopens
             feedback="replay",
             target_segment_ids=(target.segment_id,),
         )
+
+
+@pytest.mark.integration
+@pytest.mark.anyio
+async def test_post_feedback_manual_commit_crash_uses_legacy_recovery_without_provider(
+    async_session: AsyncSession,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project, chapter, owner, service, started, provider = await owned_started_chapter(
+        async_session, tmp_path
+    )
+    segment_map = await DocumentService(async_session).derive_chapter_segment_map(
+        project_id=project.id,
+        chapter_id=chapter.id,
+        document_id=started.draft_document_id,
+        version_id=started.draft_version_id,
+    )
+    target = next(
+        item.segment_id for item in segment_map.segments if item.kind.value == "paragraph"
+    )
+    revised = await service.request_user_feedback_revision(
+        project.id,
+        chapter.id,
+        started.workflow_run_id,
+        started.action_request_id,
+        actor_user_id=owner.id,
+        feedback="Open a post-feedback author gate.",
+        target_segment_ids=(target,),
+    )
+    calls = provider.calls
+
+    async def lose_finalize_ack(**_: object) -> object:
+        raise ChapterProductionV2CommitIndeterminateError() from None
+
+    with monkeypatch.context() as patch:
+        patch.setattr(service, "_finalize_manual_edit", lose_finalize_ack)
+        with pytest.raises(ChapterProductionV2CommitIndeterminateError):
+            await service.submit_manual_edit(
+                project.id,
+                chapter.id,
+                started.workflow_run_id,
+                revised.action_request_id,
+                actor_user_id=owner.id,
+                content="# Arrival\n\nThe post-feedback user child survived.\n",
+            )
+    for entrypoint in ("start", "resume"):
+        with pytest.raises(ChapterProductionV2ValidationError):
+            if entrypoint == "start":
+                await service.start_from_approved_outline(
+                    project.id, chapter.id, actor_user_id=owner.id
+                )
+            else:
+                await service.resume_drafting(
+                    project.id,
+                    chapter.id,
+                    started.workflow_run_id,
+                    actor_user_id=owner.id,
+                )
+    recovered = await service.reconcile_indeterminate(
+        project.id,
+        chapter.id,
+        started.workflow_run_id,
+        actor_user_id=owner.id,
+    )
+    assert recovered.status is ChapterProductionStatus.EDITOR_REVIEW
+    assert provider.calls == calls
 
 
 @pytest.mark.integration
@@ -938,6 +1152,7 @@ async def test_reconcile_committed_feedback_version_never_reinvokes_provider(
         async_session,
         writer_agent=service.writer_agent,
         revision_agent=service.revision_agent,
+        phase_session_source=phase_source(async_session),
     )
 
     state = await reconciler.reconcile_indeterminate(
@@ -976,6 +1191,7 @@ async def test_initial_provider_cancellation_is_rethrown_without_false_failure(
     service = ChapterProductionV2Service(
         async_session,
         writer_agent=WriterAgent(CancellingProvider()),
+        phase_session_source=phase_source(async_session),
     )
 
     with pytest.raises(asyncio.CancelledError) as raised:
@@ -998,33 +1214,6 @@ async def test_initial_provider_cancellation_is_rethrown_without_false_failure(
 
 @pytest.mark.integration
 @pytest.mark.anyio
-async def test_cancellation_cleanup_failure_does_not_retain_provider_context(
-    async_session: AsyncSession, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    project, chapter, _, _ = await approved_chapter(async_session, tmp_path)
-    assert project.owner_id is not None
-    service = ChapterProductionV2Service(
-        async_session,
-        writer_agent=WriterAgent(CancellingProvider()),
-    )
-
-    async def fail_cleanup(*args: object, **kwargs: object) -> None:
-        raise RuntimeError("server-owned cleanup failure")
-
-    monkeypatch.setattr(service, "_release_attempt", fail_cleanup)
-    with pytest.raises(RuntimeError) as raised:
-        await service.start_from_approved_outline(
-            project.id,
-            chapter.id,
-            actor_user_id=project.owner_id,
-        )
-
-    assert raised.value.__context__ is None
-    assert "canary-initial-provider-secret" not in repr(raised.value)
-
-
-@pytest.mark.integration
-@pytest.mark.anyio
 async def test_initial_provider_phase3_rechecks_the_locked_project_owner(
     async_session: AsyncSession, tmp_path: Path
 ) -> None:
@@ -1037,14 +1226,16 @@ async def test_initial_provider_phase3_rechecks_the_locked_project_owner(
     service = ChapterProductionV2Service(
         async_session,
         writer_agent=WriterAgent(OwnershipTransferringProvider(async_session, replacement.id)),
+        phase_session_source=phase_source(async_session),
     )
 
-    with pytest.raises(ChapterProductionV2ValidationError):
+    with pytest.raises(ChapterProductionV2ValidationError) as raised:
         await service.start_from_approved_outline(
             project.id,
             chapter.id,
             actor_user_id=original_owner_id,
         )
+    assert raised.value.__cause__ is None and raised.value.__context__ is None
 
     assert (
         await async_session.scalar(
@@ -1261,7 +1452,11 @@ async def test_known_provider_failure_recovers_only_matching_attempt_then_succee
     project, chapter, _, _ = await approved_chapter(async_session, tmp_path)
     assert project.owner_id is not None
     provider = FailOnceProvider()
-    service = ChapterProductionV2Service(async_session, writer_agent=WriterAgent(provider))
+    service = ChapterProductionV2Service(
+        async_session,
+        writer_agent=WriterAgent(provider),
+        phase_session_source=phase_source(async_session),
+    )
     with pytest.raises(ChapterProductionV2ProviderError):
         await service.start_from_approved_outline(
             project.id, chapter.id, actor_user_id=project.owner_id
@@ -1270,6 +1465,11 @@ async def test_known_provider_failure_recovers_only_matching_attempt_then_succee
         select(WorkflowRun).where(WorkflowRun.chapter_id == chapter.id)
     )
     assert run is not None and run.status == ChapterProductionStatus.FAILED.value
+    with pytest.raises(ChapterProductionV2ReconciliationError):
+        await service.reconcile_indeterminate(
+            project.id, chapter.id, run.id, actor_user_id=project.owner_id
+        )
+    assert provider.calls == 1
 
     result = await service.resume_drafting(
         project.id, chapter.id, run.id, actor_user_id=project.owner_id
@@ -1280,90 +1480,34 @@ async def test_known_provider_failure_recovers_only_matching_attempt_then_succee
 
 @pytest.mark.integration
 @pytest.mark.anyio
-async def test_provider_failure_commit_ack_loss_is_not_reported_as_ordinary_failure(
-    async_session: AsyncSession, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    project, chapter, _, _ = await approved_chapter(async_session, tmp_path)
-    assert project.owner_id is not None
-    service = ChapterProductionV2Service(
-        async_session, writer_agent=WriterAgent(UnsafeFailingProvider())
-    )
-    original_commit = service._commit
-    commits = 0
-
-    async def lose_failure_ack() -> None:
-        nonlocal commits
-        commits += 1
-        if commits == 3:
-            raise ChapterProductionV2CommitIndeterminateError()
-        await original_commit()
-
-    monkeypatch.setattr(service, "_commit", lose_failure_ack)
-    with pytest.raises(ChapterProductionV2CommitIndeterminateError):
-        await service.start_from_approved_outline(
-            project.id, chapter.id, actor_user_id=project.owner_id
-        )
-
-
-@pytest.mark.integration
-@pytest.mark.anyio
-async def test_late_provider_failure_claim_is_a_stale_noop(
+async def test_initial_reconcile_adopts_unique_parentless_candidate_when_pointer_is_none(
     async_session: AsyncSession, tmp_path: Path
 ) -> None:
-    project, chapter, owner, service, started, _ = await owned_started_chapter(
-        async_session, tmp_path
-    )
-    project_id, chapter_id, owner_id = project.id, chapter.id, owner.id
-    run = await async_session.get(WorkflowRun, started.workflow_run_id)
-    claimed_version = await async_session.get(DocumentVersion, started.draft_version_id)
-    assert run is not None and claimed_version is not None
-    stale_key = run.metadata_["operation_key"]
-    stale_attempt_id = claimed_version.metadata_["attempt_id"]
-    assert type(stale_attempt_id) is str
-
-    changed = await service._fail_provider(
-        run.id,
-        ChapterFailureCode.PROVIDER_TIMEOUT,
-        expected_status=ChapterProductionStatus.DRAFTING,
-        expected_checkpoint_index=0,
-        expected_attempt_key=stale_key,
-        expected_attempt_id=stale_attempt_id,
-    )
-    state = await service.load_state(project_id, chapter_id, run.id, actor_user_id=owner_id)
-
-    assert changed is False and state.status is ChapterProductionStatus.AUTHOR_REVISION
-
-
-@pytest.mark.integration
-@pytest.mark.anyio
-async def test_initial_reconcile_adopts_unique_parentless_candidate_when_pointer_is_none(
-    async_session: AsyncSession, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
     project, chapter, _, _ = await approved_chapter(async_session, tmp_path)
     assert project.owner_id is not None
+    source = phase_source(async_session)
+    lease = ChapterPhaseSessionLease(source)
+    provider = TransactionCheckingProvider(async_session)
+    result = await InitialProviderHandoff(
+        lease, WriterAgent(provider), True
+    ).execute(project.id, chapter.id, actor_user_id=project.owner_id)
+    identity = await InitialCandidatePersistence(lease, True).persist(result)
     service = ChapterProductionV2Service(
-        async_session, writer_agent=WriterAgent(TransactionCheckingProvider(async_session))
+        async_session,
+        writer_agent=WriterAgent(provider),
+        phase_session_source=source,
     )
-
-    async def stop_before_finalize(**_: object) -> object:
-        raise ChapterProductionV2CommitIndeterminateError()
-
-    monkeypatch.setattr(service, "_finalize_draft", stop_before_finalize)
-    with pytest.raises(ChapterProductionV2CommitIndeterminateError):
-        await service.start_from_approved_outline(
-            project.id, chapter.id, actor_user_id=project.owner_id
-        )
-    run = await async_session.scalar(
-        select(WorkflowRun).where(WorkflowRun.chapter_id == chapter.id)
-    )
-    assert run is not None and chapter.current_draft_document_id is None
-
-    reconciler = ChapterProductionV2Service(async_session, writer_agent=service.writer_agent)
-    state = await reconciler.reconcile_indeterminate(
-        project.id, chapter.id, run.id, actor_user_id=project.owner_id
+    state = await service.reconcile_indeterminate(
+        project.id,
+        chapter.id,
+        identity.workflow_run_id,
+        actor_user_id=project.owner_id,
     )
 
     assert state.status is ChapterProductionStatus.AUTHOR_REVISION
+    assert state.document_id == str(identity.document_id)
+    assert state.document_version_id == str(identity.version_id)
+    assert provider.calls == 1
 
 
 @pytest.mark.integration
@@ -1455,11 +1599,14 @@ async def test_two_sessions_initial_resume_claims_exactly_one_provider_and_candi
     provider = BarrierProvider()
     engine = create_async_engine(integration_database_url, pool_pre_ping=True)
     sessions = async_sessionmaker(engine, expire_on_commit=False)
+    source = ChapterPhaseSessionSource(engine)
 
     async def start_once() -> ChapterProductionV2Started:
         async with sessions() as session:
             return await ChapterProductionV2Service(
-                session, writer_agent=WriterAgent(provider)
+                session,
+                writer_agent=WriterAgent(provider),
+                phase_session_source=source,
             ).start_from_approved_outline(project_id, chapter_id, actor_user_id=owner_id)
 
     first = asyncio.create_task(start_once())
@@ -1581,11 +1728,14 @@ async def test_claimed_no_candidate_requires_explicit_ack_before_restart(
     retry_provider = BarrierProvider()
     engine = create_async_engine(integration_database_url, pool_pre_ping=True)
     sessions = async_sessionmaker(engine, expire_on_commit=False)
+    source = ChapterPhaseSessionSource(engine)
 
     async def start_claim() -> ChapterProductionV2Started:
         async with sessions() as session:
             return await ChapterProductionV2Service(
-                session, writer_agent=WriterAgent(provider)
+                session,
+                writer_agent=WriterAgent(provider),
+                phase_session_source=source,
             ).start_from_approved_outline(project_id, chapter_id, actor_user_id=owner_id)
 
     pending = asyncio.create_task(start_claim())
@@ -1595,6 +1745,7 @@ async def test_claimed_no_candidate_requires_explicit_ack_before_restart(
             service = ChapterProductionV2Service(
                 restarted,
                 writer_agent=WriterAgent(DeterministicChapterWriterProvider()),
+                phase_session_source=source,
             )
             run = await restarted.scalar(
                 select(WorkflowRun).where(WorkflowRun.chapter_id == chapter_id)
@@ -1619,7 +1770,9 @@ async def test_claimed_no_candidate_requires_explicit_ack_before_restart(
         async def restart_claim() -> ChapterProductionV2Started:
             async with sessions() as restarted:
                 return await ChapterProductionV2Service(
-                    restarted, writer_agent=WriterAgent(retry_provider)
+                    restarted,
+                    writer_agent=WriterAgent(retry_provider),
+                    phase_session_source=source,
                 ).start_from_approved_outline(project_id, chapter_id, actor_user_id=owner_id)
 
         retry = asyncio.create_task(restart_claim())
@@ -2037,8 +2190,9 @@ async def test_review_claim_commit_indeterminate_propagates_unchanged(
 
 @pytest.mark.integration
 @pytest.mark.anyio
-async def test_legacy_run_metadata_without_reviewer_claim_loads_normalizes_and_resumes(
-    async_session: AsyncSession, tmp_path: Path
+@pytest.mark.parametrize("entrypoint", ("start", "resume", "reconcile", "load"))
+async def test_legacy_run_metadata_without_reviewer_claim_normalizes_at_public_entrypoints(
+    async_session: AsyncSession, tmp_path: Path, entrypoint: str
 ) -> None:
     project, chapter, owner, service, started, _ = await owned_started_chapter(
         async_session, tmp_path
@@ -2050,13 +2204,35 @@ async def test_legacy_run_metadata_without_reviewer_claim_loads_normalizes_and_r
     run.metadata_ = legacy_metadata
     await async_session.commit()
 
-    loaded = await service.load_state(
-        project.id,
-        chapter.id,
-        started.workflow_run_id,
-        actor_user_id=owner.id,
-    )
-    assert loaded.status is ChapterProductionStatus.AUTHOR_REVISION
+    if entrypoint == "start":
+        replayed = await service.start_from_approved_outline(
+            project.id, chapter.id, actor_user_id=owner.id
+        )
+        assert replayed == started
+    elif entrypoint == "resume":
+        replayed = await service.resume_drafting(
+            project.id,
+            chapter.id,
+            started.workflow_run_id,
+            actor_user_id=owner.id,
+        )
+        assert replayed == started
+    elif entrypoint == "reconcile":
+        reconciled = await service.reconcile_indeterminate(
+            project.id,
+            chapter.id,
+            started.workflow_run_id,
+            actor_user_id=owner.id,
+        )
+        assert reconciled.status is ChapterProductionStatus.AUTHOR_REVISION
+    else:
+        loaded = await service.load_state(
+            project.id,
+            chapter.id,
+            started.workflow_run_id,
+            actor_user_id=owner.id,
+        )
+        assert loaded.status is ChapterProductionStatus.AUTHOR_REVISION
     await async_session.refresh(run)
     assert run.metadata_ == {**legacy_metadata, "reviewer_claim": None}
 

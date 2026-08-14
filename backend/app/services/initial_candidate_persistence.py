@@ -19,6 +19,7 @@ from app.documents.chapter_segments import (
 )
 from app.models import Document, DocumentSource, DocumentType, DocumentVersion
 from app.services.chapter_phase_session_lease import ChapterPhaseSessionLease
+from app.services.chapter_production_repository import _ChapterProductionRepositoryValidationError
 from app.services.chapter_production_v2_contracts import (
     ChapterProductionV2CommitIndeterminateError,
     ChapterProductionV2ReconciliationError,
@@ -45,6 +46,10 @@ def _invalid() -> ChapterProductionV2ValidationError:
 
 def _reconcile() -> ChapterProductionV2ReconciliationError:
     return ChapterProductionV2ReconciliationError()
+
+
+class _InitialCandidateSourceChanged(ChapterProductionV2ReconciliationError):
+    pass
 
 
 def _valid_uuid(value: object) -> bool:
@@ -207,7 +212,7 @@ class InitialCandidatePersistence:
     async def _persist(
         self, session: AsyncSession, result: InitialProviderResult, content: str,
     ) -> InitialCandidateIdentity:
-        commit_indeterminate = False
+        commit_indeterminate = validation_failed = False
         try:
             phase = _InitialEvidencePhase(session, self.chief_editor_required)
             documents = DocumentService(session)
@@ -251,12 +256,17 @@ class InitialCandidatePersistence:
         except DocumentCommitIndeterminateError:
             await _rollback(session)
             commit_indeterminate = True
+        except _ChapterProductionRepositoryValidationError:
+            await _rollback(session)
+            validation_failed = True
         except (ChapterProductionV2ValidationError, ChapterProductionV2ReconciliationError):
             await _rollback(session)
             raise
         except Exception:
             await _rollback(session)
             raise _reconcile() from None
+        if validation_failed:
+            raise _InitialCandidateSourceChanged() from None
         if commit_indeterminate:
             raise ChapterProductionV2CommitIndeterminateError() from None
         return identity
