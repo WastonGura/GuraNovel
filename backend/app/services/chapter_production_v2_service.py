@@ -89,6 +89,10 @@ from app.services.document_service import (
     DocumentCommitIndeterminateError,
     DocumentService,
 )
+from app.services.author_accept_coordination import (
+    AuthorAcceptCoordinator,
+    _StaleActionAdopted,
+)
 from app.services.initial_draft_lifecycle import InitialCandidateNotApplicable, InitialDraftLifecycle, InitialRecoveryRoute
 from app.workflows.chapter_production import (
     ChapterActionBinding,
@@ -201,12 +205,6 @@ class _ReviewRevisionContext:
     version: DocumentVersion
     segment_map: ChapterSegmentMap
     reports: tuple[ReviewReport, ...]
-
-
-class _StaleActionAdopted(Exception):
-    def __init__(self, result: ChapterProductionV2Updated) -> None:
-        self.result = result
-        super().__init__()
 
 
 def _invalid() -> ChapterProductionV2ValidationError:
@@ -379,6 +377,7 @@ class ChapterProductionV2Service:
             else None
         )
         self._initial_drafts = None if self._phase_sessions is None else InitialDraftLifecycle(self._phase_sessions, writer_agent, chief_editor_required)
+        self._author_accept = AuthorAcceptCoordinator(self)
         self.documents = DocumentService(session)
         self.repository = ChapterProductionRepository(
             session,
@@ -438,33 +437,13 @@ class ChapterProductionV2Service:
         if decision != ChapterActionDecision.ACCEPT.value:
             raise _invalid() from None
         try:
-            context = await self._author_context(
+            return await self._author_accept.accept(
                 project_id=project_id,
                 chapter_id=chapter_id,
                 workflow_run_id=workflow_run_id,
                 action_request_id=action_request_id,
                 actor_user_id=actor_user_id,
             )
-            next_state = context.state.resolve_action(
-                action=context.binding,
-                decision=ChapterActionDecision.ACCEPT,
-            )
-            self._resolve_action_row(
-                context.action,
-                status=ActionRequestStatus.APPROVED,
-                decision=ChapterActionDecision.ACCEPT,
-                actor_user_id=actor_user_id,
-            )
-            self._append_state(context.run, context.checkpoint, next_state)
-            await self._commit()
-            return ChapterProductionV2Updated(
-                workflow_run_id=context.run.id,
-                draft_document_id=context.document.id,
-                draft_version_id=context.version.id,
-                action_request_id=None,
-            )
-        except _StaleActionAdopted as adopted:
-            return adopted.result
         except ChapterProductionV2CommitIndeterminateError:
             raise
         except ChapterProductionV2ValidationError:
