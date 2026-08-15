@@ -2181,7 +2181,9 @@ async def test_review_finalize_revalidates_claimed_report_after_document_commit(
     engine = create_async_engine(integration_database_url, pool_pre_ping=True)
     sessions = async_sessionmaker(engine, expire_on_commit=False)
 
-    async def mutate_then_finalize(**kwargs: object) -> ChapterProductionV2Updated:
+    async def mutate_then_finalize(
+        identity: object, **kwargs: object
+    ) -> ChapterProductionV2Updated:
         async with sessions() as mutation:
             current = await mutation.get(ReviewReport, report.id)
             assert current is not None
@@ -2190,7 +2192,7 @@ async def test_review_finalize_revalidates_claimed_report_after_document_commit(
                 "provider_envelope": "mutated after the document version commit",
             }
             await mutation.commit()
-        return await original_finalize(**kwargs)  # type: ignore[arg-type]
+        return await original_finalize(identity, **kwargs)  # type: ignore[arg-type]
 
     monkeypatch.setattr(service._review_saga, "finalize", mutate_then_finalize)
     try:

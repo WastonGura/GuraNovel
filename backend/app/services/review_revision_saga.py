@@ -181,8 +181,11 @@ async def _candidates(
     versions = list(
         await session.scalars(
             select(DocumentVersion)
+            .join(Document, Document.id == DocumentVersion.document_id)
             .where(
                 DocumentVersion.parent_version_id == plan.source_version_id,
+                Document.project_id == project_id,
+                Document.chapter_id == chapter_id,
                 or_(
                     DocumentVersion.workflow_run_id == workflow_run_id,
                     DocumentVersion.metadata_.contains(metadata_key),
@@ -242,10 +245,12 @@ def _validate_persist_inputs(
         or not _valid_attempt_token(plan.attempt_id)
         or type(plan.attempt_checkpoint_index) is not int
         or plan.attempt_checkpoint_index < 0
-        or type(plan.report_ids) is not tuple or not plan.report_ids
+        or type(plan.report_ids) is not tuple
+        or not 1 <= len(plan.report_ids) <= 16
         or any(not _valid_uuid(value) for value in plan.report_ids)
         or not _valid_hash(plan.report_input_hash)
         or type(plan.target_segment_ids) is not tuple
+        or not 1 <= len(plan.target_segment_ids) <= 64
         or any(not _valid_uuid(value) for value in plan.target_segment_ids)
     ):
         raise _invalid() from None
@@ -269,6 +274,13 @@ async def _revalidate_revision_prewrite(
         workflow_run_id=workflow_run_id, report_ids=plan.report_ids,
         actor_user_id=actor_user_id,
     )
+    if (
+        current.document.id != plan.source_document_id
+        or current.version.id != plan.source_version_id
+        or current.version.content_hash != plan.source_content_hash
+        or current.checkpoint.checkpoint_index != plan.attempt_checkpoint_index
+    ):
+        raise _invalid() from None
     if (
         current.segment_map.canonical_bytes() != plan.segment_map.canonical_bytes()
         or service._review_report_input_hash(current.reports) != plan.report_input_hash
@@ -375,6 +387,7 @@ async def _finalize_review_revision(
     if (
         state.status is not ChapterProductionStatus.REVIEW_REVISION
         or state.awaiting_user
+        or state.action_request_id is not None
         or state.document_id != str(identity.document_id)
         or state.document_version_id != str(identity.source_version_id)
         or state.content_hash != identity.source_content_hash
@@ -477,6 +490,7 @@ class ReviewRevisionSaga:
                 identity = _identity(version, plan, project_id, chapter_id, workflow_run_id)
                 await service._commit()
                 return identity
+            wrote = True
             version = await service.documents.write_document(
                 document_id=plan.source_document_id,
                 content=revised_content,
@@ -491,7 +505,6 @@ class ReviewRevisionSaga:
                     "attempt_id": plan.attempt_id,
                 },
             )
-            wrote = True
             return _identity(version, plan, project_id, chapter_id, workflow_run_id)
         except ChapterProductionV2CommitIndeterminateError:
             raise

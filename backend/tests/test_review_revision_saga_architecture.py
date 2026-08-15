@@ -140,3 +140,34 @@ def test_total_production_additions_stay_within_budget() -> None:
 
     assert added <= 600
     assert files <= 5
+
+
+def test_local_slot_and_stage_mappings_match_facade_helpers() -> None:
+    from types import SimpleNamespace
+    from uuid import UUID
+
+    from app.models import ReviewMode
+    from app.services.chapter_production_v2_service import _review_report_slots
+    from app.services.review_revision_saga import _report_slots, _review_stage
+    from app.workflows.chapter_production import ChapterReviewStage
+
+    editor_id = UUID("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
+    chief_id = UUID("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb")
+    lore_id = UUID("cccccccc-cccc-4ccc-8ccc-cccccccccccc")
+    state = SimpleNamespace(
+        editor_report_id=str(editor_id),
+        chief_editor_report_id=str(chief_id),
+        lore_report_id=str(lore_id),
+    )
+
+    assert _report_slots(state) == _review_report_slots(
+        editor_report_id=editor_id,
+        chief_editor_report_id=chief_id,
+        lore_report_id=lore_id,
+    )
+    assert _review_stage(ReviewMode.CHAPTER_EDITOR.value) is ChapterReviewStage.EDITOR
+    assert (
+        _review_stage(ReviewMode.CHAPTER_CHIEF_FINAL.value)
+        is ChapterReviewStage.CHIEF_EDITOR
+    )
+    assert _review_stage(ReviewMode.CHAPTER_FINAL_LORE.value) is ChapterReviewStage.LORE

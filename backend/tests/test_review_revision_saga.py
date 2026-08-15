@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import FrozenInstanceError
+from dataclasses import FrozenInstanceError, replace
 from types import SimpleNamespace
 from uuid import UUID
 
@@ -22,6 +22,7 @@ from app.services.review_revision_saga import (
     _normalize_uuid,
     _normalized_plan,
     _release,
+    _revalidate_revision_prewrite,
     _validate_persist_inputs,
 )
 from app.workflows.chapter_production import ChapterProductionStatus
@@ -498,6 +499,34 @@ async def test_finalize_rechecks_state_binding_before_transition() -> None:
         editor_report_id=str(identity.report_ids[0]),
         chief_editor_report_id=None,
         lore_report_id=None,
+        action_request_id=None,
+    )
+    attempt = {
+        "key": identity.operation_key,
+        "attempt_id": identity.attempt_id,
+        "kind": "review",
+        "checkpoint_index": 1,
+        "report_input_hash": identity.report_input_hash,
+        "status": "claimed",
+    }
+
+    with pytest.raises(ChapterProductionV2ValidationError):
+        await _finalize_review_revision(_FinalizeStubService(state, attempt), identity, ACTOR_ID)
+
+
+@pytest.mark.anyio
+async def test_finalize_requires_no_pending_action_request_binding() -> None:
+    identity = _identity()
+    state = SimpleNamespace(
+        status=ChapterProductionStatus.REVIEW_REVISION,
+        awaiting_user=False,
+        document_id=str(identity.document_id),
+        document_version_id=str(identity.source_version_id),
+        content_hash=identity.source_content_hash,
+        editor_report_id=str(identity.report_ids[0]),
+        chief_editor_report_id=None,
+        lore_report_id=None,
+        action_request_id=str(UUID(int=7)),
     )
     attempt = {
         "key": identity.operation_key,
@@ -653,3 +682,139 @@ def test_validate_persist_inputs_accepts_pgproto_uuid_values() -> None:
     assert type(normalized.source_document_id) is UUID
     assert type(normalized.report_ids[0]) is UUID
     assert type(normalized.target_segment_ids[0]) is UUID
+
+
+class _PrewriteStubService:
+    def __init__(self, context: object) -> None:
+        self.context = context
+
+    async def _review_revision_context(self, **kwargs: object) -> object:
+        return self.context
+
+
+def _prewrite_context(
+    *,
+    document_id: UUID = DOCUMENT_ID,
+    version_id: UUID = VERSION_ID,
+    content_hash: str = "a" * 64,
+    checkpoint_index: int = 1,
+) -> SimpleNamespace:
+    return SimpleNamespace(
+        document=SimpleNamespace(id=document_id),
+        version=SimpleNamespace(id=version_id, content_hash=content_hash),
+        checkpoint=SimpleNamespace(checkpoint_index=checkpoint_index),
+        segment_map=SimpleNamespace(canonical_bytes=lambda: b"map"),
+        run=SimpleNamespace(),
+    )
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "field",
+    ["document_id", "version_id", "content_hash", "checkpoint_index"],
+)
+async def test_revalidate_prewrite_binds_plan_source_to_fresh_context(
+    field: str,
+) -> None:
+    kwargs: dict[str, object] = {}
+    if field == "document_id":
+        kwargs["document_id"] = UUID(int=99)
+    elif field == "version_id":
+        kwargs["version_id"] = UUID(int=99)
+    elif field == "content_hash":
+        kwargs["content_hash"] = "d" * 64
+    else:
+        kwargs["checkpoint_index"] = 2
+    context = _prewrite_context(**kwargs)
+    service = _PrewriteStubService(context)
+
+    with pytest.raises(ChapterProductionV2ValidationError):
+        await _revalidate_revision_prewrite(
+            service,
+            plan=_plan(),
+            project_id=PROJECT_ID,
+            chapter_id=CHAPTER_ID,
+            workflow_run_id=RUN_ID,
+            actor_user_id=ACTOR_ID,
+        )
+
+
+def test_validate_persist_inputs_bounds_report_and_target_counts() -> None:
+    reports = tuple(UUID(int=i) for i in range(1, 18))
+    targets = tuple(UUID(int=100 + i) for i in range(65))
+
+    with pytest.raises(ChapterProductionV2ValidationError):
+        _validate_persist_inputs(
+            replace(_plan(), report_ids=reports),
+            PROJECT_ID, CHAPTER_ID, RUN_ID, ACTOR_ID,
+        )
+    with pytest.raises(ChapterProductionV2ValidationError):
+        _validate_persist_inputs(
+            replace(_plan(), report_ids=()),
+            PROJECT_ID, CHAPTER_ID, RUN_ID, ACTOR_ID,
+        )
+    with pytest.raises(ChapterProductionV2ValidationError):
+        _validate_persist_inputs(
+            replace(_plan(), target_segment_ids=targets),
+            PROJECT_ID, CHAPTER_ID, RUN_ID, ACTOR_ID,
+        )
+    with pytest.raises(ChapterProductionV2ValidationError):
+        _validate_persist_inputs(
+            replace(_plan(), target_segment_ids=()),
+            PROJECT_ID, CHAPTER_ID, RUN_ID, ACTOR_ID,
+        )
+
+
+class _CandidateScopedSession:
+    def __init__(self) -> None:
+        self.statements: list[object] = []
+
+    async def scalars(self, statement: object) -> list[object]:
+        self.statements.append(statement)
+        return []
+
+
+@pytest.mark.anyio
+async def test_candidates_scopes_version_query_by_project_and_chapter_before_lock() -> None:
+    session = _CandidateScopedSession()
+
+    assert await _candidates(session, _plan(), PROJECT_ID, CHAPTER_ID, RUN_ID) == []
+
+    sql = str(session.statements[0].compile())
+    assert "JOIN documents" in sql
+    assert "documents.project_id" in sql
+    assert "documents.chapter_id" in sql
+    assert sql.find("documents.project_id") < sql.find("FOR UPDATE")
+    assert sql.find("documents.chapter_id") < sql.find("FOR UPDATE")
+
+
+@pytest.mark.anyio
+async def test_persist_treats_any_write_escape_as_commit_indeterminate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = _RecordingService()
+    saga = ReviewRevisionSaga(service, lambda *a, **k: "revised", lambda **k: None)
+    plan = _plan()
+
+    async def revalidate(*args: object, **kwargs: object) -> None:
+        return None
+
+    async def candidates(*args: object, **kwargs: object) -> list[object]:
+        return []
+
+    async def read_content(document_id: object, version_id: object) -> str:
+        return "source"
+
+    async def write_escapes_post_commit(**kwargs: object) -> object:
+        raise RuntimeError("canary-post-commit-log-event")
+
+    monkeypatch.setattr("app.services.review_revision_saga._revalidate_revision_prewrite", revalidate)
+    monkeypatch.setattr("app.services.review_revision_saga._candidates", candidates)
+    monkeypatch.setattr(service.documents, "read_version_content", read_content)
+    monkeypatch.setattr(service.documents, "write_document", write_escapes_post_commit)
+
+    with pytest.raises(ChapterProductionV2CommitIndeterminateError):
+        await saga.persist(plan, **_PERSIST_KWARGS)
+
+    assert service.release_calls == []
+    assert service.session.rolled_back == 1
