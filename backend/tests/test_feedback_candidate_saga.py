@@ -1,0 +1,383 @@
+from __future__ import annotations
+
+from dataclasses import FrozenInstanceError
+from types import SimpleNamespace
+from uuid import UUID
+
+import pytest
+
+from app.services.chapter_production_v2_contracts import (
+    ChapterProductionV2ReconciliationError,
+    ChapterProductionV2Updated,
+    ChapterProductionV2ValidationError,
+)
+from app.services.feedback_candidate_saga import (
+    FeedbackCandidateIdentity,
+    FeedbackCandidateSaga,
+    _exact_attempt,
+)
+from app.services.feedback_revision_handoff import FeedbackRevisionPlan
+
+
+PROJECT_ID = UUID("11111111-1111-4111-8111-111111111111")
+CHAPTER_ID = UUID("22222222-2222-4222-8222-222222222222")
+RUN_ID = UUID("33333333-3333-4333-8333-333333333333")
+ACTION_ID = UUID("44444444-4444-4444-8444-444444444444")
+ACTOR_ID = UUID("77777777-7777-4777-8777-777777777777")
+DOCUMENT_ID = UUID("55555555-5555-4555-8555-555555555555")
+VERSION_ID = UUID("66666666-6666-4666-8666-666666666666")
+SEGMENT_ID = UUID("88888888-8888-4888-8888-888888888888")
+
+
+def _plan() -> FeedbackRevisionPlan:
+    return FeedbackRevisionPlan(
+        source_document_id=DOCUMENT_ID,
+        source_version_id=VERSION_ID,
+        source_content_hash="a" * 64,
+        operation_key="b" * 64,
+        attempt_id=str(UUID(int=1)),
+        attempt_checkpoint_index=1,
+        feedback="plain feedback",
+        target_segment_ids=(SEGMENT_ID,),
+        segment_map=SimpleNamespace(),
+        candidate=SimpleNamespace(
+            segments=(SimpleNamespace(segment_id=SEGMENT_ID, content="New scene."),)
+        ),
+    )
+
+
+def _identity() -> FeedbackCandidateIdentity:
+    return FeedbackCandidateIdentity(
+        project_id=PROJECT_ID,
+        chapter_id=CHAPTER_ID,
+        workflow_run_id=RUN_ID,
+        action_request_id=ACTION_ID,
+        document_id=DOCUMENT_ID,
+        version_id=VERSION_ID,
+        source_version_id=VERSION_ID,
+        content_hash="c" * 64,
+        operation_key="b" * 64,
+        attempt_id=str(UUID(int=1)),
+    )
+
+
+_PERSIST_KWARGS: dict[str, object] = {
+    "project_id": PROJECT_ID,
+    "chapter_id": CHAPTER_ID,
+    "workflow_run_id": RUN_ID,
+    "action_request_id": ACTION_ID,
+    "actor_user_id": ACTOR_ID,
+}
+
+
+class _FakeSession:
+    def __init__(self) -> None:
+        self.rolled_back = 0
+
+    async def rollback(self) -> None:
+        self.rolled_back += 1
+
+
+class _FakeDocuments:
+    def __init__(self) -> None:
+        self.read_calls: list[tuple[object, object]] = []
+        self.write_calls: list[dict[str, object]] = []
+        self.source_content = "source"
+        self.written_version: object = None
+
+    async def read_version_content(self, document_id: object, version_id: object) -> str:
+        self.read_calls.append((document_id, version_id))
+        return self.source_content
+
+    async def write_document(self, **kwargs: object) -> object:
+        self.write_calls.append(kwargs)
+        assert self.written_version is not None
+        return self.written_version
+
+
+class _RecordingService:
+    def __init__(self) -> None:
+        self.session = _FakeSession()
+        self.documents = _FakeDocuments()
+        self.release_calls: list[tuple[object, dict[str, object]]] = []
+        self.rollback_calls = 0
+
+    async def _release_attempt(self, workflow_run_id: object, **kwargs: object) -> None:
+        self.release_calls.append((workflow_run_id, kwargs))
+
+    async def _rollback(self) -> None:
+        self.rollback_calls += 1
+        await self.session.rollback()
+
+
+def test_identity_is_frozen_slots_and_content_safe() -> None:
+    identity = _identity()
+
+    with pytest.raises(FrozenInstanceError):
+        identity.content_hash = "d" * 64  # type: ignore[misc]
+    assert not hasattr(identity, "__dict__")
+    assert "plain feedback" not in repr(identity)
+
+
+def test_exact_attempt_rejects_aba_late_or_foreign_tokens() -> None:
+    expected_key = "b" * 64
+    expected_token = str(UUID(int=1))
+    attempt = {
+        "key": expected_key,
+        "attempt_id": expected_token,
+        "kind": "feedback",
+        "checkpoint_index": 1,
+        "status": "claimed",
+    }
+
+    assert (
+        _exact_attempt(
+            attempt,
+            operation_key=expected_key,
+            attempt_id=expected_token,
+            checkpoint_index=1,
+        )
+        is True
+    )
+    assert (
+        _exact_attempt(
+            attempt,
+            operation_key=expected_key,
+            attempt_id=str(UUID(int=2)),
+            checkpoint_index=1,
+        )
+        is False
+    )
+    assert (
+        _exact_attempt(
+            attempt,
+            operation_key=expected_key,
+            attempt_id=expected_token,
+            checkpoint_index=2,
+        )
+        is False
+    )
+    assert (
+        _exact_attempt(
+            None,
+            operation_key=expected_key,
+            attempt_id=expected_token,
+            checkpoint_index=1,
+        )
+        is False
+    )
+    assert (
+        _exact_attempt(
+            {**attempt, "kind": "review"},
+            operation_key=expected_key,
+            attempt_id=expected_token,
+            checkpoint_index=1,
+        )
+        is False
+    )
+    assert (
+        _exact_attempt(
+            {**attempt, "status": "failed"},
+            operation_key=expected_key,
+            attempt_id=expected_token,
+            checkpoint_index=1,
+        )
+        is False
+    )
+
+
+@pytest.mark.anyio
+async def test_persist_writes_exactly_one_candidate_when_none_exists(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = _RecordingService()
+    version = SimpleNamespace(id=VERSION_ID, content_hash="c" * 64)
+    service.documents.written_version = version
+    saga = FeedbackCandidateSaga(service, lambda *a, **k: "revised", lambda **k: None)
+    plan = _plan()
+    order: list[str] = []
+
+    async def revalidate(*args: object, **kwargs: object) -> None:
+        order.append("revalidate")
+
+    async def candidates(*args: object, **kwargs: object) -> list[object]:
+        order.append("candidates")
+        return []
+
+    def identity(value: object, *args: object, **kwargs: object) -> object:
+        order.append("identity")
+        return SimpleNamespace(version_id=value.id)
+
+    monkeypatch.setattr("app.services.feedback_candidate_saga._revalidate_revision_prewrite", revalidate)
+    monkeypatch.setattr("app.services.feedback_candidate_saga._candidates", candidates)
+    monkeypatch.setattr("app.services.feedback_candidate_saga._identity", identity)
+
+    result = await saga.persist(plan, **_PERSIST_KWARGS)
+
+    assert result.version_id == VERSION_ID
+    assert service.documents.read_calls == [(DOCUMENT_ID, VERSION_ID)]
+    assert len(service.documents.write_calls) == 1
+    assert service.documents.write_calls[0]["document_id"] == DOCUMENT_ID
+    assert service.documents.write_calls[0]["content"] == "revised"
+    assert order == ["revalidate", "candidates", "identity"]
+    assert service.release_calls == []
+
+
+@pytest.mark.anyio
+async def test_persist_adopts_one_exact_candidate_without_writing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = _RecordingService()
+    saga = FeedbackCandidateSaga(service, lambda *a, **k: "revised", lambda **k: None)
+    plan = _plan()
+    document = SimpleNamespace(id=DOCUMENT_ID)
+    version = SimpleNamespace(id=VERSION_ID, content_hash="c" * 64)
+
+    async def revalidate(*args: object, **kwargs: object) -> None:
+        return None
+
+    async def candidates(*args: object, **kwargs: object) -> list[object]:
+        return [(document, version)]
+
+    def validate_candidate(*args: object, **kwargs: object) -> None:
+        return None
+
+    def identity(value: object, *args: object, **kwargs: object) -> object:
+        return SimpleNamespace(version_id=value.id)
+
+    monkeypatch.setattr("app.services.feedback_candidate_saga._revalidate_revision_prewrite", revalidate)
+    monkeypatch.setattr("app.services.feedback_candidate_saga._candidates", candidates)
+    monkeypatch.setattr("app.services.feedback_candidate_saga._validate_candidate", validate_candidate)
+    monkeypatch.setattr("app.services.feedback_candidate_saga._identity", identity)
+
+    result = await saga.persist(plan, **_PERSIST_KWARGS)
+
+    assert result.version_id == VERSION_ID
+    assert service.documents.write_calls == []
+    assert service.release_calls == []
+
+
+@pytest.mark.anyio
+async def test_persist_rejects_multiple_candidates_and_releases_the_exact_attempt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = _RecordingService()
+    saga = FeedbackCandidateSaga(service, lambda *a, **k: "revised", lambda **k: None)
+    plan = _plan()
+    document = SimpleNamespace(id=DOCUMENT_ID)
+    version = SimpleNamespace(id=VERSION_ID, content_hash="c" * 64)
+
+    async def revalidate(*args: object, **kwargs: object) -> None:
+        return None
+
+    async def candidates(*args: object, **kwargs: object) -> list[object]:
+        return [(document, version), (document, version)]
+
+    monkeypatch.setattr("app.services.feedback_candidate_saga._revalidate_revision_prewrite", revalidate)
+    monkeypatch.setattr("app.services.feedback_candidate_saga._candidates", candidates)
+
+    with pytest.raises(ChapterProductionV2ReconciliationError):
+        await saga.persist(plan, **_PERSIST_KWARGS)
+
+    assert service.documents.write_calls == []
+    assert service.release_calls == [
+        (
+            RUN_ID,
+            {
+                "expected_key": plan.operation_key,
+                "expected_attempt_id": plan.attempt_id,
+                "expected_kind": "feedback",
+                "expected_checkpoint_index": plan.attempt_checkpoint_index,
+                "restore_feedback": True,
+            },
+        )
+    ]
+
+
+@pytest.mark.anyio
+async def test_persist_rejects_foreign_candidate_and_releases_the_exact_attempt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = _RecordingService()
+    saga = FeedbackCandidateSaga(service, lambda *a, **k: "revised", lambda **k: None)
+    plan = _plan()
+    document = SimpleNamespace(id=UUID(int=99))
+    version = SimpleNamespace(id=VERSION_ID, content_hash="c" * 64)
+
+    async def revalidate(*args: object, **kwargs: object) -> None:
+        return None
+
+    async def candidates(*args: object, **kwargs: object) -> list[object]:
+        return [(document, version)]
+
+    def validate_candidate(*args: object, **kwargs: object) -> None:
+        raise ChapterProductionV2ReconciliationError()
+
+    monkeypatch.setattr("app.services.feedback_candidate_saga._revalidate_revision_prewrite", revalidate)
+    monkeypatch.setattr("app.services.feedback_candidate_saga._candidates", candidates)
+    monkeypatch.setattr("app.services.feedback_candidate_saga._validate_candidate", validate_candidate)
+
+    with pytest.raises(ChapterProductionV2ReconciliationError):
+        await saga.persist(plan, **_PERSIST_KWARGS)
+
+    assert service.documents.write_calls == []
+    assert service.release_calls[0][1]["expected_key"] == plan.operation_key
+
+
+@pytest.mark.anyio
+async def test_finalize_preserves_reconciliation_and_rolls_back(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = _RecordingService()
+    saga = FeedbackCandidateSaga(service, lambda *a, **k: "revised", lambda **k: None)
+    identity = _identity()
+
+    async def finalize(*args: object, **kwargs: object) -> object:
+        raise ChapterProductionV2ReconciliationError()
+
+    monkeypatch.setattr("app.services.feedback_candidate_saga._finalize_feedback_revision", finalize)
+
+    with pytest.raises(ChapterProductionV2ReconciliationError):
+        await saga.finalize(identity, actor_user_id=ACTOR_ID)
+
+    assert service.rollback_calls == 1
+    assert service.session.rolled_back == 1
+
+
+@pytest.mark.anyio
+async def test_finalize_maps_unexpected_errors_to_validation_without_leaking_details(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = _RecordingService()
+    saga = FeedbackCandidateSaga(service, lambda *a, **k: "revised", lambda **k: None)
+    identity = _identity()
+
+    async def finalize(*args: object, **kwargs: object) -> object:
+        raise RuntimeError("canary-private-feedback")
+
+    monkeypatch.setattr("app.services.feedback_candidate_saga._finalize_feedback_revision", finalize)
+
+    with pytest.raises(ChapterProductionV2ValidationError) as raised:
+        await saga.finalize(identity, actor_user_id=ACTOR_ID)
+
+    assert raised.value.__cause__ is None
+    assert "canary" not in repr(raised.value)
+    assert service.rollback_calls == 1
+
+
+@pytest.mark.anyio
+async def test_finalize_returns_the_next_author_gate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = _RecordingService()
+    saga = FeedbackCandidateSaga(service, lambda *a, **k: "revised", lambda **k: None)
+    identity = _identity()
+    updated = ChapterProductionV2Updated(RUN_ID, DOCUMENT_ID, VERSION_ID, ACTION_ID)
+
+    async def finalize(*args: object, **kwargs: object) -> object:
+        return updated
+
+    monkeypatch.setattr("app.services.feedback_candidate_saga._finalize_feedback_revision", finalize)
+
+    assert await saga.finalize(identity, actor_user_id=ACTOR_ID) == updated
+    assert service.rollback_calls == 0

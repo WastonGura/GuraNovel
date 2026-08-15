@@ -5,8 +5,16 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-HANDOFF = ROOT / "app/services/feedback_revision_handoff.py"
+SAGA = ROOT / "app/services/feedback_candidate_saga.py"
 FACADE = ROOT / "app/services/chapter_production_v2_service.py"
+
+PROVIDER_CALLS = {
+    "draft_initial",
+    "revise_from_user_feedback",
+    "revise_from_review",
+    "user_feedback_revision",
+    "execute_review_revision",
+}
 
 
 def _tree(path: Path) -> ast.Module:
@@ -32,9 +40,9 @@ def _service_method(name: str) -> tuple[str, ast.AsyncFunctionDef]:
     return ast.get_source_segment(source, method) or "", method
 
 
-def test_handoff_is_one_way_and_bounded() -> None:
-    source = HANDOFF.read_text(encoding="utf-8")
-    tree = _tree(HANDOFF)
+def test_saga_is_bounded_one_way_and_has_no_provider_authority() -> None:
+    source = SAGA.read_text(encoding="utf-8")
+    tree = _tree(SAGA)
     imports = {
         alias.name
         for node in tree.body
@@ -42,6 +50,11 @@ def test_handoff_is_one_way_and_bounded() -> None:
         for alias in node.names
     } | {
         node.module or "" for node in tree.body if isinstance(node, ast.ImportFrom)
+    }
+    calls = {
+        node.func.attr
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
     }
 
     assert len(source.splitlines()) <= 800
@@ -51,18 +64,21 @@ def test_handoff_is_one_way_and_bounded() -> None:
         if isinstance(node, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef))
     )
     assert "app.services.chapter_production_v2_service" not in imports
-    for forbidden in ("write_document", "create_document", "_finalize_feedback_revision"):
-        assert forbidden not in source
-    assert "clock_timestamp" in source
-    assert "database_now" in source
-    assert "expires_at" in source
+    assert not any(name.startswith("app.agents") or name == "app.llm" for name in imports)
+    assert PROVIDER_CALLS.isdisjoint(calls)
+    assert "write_document" in source
 
 
-def test_handoff_is_constructed_once_by_the_facade() -> None:
-    source = FACADE.read_text(encoding="utf-8")
+def test_saga_is_constructed_once_by_the_facade_and_private_bodies_are_removed() -> None:
+    facade_source = FACADE.read_text(encoding="utf-8")
+    saga_source = SAGA.read_text(encoding="utf-8")
 
-    assert "FeedbackRevisionHandoff" in source
-    assert source.count("self._feedback_handoff = FeedbackRevisionHandoff(self") == 1
+    assert "FeedbackCandidateSaga" in facade_source
+    assert facade_source.count("self._feedback_saga = FeedbackCandidateSaga(") == 1
+    assert "def _revalidate_revision_prewrite" not in facade_source
+    assert "def _finalize_feedback_revision" not in facade_source
+    assert "def _revalidate_revision_prewrite" in saga_source
+    assert "def _finalize_feedback_revision" in saga_source
 
 
 def test_request_user_feedback_revision_is_a_thin_composition() -> None:
@@ -70,22 +86,17 @@ def test_request_user_feedback_revision_is_a_thin_composition() -> None:
 
     assert len(method.splitlines()) <= 80
     for forbidden in (
-        "_author_context",
-        "_recover_failed_attempt",
-        "_decision_operation_key",
-        "_resolve_action_row",
-        "_append_state",
-        "_set_attempt",
-        "_attempt_payload",
-        "_new_attempt_id",
-        "_validated_feedback",
-        "_feedback_request",
-        "sha256_content",
-        "derive_chapter_segment_map",
+        "self.session",
+        "select(",
+        "ActionRequest(",
+        "WorkflowCheckpoint(",
         "merge_segment_replacements",
         "_revalidate_revision_prewrite",
         "write_document",
         "_finalize_feedback_revision",
+        "_validated_prospective_map",
+        "DocumentSource",
+        "_release_attempt",
     ):
         assert forbidden not in method
     assert "self._feedback_handoff.execute" in method
@@ -93,25 +104,8 @@ def test_request_user_feedback_revision_is_a_thin_composition() -> None:
     assert "self._feedback_saga.finalize" in method
 
 
-def test_plan_dto_is_frozen_slots_and_content_safe() -> None:
-    source = HANDOFF.read_text(encoding="utf-8")
-    tree = _tree(HANDOFF)
-    plan = next(
-        node
-        for node in tree.body
-        if isinstance(node, ast.ClassDef) and node.name == "FeedbackRevisionPlan"
-    )
+def test_facade_reconcile_delegates_feedback_finalization_to_the_saga() -> None:
+    source = FACADE.read_text(encoding="utf-8")
 
-    keywords = {
-        keyword.arg: getattr(keyword.value, "value", None)
-        for decorator in plan.decorator_list
-        if isinstance(decorator, ast.Call)
-        for keyword in decorator.keywords
-    }
-    assert keywords.get("frozen") is True
-    assert keywords.get("slots") is True
-    assert keywords.get("repr") is False
-    assert "    feedback: str = field(repr=False)" in source
-    assert "    segment_map: ChapterSegmentMap = field(repr=False)" in source
-    assert "    candidate: CandidateChapterOutput = field(repr=False)" in source
-
+    assert "self._feedback_saga.finalize" in source
+    assert "await self._finalize_feedback_revision(" not in source

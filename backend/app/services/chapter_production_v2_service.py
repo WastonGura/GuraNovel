@@ -96,6 +96,10 @@ from app.services.author_accept_coordination import (
 from app.services.initial_draft_lifecycle import InitialCandidateNotApplicable, InitialDraftLifecycle, InitialRecoveryRoute
 from app.services.manual_edit_saga import ManualEditCoordinator
 from app.services.feedback_revision_handoff import FeedbackRevisionHandoff
+from app.services.feedback_candidate_saga import (
+    FeedbackCandidateIdentity,
+    FeedbackCandidateSaga,
+)
 from app.workflows.chapter_production import (
     ChapterActionBinding,
     ChapterActionDecision,
@@ -382,6 +386,9 @@ class ChapterProductionV2Service:
         self._author_accept = AuthorAcceptCoordinator(self)
         self._manual_edit = ManualEditCoordinator(self)
         self._feedback_handoff = FeedbackRevisionHandoff(self, self._phase_sessions, self.revision_agent)
+        self._feedback_saga = FeedbackCandidateSaga(
+            self, merge_segment_replacements, _validated_prospective_map
+        )
         self.documents = DocumentService(session)
         self.repository = ChapterProductionRepository(
             session,
@@ -490,98 +497,17 @@ class ChapterProductionV2Service:
                 feedback=feedback,
                 target_segment_ids=target_segment_ids,
             )
-        except _StaleActionAdopted as adopted:
-            return adopted.result
-        replacements = {item.segment_id: item.content for item in plan.candidate.segments}
-        try:
-            source_content = await self.documents.read_version_content(
-                plan.source_document_id, plan.source_version_id
-            )
-            revised_content = merge_segment_replacements(source_content, plan.segment_map, replacements)
-            await self._revalidate_revision_prewrite(
+            identity = await self._feedback_saga.persist(
+                plan,
                 project_id=project_id,
                 chapter_id=chapter_id,
                 workflow_run_id=workflow_run_id,
                 action_request_id=action_request_id,
-                source_document_id=plan.source_document_id,
-                source_version_id=plan.source_version_id,
-                source_content_hash=plan.source_content_hash,
-                feedback=plan.feedback,
                 actor_user_id=actor_user_id,
-                expected_attempt_key=plan.operation_key,
-                expected_attempt_id=plan.attempt_id,
-                expected_checkpoint_index=plan.attempt_checkpoint_index,
-            )
-            _validated_prospective_map(
-                project_id=project_id,
-                chapter_id=chapter_id,
-                document_id=plan.source_document_id,
-                version_id=plan.source_version_id,
-                content=revised_content,
-            )
-            version = await self.documents.write_document(
-                document_id=plan.source_document_id,
-                content=revised_content,
-                source=DocumentSource.WRITER_AGENT,
-                expected_current_version_id=plan.source_version_id,
-                agent_role="revision_agent",
-                workflow_run_id=workflow_run_id,
-                change_summary="Applied a Chapter Production V2 feedback revision.",
-                version_metadata={
-                    "contract_version": _CONTRACT_VERSION,
-                    "operation_key": plan.operation_key,
-                    "attempt_id": plan.attempt_id,
-                },
             )
         except _StaleActionAdopted as adopted:
             return adopted.result
-        except DocumentCommitIndeterminateError:
-            await self._rollback()
-            raise ChapterProductionV2CommitIndeterminateError() from None
-        except ChapterProductionV2CommitIndeterminateError:
-            raise
-        except ChapterProductionV2ReconciliationError:
-            await self._release_attempt(
-                workflow_run_id,
-                expected_key=plan.operation_key,
-                expected_attempt_id=plan.attempt_id,
-                expected_kind="feedback",
-                expected_checkpoint_index=plan.attempt_checkpoint_index,
-                restore_feedback=True,
-            )
-            raise
-        except ChapterProductionV2ValidationError:
-            await self._release_attempt(
-                workflow_run_id,
-                expected_key=plan.operation_key,
-                expected_attempt_id=plan.attempt_id,
-                expected_kind="feedback",
-                expected_checkpoint_index=plan.attempt_checkpoint_index,
-                restore_feedback=True,
-            )
-            raise
-        except Exception:
-            await self._release_attempt(
-                workflow_run_id,
-                expected_key=plan.operation_key,
-                expected_attempt_id=plan.attempt_id,
-                expected_kind="feedback",
-                expected_checkpoint_index=plan.attempt_checkpoint_index,
-                restore_feedback=True,
-            )
-            raise _invalid() from None
-        return await self._finalize_feedback_revision(
-            project_id=project_id,
-            chapter_id=chapter_id,
-            workflow_run_id=workflow_run_id,
-            old_action_request_id=action_request_id,
-            document_id=plan.source_document_id,
-            version_id=version.id,
-            expected_parent_version_id=plan.source_version_id,
-            operation_key=plan.operation_key,
-            attempt_id=plan.attempt_id,
-            actor_user_id=actor_user_id,
-        )
+        return await self._feedback_saga.finalize(identity, actor_user_id=actor_user_id)
 
     async def submit_manual_edit(
         self,
@@ -1532,18 +1458,20 @@ class ChapterProductionV2Service:
                     raise ChapterProductionV2ReconciliationError()
                 else:
                     old_action = await self._resolved_source_action(run.id, state)
-                    await self._finalize_feedback_revision(
+                    identity = FeedbackCandidateIdentity(
                         project_id=project_id,
                         chapter_id=chapter_id,
                         workflow_run_id=run.id,
-                        old_action_request_id=old_action.id,
+                        action_request_id=old_action.id,
                         document_id=document.id,
                         version_id=version.id,
-                        expected_parent_version_id=UUID(state.document_version_id),
+                        source_version_id=UUID(state.document_version_id),
+                        content_hash=version.content_hash,
                         operation_key=operation_key,
                         attempt_id=version.metadata_["attempt_id"],
-                        actor_user_id=actor_user_id,
                     )
+                    await self.session.commit()
+                    await self._feedback_saga.finalize(identity, actor_user_id=actor_user_id)
             elif state.status is ChapterProductionStatus.REVIEW_REVISION:
                 await self._finalize_review_revision(
                     project_id=project_id,
@@ -4322,203 +4250,6 @@ class ChapterProductionV2Service:
                 ),
             )
         except Exception:
-            raise _invalid() from None
-
-    async def _revalidate_revision_prewrite(
-        self,
-        *,
-        project_id: UUID,
-        chapter_id: UUID,
-        workflow_run_id: UUID,
-        action_request_id: UUID,
-        source_document_id: UUID,
-        source_version_id: UUID,
-        source_content_hash: str,
-        feedback: str,
-        actor_user_id: UUID,
-        expected_attempt_key: str,
-        expected_attempt_id: str,
-        expected_checkpoint_index: int,
-    ) -> None:
-        await self._require_project_owner(project_id, actor_user_id)
-        chapter = await self._chapter(project_id, chapter_id, lock=True)
-        run = await self._run(project_id, chapter_id, workflow_run_id, lock=True)
-        state, checkpoint = await self._locked_state(run)
-        attempt = self._run_metadata(run)["provider_attempt"]
-        if (
-            type(attempt) is not dict
-            or attempt.get("key") != expected_attempt_key
-            or attempt.get("attempt_id") != expected_attempt_id
-            or attempt.get("kind") != "feedback"
-            or attempt.get("checkpoint_index") != expected_checkpoint_index
-            or attempt.get("status") != _ATTEMPT_STATUS_CLAIMED
-        ):
-            raise ChapterProductionV2ReconciliationError()
-        if (
-            state.status is not ChapterProductionStatus.DRAFTING
-            or state.awaiting_user
-            or state.document_id != str(source_document_id)
-            or state.document_version_id != str(source_version_id)
-            or state.content_hash != source_content_hash
-            or checkpoint.checkpoint_index != expected_checkpoint_index
-        ):
-            raise _invalid()
-        action = await self.session.scalar(
-            select(ActionRequest)
-            .where(
-                ActionRequest.id == action_request_id,
-                ActionRequest.workflow_run_id == run.id,
-                ActionRequest.status == ActionRequestStatus.REVISED.value,
-                ActionRequest.user_decision == ChapterActionDecision.REQUEST_REVISION.value,
-            )
-            .with_for_update()
-        )
-        if (
-            action is None
-            or action.user_feedback != feedback
-            or action.resolved_by_id is None
-            or str(action.resolved_by_id) != str(actor_user_id)
-            or action.metadata_.get("document_id") != str(source_document_id)
-            or action.metadata_.get("document_version_id") != str(source_version_id)
-        ):
-            raise _invalid()
-        document = await self.session.scalar(
-            select(Document)
-            .options(selectinload(Document.project), selectinload(Document.current_version))
-            .where(
-                Document.id == source_document_id,
-                Document.project_id == project_id,
-                Document.chapter_id == chapter_id,
-                Document.type == DocumentType.CHAPTER_DRAFT.value,
-                Document.current_version_id == source_version_id,
-            )
-            .with_for_update()
-        )
-        version = await self.session.scalar(
-            select(DocumentVersion)
-            .where(
-                DocumentVersion.id == source_version_id,
-                DocumentVersion.document_id == source_document_id,
-                DocumentVersion.content_hash == source_content_hash,
-            )
-            .with_for_update()
-        )
-        if document is None or version is None or chapter.current_draft_document_id != document.id:
-            raise _invalid()
-        await self.documents.derive_chapter_segment_map(
-            project_id=project_id,
-            chapter_id=chapter_id,
-            document_id=document.id,
-            version_id=version.id,
-        )
-
-    async def _finalize_feedback_revision(
-        self,
-        *,
-        project_id: UUID,
-        chapter_id: UUID,
-        workflow_run_id: UUID,
-        old_action_request_id: UUID,
-        document_id: UUID,
-        version_id: UUID,
-        expected_parent_version_id: UUID,
-        operation_key: str,
-        attempt_id: str,
-        actor_user_id: UUID,
-    ) -> ChapterProductionV2Updated:
-        try:
-            await self._require_project_owner(project_id, actor_user_id)
-            chapter = await self._chapter(project_id, chapter_id, lock=True)
-            run = await self._run(project_id, chapter_id, workflow_run_id, lock=True)
-            state, checkpoint = await self._locked_state(run)
-            if state.status is not ChapterProductionStatus.DRAFTING or state.awaiting_user:
-                raise _invalid()
-            attempt = self._run_metadata(run)["provider_attempt"]
-            if (
-                type(attempt) is not dict
-                or attempt.get("key") != operation_key
-                or attempt.get("attempt_id") != attempt_id
-                or attempt.get("kind") != "feedback"
-                or attempt.get("checkpoint_index") != checkpoint.checkpoint_index
-                or attempt.get("status") != _ATTEMPT_STATUS_CLAIMED
-            ):
-                raise ChapterProductionV2ReconciliationError()
-            old_action = await self.session.scalar(
-                select(ActionRequest)
-                .where(
-                    ActionRequest.id == old_action_request_id,
-                    ActionRequest.workflow_run_id == run.id,
-                    ActionRequest.status == ActionRequestStatus.REVISED.value,
-                )
-                .with_for_update()
-            )
-            document, version = await self._locked_current_revision(
-                project_id=project_id,
-                chapter_id=chapter_id,
-                workflow_run_id=run.id,
-                document_id=document_id,
-                version_id=version_id,
-                parent_version_id=expected_parent_version_id,
-                source=DocumentSource.WRITER_AGENT,
-                actor_user_id=None,
-                agent_role="revision_agent",
-                operation_key=operation_key,
-                expected_attempt_id=attempt_id,
-            )
-            if old_action is None or chapter.current_draft_document_id != document.id:
-                raise _invalid()
-            pending_count = await self.session.scalar(
-                select(func.count())
-                .select_from(ActionRequest)
-                .where(
-                    ActionRequest.workflow_run_id == run.id,
-                    ActionRequest.status == ActionRequestStatus.PENDING.value,
-                )
-            )
-            if pending_count != 0:
-                raise _invalid()
-            action = self._new_author_action(
-                run=run,
-                project_id=project_id,
-                chapter_id=chapter_id,
-                document=document,
-                version=version,
-                operation_key=operation_key,
-            )
-            self.session.add(action)
-            await self.session.flush()
-            binding = self._binding_for_new_action(
-                action=action,
-                run=run,
-                chapter_id=chapter_id,
-                document=document,
-                version=version,
-            )
-            next_state = state.submit_draft(
-                document_id=str(document.id),
-                document_version_id=str(version.id),
-                content_hash=version.content_hash,
-                action=binding,
-            )
-            self._set_attempt(run, None)
-            self._append_state(run, checkpoint, next_state)
-            await self._commit()
-            return ChapterProductionV2Updated(
-                workflow_run_id=run.id,
-                draft_document_id=document.id,
-                draft_version_id=version.id,
-                action_request_id=action.id,
-            )
-        except ChapterProductionV2CommitIndeterminateError:
-            raise
-        except ChapterProductionV2ReconciliationError:
-            await self._rollback()
-            raise
-        except ChapterProductionV2ValidationError:
-            await self._rollback()
-            raise
-        except Exception:
-            await self._rollback()
             raise _invalid() from None
 
     async def _locked_current_revision(
