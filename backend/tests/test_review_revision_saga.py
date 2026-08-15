@@ -789,7 +789,7 @@ async def test_candidates_scopes_version_query_by_project_and_chapter_before_loc
 
 
 @pytest.mark.anyio
-async def test_persist_treats_any_write_escape_as_commit_indeterminate(
+async def test_persist_write_raising_reconciliation_releases_and_preserves_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     service = _RecordingService()
@@ -805,16 +805,25 @@ async def test_persist_treats_any_write_escape_as_commit_indeterminate(
     async def read_content(document_id: object, version_id: object) -> str:
         return "source"
 
-    async def write_escapes_post_commit(**kwargs: object) -> object:
-        raise RuntimeError("canary-post-commit-log-event")
+    async def write_raises_prewrite(**kwargs: object) -> object:
+        raise ChapterProductionV2ReconciliationError()
 
     monkeypatch.setattr("app.services.review_revision_saga._revalidate_revision_prewrite", revalidate)
     monkeypatch.setattr("app.services.review_revision_saga._candidates", candidates)
     monkeypatch.setattr(service.documents, "read_version_content", read_content)
-    monkeypatch.setattr(service.documents, "write_document", write_escapes_post_commit)
+    monkeypatch.setattr(service.documents, "write_document", write_raises_prewrite)
 
-    with pytest.raises(ChapterProductionV2CommitIndeterminateError):
+    with pytest.raises(ChapterProductionV2ReconciliationError):
         await saga.persist(plan, **_PERSIST_KWARGS)
 
-    assert service.release_calls == []
-    assert service.session.rolled_back == 1
+    assert service.release_calls == [
+        (
+            RUN_ID,
+            {
+                "expected_key": plan.operation_key,
+                "expected_attempt_id": plan.attempt_id,
+                "expected_kind": "review",
+                "expected_checkpoint_index": plan.attempt_checkpoint_index,
+            },
+        )
+    ]

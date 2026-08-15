@@ -490,7 +490,6 @@ class ReviewRevisionSaga:
                 identity = _identity(version, plan, project_id, chapter_id, workflow_run_id)
                 await service._commit()
                 return identity
-            wrote = True
             version = await service.documents.write_document(
                 document_id=plan.source_document_id,
                 content=revised_content,
@@ -505,6 +504,7 @@ class ReviewRevisionSaga:
                     "attempt_id": plan.attempt_id,
                 },
             )
+            wrote = True
             return _identity(version, plan, project_id, chapter_id, workflow_run_id)
         except ChapterProductionV2CommitIndeterminateError:
             raise
