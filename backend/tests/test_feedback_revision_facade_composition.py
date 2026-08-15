@@ -46,6 +46,22 @@ class _StubHandoff:
         return self.plan
 
 
+class _StubSaga:
+    def __init__(self, identity: object, updated: ChapterProductionV2Updated) -> None:
+        self.identity = identity
+        self.updated = updated
+        self.persist_calls: list[tuple[object, dict[str, object]]] = []
+        self.finalize_calls: list[tuple[object, dict[str, object]]] = []
+
+    async def persist(self, plan: object, **kwargs: object) -> object:
+        self.persist_calls.append((plan, kwargs))
+        return self.identity
+
+    async def finalize(self, identity: object, **kwargs: object) -> ChapterProductionV2Updated:
+        self.finalize_calls.append((identity, kwargs))
+        return self.updated
+
+
 def _service() -> ChapterProductionV2Service:
     return ChapterProductionV2Service(
         _FakeSession(),  # type: ignore[arg-type]
@@ -71,41 +87,15 @@ def _plan() -> FeedbackRevisionPlan:
 
 
 @pytest.mark.anyio
-async def test_facade_runs_phase3_after_the_handoff_returns_a_plan(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_facade_composes_the_extracted_persistence_and_finalization_saga() -> None:
     service = _service()
     plan = _plan()
-    stub = _StubHandoff(plan)
-    service._feedback_handoff = stub  # type: ignore[assignment]
-
-    written: list[dict[str, object]] = []
-    finalize_kwargs: dict[str, object] = {}
-
-    async def read_version_content(document_id: object, version_id: object) -> str:
-        return "source"
-
-    async def revalidate(**kwargs: object) -> None:
-        return None
-
-    async def write_document(**kwargs: object) -> object:
-        written.append(kwargs)
-        return SimpleNamespace(id=VERSION_ID)
-
-    async def finalize(**kwargs: object) -> object:
-        finalize_kwargs.update(kwargs)
-        return ChapterProductionV2Updated(RUN_ID, DOCUMENT_ID, VERSION_ID, None)
-
-    monkeypatch.setattr(service.documents, "read_version_content", read_version_content)
-    monkeypatch.setattr(service.documents, "write_document", write_document)
-    monkeypatch.setattr(service, "_revalidate_revision_prewrite", revalidate)
-    monkeypatch.setattr(service, "_finalize_feedback_revision", finalize)
-    monkeypatch.setattr(
-        "app.services.chapter_production_v2_service.merge_segment_replacements",
-        lambda source, segment_map, replacements: "revised",
-    )
-    monkeypatch.setattr(
-        "app.services.chapter_production_v2_service._validated_prospective_map",
-        lambda **kwargs: None,
-    )
+    identity = SimpleNamespace(operation_key=plan.operation_key)
+    updated = ChapterProductionV2Updated(RUN_ID, DOCUMENT_ID, VERSION_ID, ACTION_ID)
+    handoff = _StubHandoff(plan)
+    saga = _StubSaga(identity, updated)
+    service._feedback_handoff = handoff  # type: ignore[assignment]
+    service._feedback_saga = saga  # type: ignore[assignment]
 
     result = await service.request_user_feedback_revision(
         PROJECT_ID,
@@ -117,7 +107,7 @@ async def test_facade_runs_phase3_after_the_handoff_returns_a_plan(monkeypatch: 
         target_segment_ids=(SEGMENT_ID,),
     )
 
-    assert stub.calls == [
+    assert handoff.calls == [
         {
             "project_id": PROJECT_ID,
             "chapter_id": CHAPTER_ID,
@@ -128,13 +118,19 @@ async def test_facade_runs_phase3_after_the_handoff_returns_a_plan(monkeypatch: 
             "target_segment_ids": (SEGMENT_ID,),
         }
     ]
-    assert len(written) == 1
-    assert written[0]["document_id"] == DOCUMENT_ID
-    assert written[0]["content"] == "revised"
-    assert written[0]["expected_current_version_id"] == VERSION_ID
-    assert finalize_kwargs["operation_key"] == plan.operation_key
-    assert finalize_kwargs["attempt_id"] == plan.attempt_id
-    assert result == ChapterProductionV2Updated(RUN_ID, DOCUMENT_ID, VERSION_ID, None)
+    assert len(saga.persist_calls) == 1
+    assert saga.persist_calls[0][0] is plan
+    assert saga.persist_calls[0][1] == {
+        "project_id": PROJECT_ID,
+        "chapter_id": CHAPTER_ID,
+        "workflow_run_id": RUN_ID,
+        "action_request_id": ACTION_ID,
+        "actor_user_id": ACTOR_ID,
+    }
+    assert len(saga.finalize_calls) == 1
+    assert saga.finalize_calls[0][0] is identity
+    assert saga.finalize_calls[0][1] == {"actor_user_id": ACTOR_ID}
+    assert result == updated
 
 
 @pytest.mark.anyio
@@ -144,6 +140,8 @@ async def test_facade_returns_the_committed_stale_adoption_result() -> None:
     stub = _StubHandoff(_plan())
     stub.error = _StaleActionAdopted(adopted)
     service._feedback_handoff = stub  # type: ignore[assignment]
+    saga = _StubSaga(SimpleNamespace(), adopted)
+    service._feedback_saga = saga  # type: ignore[assignment]
 
     result = await service.request_user_feedback_revision(
         PROJECT_ID,
@@ -156,13 +154,20 @@ async def test_facade_returns_the_committed_stale_adoption_result() -> None:
     )
 
     assert result == adopted
+    assert saga.persist_calls == []
+    assert saga.finalize_calls == []
 
 
 @pytest.mark.anyio
 async def test_facade_rejects_oversized_feedback_before_delegation() -> None:
     service = _service()
     stub = _StubHandoff(_plan())
+    saga = _StubSaga(
+        SimpleNamespace(),
+        ChapterProductionV2Updated(RUN_ID, DOCUMENT_ID, VERSION_ID, None),
+    )
     service._feedback_handoff = stub  # type: ignore[assignment]
+    service._feedback_saga = saga  # type: ignore[assignment]
 
     with pytest.raises(ChapterProductionV2ValidationError):
         await service.request_user_feedback_revision(
@@ -176,4 +181,4 @@ async def test_facade_rejects_oversized_feedback_before_delegation() -> None:
         )
 
     assert stub.calls == []
-
+    assert saga.persist_calls == []

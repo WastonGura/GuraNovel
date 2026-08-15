@@ -1193,10 +1193,10 @@ async def test_reconcile_committed_feedback_version_never_reinvokes_provider(
     )
     target = next(item for item in segment_map.segments if item.kind.value == "paragraph")
 
-    async def lose_finalize_ack(**_: object) -> object:
+    async def lose_finalize_ack(*args: object, **kwargs: object) -> object:
         raise ChapterProductionV2CommitIndeterminateError()
 
-    monkeypatch.setattr(service, "_finalize_feedback_revision", lose_finalize_ack)
+    monkeypatch.setattr(service._feedback_saga, "finalize", lose_finalize_ack)
     with pytest.raises(ChapterProductionV2CommitIndeterminateError):
         await service.request_user_feedback_revision(
             project.id,
@@ -1462,10 +1462,10 @@ async def test_feedback_reconciliation_error_is_preserved_after_provider_call(
     )
     target = next(item for item in segment_map.segments if item.kind.value == "paragraph")
 
-    async def stale_generation(**kwargs: object) -> None:
+    async def stale_generation(*args: object, **kwargs: object) -> None:
         raise ChapterProductionV2ReconciliationError()
 
-    monkeypatch.setattr(service, "_revalidate_revision_prewrite", stale_generation)
+    monkeypatch.setattr(service._feedback_saga, "persist", stale_generation)
     with pytest.raises(ChapterProductionV2ReconciliationError):
         await service.request_user_feedback_revision(
             project.id,
