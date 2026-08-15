@@ -96,6 +96,10 @@ from app.services.author_accept_coordination import (
 from app.services.initial_draft_lifecycle import InitialCandidateNotApplicable, InitialDraftLifecycle, InitialRecoveryRoute
 from app.services.manual_edit_saga import ManualEditCoordinator
 from app.services.feedback_revision_handoff import FeedbackRevisionHandoff
+from app.services.review_revision_handoff import (
+    ReviewRevisionHandoff,
+    ReviewRevisionPlan,
+)
 from app.services.feedback_candidate_saga import (
     FeedbackCandidateIdentity,
     FeedbackCandidateSaga,
@@ -386,6 +390,7 @@ class ChapterProductionV2Service:
         self._author_accept = AuthorAcceptCoordinator(self)
         self._manual_edit = ManualEditCoordinator(self)
         self._feedback_handoff = FeedbackRevisionHandoff(self, self._phase_sessions, self.revision_agent)
+        self._review_handoff = ReviewRevisionHandoff(self, self.revision_agent)
         self._feedback_saga = FeedbackCandidateSaga(
             self, merge_segment_replacements, _validated_prospective_map
         )
@@ -563,201 +568,108 @@ class ChapterProductionV2Service:
         self._validated_ids(project_id, chapter_id, workflow_run_id, actor_user_id)
         report_ids = self._validated_uuid_sequence(report_ids, maximum=16)
         target_segment_ids = self._validated_uuid_sequence(target_segment_ids, maximum=64)
-        await self._recover_failed_attempt(
+        plan = await self._review_handoff.execute(
+            project_id=project_id,
+            chapter_id=chapter_id,
+            workflow_run_id=workflow_run_id,
+            report_ids=report_ids,
+            target_segment_ids=target_segment_ids,
+            actor_user_id=actor_user_id,
+        )
+        return await self._persist_review_revision(
+            plan,
             project_id=project_id,
             chapter_id=chapter_id,
             workflow_run_id=workflow_run_id,
             actor_user_id=actor_user_id,
-            kind="review",
-            target_segment_ids=target_segment_ids,
-            report_ids=report_ids,
         )
-        try:
-            context = await self._review_revision_context(
-                project_id=project_id,
-                chapter_id=chapter_id,
-                workflow_run_id=workflow_run_id,
-                report_ids=report_ids,
-                actor_user_id=actor_user_id,
-            )
-            if self.revision_agent is None:
-                raise ChapterProductionV2ProviderError() from None
-            request = self._review_revision_request(
-                context=context,
-                project_id=project_id,
-                chapter_id=chapter_id,
-                target_segment_ids=target_segment_ids,
-            )
-            report_input_hash = self._review_report_input_hash(context.reports)
-            operation_key = self._review_operation_key(
-                workflow_run_id=workflow_run_id,
-                source_version_id=context.version.id,
-                report_ids=tuple(report_ids),
-                target_segment_ids=tuple(target_segment_ids),
-                report_input_hash=report_input_hash,
-            )
-            attempt_id = _new_attempt_id()
-            attempt_checkpoint_index = context.checkpoint.checkpoint_index
-            metadata = self._run_metadata(context.run)
-            if metadata["provider_attempt"] is not None:
-                raise ChapterProductionV2ReconciliationError()
-            self._set_attempt(
-                context.run,
-                self._attempt_payload(
-                    attempt_id=attempt_id,
-                    key=operation_key,
-                    kind="review",
-                    checkpoint_index=attempt_checkpoint_index,
-                    source_document_id=context.document.id,
-                    source_version_id=context.version.id,
-                    target_segment_ids=target_segment_ids,
-                    report_ids=report_ids,
-                    report_input_hash=report_input_hash,
-                ),
-            )
-            await self._commit()
-        except ChapterProductionV2CommitIndeterminateError:
-            raise
-        except ChapterProductionV2ProviderError:
-            await self._rollback()
-            raise
-        except ChapterProductionV2ReconciliationError:
-            await self._rollback()
-            raise
-        except ChapterProductionV2ValidationError:
-            await self._rollback()
-            raise
-        except Exception:
-            await self._rollback()
-            raise _invalid() from None
-        cancellation = None
-        provider_failure: ChapterFailureCode | None = None
-        try:
-            candidate = await self.revision_agent.review_driven_revision(request)
-        except asyncio.CancelledError as error:
-            cancellation = _safe_cancelled_error(error)
-        except ProviderTimeoutError:
-            provider_failure = ChapterFailureCode.PROVIDER_TIMEOUT
-        except ProviderInvalidOutputError:
-            provider_failure = ChapterFailureCode.INVALID_PROVIDER_OUTPUT
-        except Exception:
-            provider_failure = ChapterFailureCode.PROVIDER_UNAVAILABLE
-        if cancellation is not None:
+
+    async def _persist_review_revision(
+        self,
+        plan: ReviewRevisionPlan,
+        *,
+        project_id: UUID,
+        chapter_id: UUID,
+        workflow_run_id: UUID,
+        actor_user_id: UUID,
+    ) -> ChapterProductionV2Updated:
+        """Persist the claimed provider result and finalize; the claim committed already."""
+
+        async def _release_claim() -> None:
             await self._release_attempt(
-                workflow_run_id,
-                expected_key=operation_key,
-                expected_attempt_id=attempt_id,
-                expected_kind="review",
-                expected_checkpoint_index=attempt_checkpoint_index,
-            )
-            raise cancellation from None
-        if provider_failure is not None:
-            await self._fail_provider(
-                workflow_run_id,
-                provider_failure,
-                expected_status=ChapterProductionStatus.REVIEW_REVISION,
-                expected_checkpoint_index=attempt_checkpoint_index,
-                expected_attempt_key=operation_key,
-                expected_attempt_id=attempt_id,
-            )
-            raise ChapterProductionV2ProviderError() from None
-        replacements = {item.segment_id: item.content for item in candidate.segments}
+                workflow_run_id, expected_key=plan.operation_key,
+                expected_attempt_id=plan.attempt_id, expected_kind="review",
+                expected_checkpoint_index=plan.attempt_checkpoint_index)
+
         try:
-            source_content = await self.documents.read_version_content(
-                context.document.id, context.version.id
-            )
-            revised_content = merge_segment_replacements(
-                source_content, context.segment_map, replacements
-            )
-            current = await self._review_revision_context(
-                project_id=project_id,
-                chapter_id=chapter_id,
-                workflow_run_id=workflow_run_id,
-                report_ids=report_ids,
-                actor_user_id=actor_user_id,
-            )
-            if (
-                current.segment_map.canonical_bytes() != context.segment_map.canonical_bytes()
-                or self._review_report_input_hash(current.reports) != report_input_hash
-            ):
-                raise _invalid()
-            current_attempt = self._run_metadata(current.run)["provider_attempt"]
-            if (
-                type(current_attempt) is not dict
-                or current_attempt.get("key") != operation_key
-                or current_attempt.get("attempt_id") != attempt_id
-                or current_attempt.get("kind") != "review"
-                or current_attempt.get("checkpoint_index") != attempt_checkpoint_index
-                or current_attempt.get("report_input_hash") != report_input_hash
-                or current_attempt.get("status") != _ATTEMPT_STATUS_CLAIMED
-            ):
-                raise ChapterProductionV2ReconciliationError()
-            _validated_prospective_map(
-                project_id=project_id,
-                chapter_id=chapter_id,
-                document_id=context.document.id,
-                version_id=context.version.id,
-                content=revised_content,
-            )
-            version = await self.documents.write_document(
-                document_id=context.document.id,
-                content=revised_content,
-                source=DocumentSource.WRITER_AGENT,
-                expected_current_version_id=context.version.id,
-                agent_role="revision_agent",
-                workflow_run_id=workflow_run_id,
-                change_summary="Applied a Chapter Production V2 review revision.",
-                version_metadata={
-                    "contract_version": _CONTRACT_VERSION,
-                    "operation_key": operation_key,
-                    "attempt_id": attempt_id,
-                },
-            )
+            version = await self._write_review_revision(
+                plan, project_id=project_id, chapter_id=chapter_id,
+                workflow_run_id=workflow_run_id, actor_user_id=actor_user_id)
         except DocumentCommitIndeterminateError:
             await self._rollback()
             raise ChapterProductionV2CommitIndeterminateError() from None
         except ChapterProductionV2CommitIndeterminateError:
             raise
-        except ChapterProductionV2ReconciliationError:
-            await self._release_attempt(
-                workflow_run_id,
-                expected_key=operation_key,
-                expected_attempt_id=attempt_id,
-                expected_kind="review",
-                expected_checkpoint_index=attempt_checkpoint_index,
-            )
-            raise
-        except ChapterProductionV2ValidationError:
-            await self._release_attempt(
-                workflow_run_id,
-                expected_key=operation_key,
-                expected_attempt_id=attempt_id,
-                expected_kind="review",
-                expected_checkpoint_index=attempt_checkpoint_index,
-            )
+        except (ChapterProductionV2ReconciliationError, ChapterProductionV2ValidationError):
+            await _release_claim()
             raise
         except Exception:
-            await self._release_attempt(
-                workflow_run_id,
-                expected_key=operation_key,
-                expected_attempt_id=attempt_id,
-                expected_kind="review",
-                expected_checkpoint_index=attempt_checkpoint_index,
-            )
+            await _release_claim()
             raise _invalid() from None
         return await self._finalize_review_revision(
-            project_id=project_id,
-            chapter_id=chapter_id,
-            workflow_run_id=workflow_run_id,
-            document_id=context.document.id,
-            version_id=version.id,
-            expected_parent_version_id=context.version.id,
-            operation_key=operation_key,
-            attempt_id=attempt_id,
-            report_ids=tuple(report_ids),
-            report_input_hash=report_input_hash,
-            actor_user_id=actor_user_id,
-        )
+            project_id=project_id, chapter_id=chapter_id, workflow_run_id=workflow_run_id,
+            document_id=plan.source_document_id, version_id=version.id,
+            expected_parent_version_id=plan.source_version_id,
+            operation_key=plan.operation_key, attempt_id=plan.attempt_id,
+            report_ids=plan.report_ids, report_input_hash=plan.report_input_hash,
+            actor_user_id=actor_user_id)
+
+    async def _write_review_revision(
+        self,
+        plan: ReviewRevisionPlan,
+        *,
+        project_id: UUID,
+        chapter_id: UUID,
+        workflow_run_id: UUID,
+        actor_user_id: UUID,
+    ) -> DocumentVersion:
+        replacements = {item.segment_id: item.content for item in plan.candidate.segments}
+        source_content = await self.documents.read_version_content(
+            plan.source_document_id, plan.source_version_id)
+        revised_content = merge_segment_replacements(
+            source_content, plan.segment_map, replacements)
+        current = await self._review_revision_context(
+            project_id=project_id, chapter_id=chapter_id, workflow_run_id=workflow_run_id,
+            report_ids=plan.report_ids, actor_user_id=actor_user_id)
+        if (
+            current.segment_map.canonical_bytes() != plan.segment_map.canonical_bytes()
+            or self._review_report_input_hash(current.reports) != plan.report_input_hash
+        ):
+            raise _invalid()
+        current_attempt = self._run_metadata(current.run)["provider_attempt"]
+        if (
+            type(current_attempt) is not dict
+            or current_attempt.get("key") != plan.operation_key
+            or current_attempt.get("attempt_id") != plan.attempt_id
+            or current_attempt.get("kind") != "review"
+            or current_attempt.get("checkpoint_index") != plan.attempt_checkpoint_index
+            or current_attempt.get("report_input_hash") != plan.report_input_hash
+            or current_attempt.get("status") != _ATTEMPT_STATUS_CLAIMED
+        ):
+            raise ChapterProductionV2ReconciliationError()
+        _validated_prospective_map(
+            project_id=project_id, chapter_id=chapter_id,
+            document_id=plan.source_document_id, version_id=plan.source_version_id,
+            content=revised_content)
+        return await self.documents.write_document(
+            document_id=plan.source_document_id, content=revised_content,
+            source=DocumentSource.WRITER_AGENT,
+            expected_current_version_id=plan.source_version_id,
+            agent_role="revision_agent", workflow_run_id=workflow_run_id,
+            change_summary="Applied a Chapter Production V2 review revision.",
+            version_metadata={
+                "contract_version": _CONTRACT_VERSION, "operation_key": plan.operation_key,
+                "attempt_id": plan.attempt_id})
 
     async def execute_current_review(
         self,
