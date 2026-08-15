@@ -93,6 +93,7 @@ class FeedbackCandidateIdentity:
     document_id: UUID
     version_id: UUID
     source_version_id: UUID
+    source_content_hash: str
     content_hash: str
     operation_key: str
     attempt_id: str
@@ -111,6 +112,7 @@ class FeedbackCandidateIdentity:
                     self.source_version_id,
                 )
             )
+            or not _valid_hash(self.source_content_hash)
             or not _valid_hash(self.content_hash)
             or not _valid_hash(self.operation_key)
             or not _valid_attempt_token(self.attempt_id)
@@ -141,6 +143,7 @@ def _identity(
         document_id=plan.source_document_id,
         version_id=UUID(str(version.id)),
         source_version_id=plan.source_version_id,
+        source_content_hash=plan.source_content_hash,
         content_hash=version.content_hash,
         operation_key=plan.operation_key,
         attempt_id=plan.attempt_id,
@@ -183,6 +186,8 @@ def _validate_candidate(
 async def _candidates(
     session: object,
     plan: FeedbackRevisionPlan,
+    project_id: UUID,
+    chapter_id: UUID,
     workflow_run_id: UUID,
 ) -> list[tuple[Document, DocumentVersion]]:
     metadata_key = {
@@ -211,7 +216,11 @@ async def _candidates(
         await session.scalars(
             select(Document)
             .options(selectinload(Document.project))
-            .where(Document.id.in_(tuple(version.document_id for version in versions)))
+            .where(
+                Document.id.in_(tuple(version.document_id for version in versions)),
+                Document.project_id == project_id,
+                Document.chapter_id == chapter_id,
+            )
             .with_for_update()
             .execution_options(populate_existing=True)
         )
@@ -222,13 +231,25 @@ async def _candidates(
     return [(by_id[version.document_id], version) for version in versions]
 
 
-async def _release(service: object, plan: FeedbackRevisionPlan, workflow_run_id: UUID) -> None:
+async def _release(service: object, plan: object, workflow_run_id: UUID) -> None:
+    """Release the exact claimed attempt only when the plan fields are usable."""
+
+    key = getattr(plan, "operation_key", None)
+    token = getattr(plan, "attempt_id", None)
+    index = getattr(plan, "attempt_checkpoint_index", None)
+    if (
+        type(key) is not str
+        or type(token) is not str
+        or type(index) is not int
+        or not _valid_uuid(workflow_run_id)
+    ):
+        return
     await service._release_attempt(
         workflow_run_id,
-        expected_key=plan.operation_key,
-        expected_attempt_id=plan.attempt_id,
+        expected_key=key,
+        expected_attempt_id=token,
         expected_kind="feedback",
-        expected_checkpoint_index=plan.attempt_checkpoint_index,
+        expected_checkpoint_index=index,
         restore_feedback=True,
     )
 
@@ -362,6 +383,12 @@ async def _finalize_feedback_revision(
     state, checkpoint = await service._locked_state(run)
     if state.status is not ChapterProductionStatus.DRAFTING or state.awaiting_user:
         raise _invalid() from None
+    if (
+        state.document_id != str(identity.document_id)
+        or state.document_version_id != str(identity.source_version_id)
+        or state.content_hash != identity.source_content_hash
+    ):
+        raise _invalid() from None
     attempt = service._run_metadata(run)["provider_attempt"]
     if not _exact_attempt(
         attempt,
@@ -446,68 +473,75 @@ class FeedbackCandidateSaga:
         actor_user_id: UUID,
     ) -> FeedbackCandidateIdentity:
         service = self.service
-        _validate_persist_inputs(
-            plan, project_id, chapter_id, workflow_run_id, action_request_id, actor_user_id
-        )
+        wrote = False
         try:
+            _validate_persist_inputs(
+                plan, project_id, chapter_id, workflow_run_id, action_request_id, actor_user_id
+            )
+            await _revalidate_revision_prewrite(
+                service, plan=plan, project_id=project_id, chapter_id=chapter_id,
+                workflow_run_id=workflow_run_id, action_request_id=action_request_id,
+                actor_user_id=actor_user_id,
+            )
             source_content = await service.documents.read_version_content(
                 plan.source_document_id, plan.source_version_id
             )
             revised_content = self._merge(source_content, plan.segment_map, _replacements(plan))
-            await _revalidate_revision_prewrite(
-                service,
-                plan=plan,
-                project_id=project_id,
-                chapter_id=chapter_id,
-                workflow_run_id=workflow_run_id,
-                action_request_id=action_request_id,
-                actor_user_id=actor_user_id,
-            )
             self._prospective_map(
-                project_id=project_id,
-                chapter_id=chapter_id,
-                document_id=plan.source_document_id,
-                version_id=plan.source_version_id,
+                project_id=project_id, chapter_id=chapter_id,
+                document_id=plan.source_document_id, version_id=plan.source_version_id,
                 content=revised_content,
             )
-            candidates = await _candidates(service.session, plan, workflow_run_id)
+            candidates = await _candidates(
+                service.session, plan, project_id, chapter_id, workflow_run_id
+            )
             if len(candidates) > 1:
                 raise _reconcile() from None
             if candidates:
                 document, version = candidates[0]
                 _validate_candidate(
-                    document, version, revised_content, plan, project_id, chapter_id,
-                    workflow_run_id,
+                    document, version, revised_content, plan, project_id, chapter_id, workflow_run_id,
                 )
-            else:
-                version = await service.documents.write_document(
-                    document_id=plan.source_document_id,
-                    content=revised_content,
-                    source=DocumentSource.WRITER_AGENT,
-                    expected_current_version_id=plan.source_version_id,
-                    agent_role="revision_agent",
-                    workflow_run_id=workflow_run_id,
-                    change_summary="Applied a Chapter Production V2 feedback revision.",
-                    version_metadata={
-                        "contract_version": _CONTRACT_VERSION,
-                        "operation_key": plan.operation_key,
-                        "attempt_id": plan.attempt_id,
-                    },
+                identity = _identity(
+                    version, plan, project_id, chapter_id, workflow_run_id, action_request_id
                 )
+                await service._commit()
+                return identity
+            version = await service.documents.write_document(
+                document_id=plan.source_document_id,
+                content=revised_content,
+                source=DocumentSource.WRITER_AGENT,
+                expected_current_version_id=plan.source_version_id,
+                agent_role="revision_agent",
+                workflow_run_id=workflow_run_id,
+                change_summary="Applied a Chapter Production V2 feedback revision.",
+                version_metadata={
+                    "contract_version": _CONTRACT_VERSION,
+                    "operation_key": plan.operation_key,
+                    "attempt_id": plan.attempt_id,
+                },
+            )
+            wrote = True
+            return _identity(
+                version, plan, project_id, chapter_id, workflow_run_id, action_request_id
+            )
         except ChapterProductionV2CommitIndeterminateError:
             raise
         except DocumentCommitIndeterminateError:
             await service._rollback()
             raise ChapterProductionV2CommitIndeterminateError() from None
         except (ChapterProductionV2ValidationError, ChapterProductionV2ReconciliationError):
+            if wrote:
+                await service._rollback()
+                raise ChapterProductionV2CommitIndeterminateError() from None
             await _release(service, plan, workflow_run_id)
             raise
         except Exception:
+            if wrote:
+                await service._rollback()
+                raise ChapterProductionV2CommitIndeterminateError() from None
             await _release(service, plan, workflow_run_id)
             raise _invalid() from None
-        return _identity(
-            version, plan, project_id, chapter_id, workflow_run_id, action_request_id
-        )
 
     async def finalize(
         self,

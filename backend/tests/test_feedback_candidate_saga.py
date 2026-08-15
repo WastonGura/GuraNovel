@@ -7,6 +7,7 @@ from uuid import UUID
 import pytest
 
 from app.services.chapter_production_v2_contracts import (
+    ChapterProductionV2CommitIndeterminateError,
     ChapterProductionV2ReconciliationError,
     ChapterProductionV2Updated,
     ChapterProductionV2ValidationError,
@@ -14,9 +15,13 @@ from app.services.chapter_production_v2_contracts import (
 from app.services.feedback_candidate_saga import (
     FeedbackCandidateIdentity,
     FeedbackCandidateSaga,
+    _candidates,
     _exact_attempt,
+    _finalize_feedback_revision,
+    _release,
 )
 from app.services.feedback_revision_handoff import FeedbackRevisionPlan
+from app.workflows.chapter_production import ChapterProductionStatus
 
 
 PROJECT_ID = UUID("11111111-1111-4111-8111-111111111111")
@@ -55,6 +60,7 @@ def _identity() -> FeedbackCandidateIdentity:
         document_id=DOCUMENT_ID,
         version_id=VERSION_ID,
         source_version_id=VERSION_ID,
+        source_content_hash="a" * 64,
         content_hash="c" * 64,
         operation_key="b" * 64,
         attempt_id=str(UUID(int=1)),
@@ -73,6 +79,10 @@ _PERSIST_KWARGS: dict[str, object] = {
 class _FakeSession:
     def __init__(self) -> None:
         self.rolled_back = 0
+        self.committed = 0
+
+    async def commit(self) -> None:
+        self.committed += 1
 
     async def rollback(self) -> None:
         self.rolled_back += 1
@@ -104,6 +114,9 @@ class _RecordingService:
 
     async def _release_attempt(self, workflow_run_id: object, **kwargs: object) -> None:
         self.release_calls.append((workflow_run_id, kwargs))
+
+    async def _commit(self) -> None:
+        await self.session.commit()
 
     async def _rollback(self) -> None:
         self.rollback_calls += 1
@@ -204,6 +217,10 @@ async def test_persist_writes_exactly_one_candidate_when_none_exists(
         order.append("candidates")
         return []
 
+    async def read_content(document_id: object, version_id: object) -> str:
+        order.append("read")
+        return "source"
+
     def identity(value: object, *args: object, **kwargs: object) -> object:
         order.append("identity")
         return SimpleNamespace(version_id=value.id)
@@ -211,15 +228,15 @@ async def test_persist_writes_exactly_one_candidate_when_none_exists(
     monkeypatch.setattr("app.services.feedback_candidate_saga._revalidate_revision_prewrite", revalidate)
     monkeypatch.setattr("app.services.feedback_candidate_saga._candidates", candidates)
     monkeypatch.setattr("app.services.feedback_candidate_saga._identity", identity)
+    monkeypatch.setattr(service.documents, "read_version_content", read_content)
 
     result = await saga.persist(plan, **_PERSIST_KWARGS)
 
     assert result.version_id == VERSION_ID
-    assert service.documents.read_calls == [(DOCUMENT_ID, VERSION_ID)]
     assert len(service.documents.write_calls) == 1
     assert service.documents.write_calls[0]["document_id"] == DOCUMENT_ID
     assert service.documents.write_calls[0]["content"] == "revised"
-    assert order == ["revalidate", "candidates", "identity"]
+    assert order == ["revalidate", "read", "candidates", "identity"]
     assert service.release_calls == []
 
 
@@ -255,6 +272,7 @@ async def test_persist_adopts_one_exact_candidate_without_writing(
     assert result.version_id == VERSION_ID
     assert service.documents.write_calls == []
     assert service.release_calls == []
+    assert service.session.committed == 1
 
 
 @pytest.mark.anyio
@@ -381,3 +399,151 @@ async def test_finalize_returns_the_next_author_gate(
 
     assert await saga.finalize(identity, actor_user_id=ACTOR_ID) == updated
     assert service.rollback_calls == 0
+
+
+class _CandidateScalarSession:
+    def __init__(self, versions: list[object], documents: list[object]) -> None:
+        self.versions = versions
+        self.documents = documents
+        self.statements: list[object] = []
+
+    async def scalars(self, statement: object) -> list[object]:
+        self.statements.append(statement)
+        if len(self.statements) == 1:
+            return self.versions
+        return self.documents
+
+
+@pytest.mark.anyio
+async def test_candidates_filters_documents_by_project_and_chapter() -> None:
+    plan = _plan()
+    session = _CandidateScalarSession(
+        [SimpleNamespace(document_id=DOCUMENT_ID)], []
+    )
+
+    with pytest.raises(ChapterProductionV2ReconciliationError):
+        await _candidates(session, plan, PROJECT_ID, CHAPTER_ID, RUN_ID)
+
+    assert len(session.statements) == 2
+    sql = str(session.statements[1].compile(compile_kwargs={"literal_binds": True}))
+    assert "documents.project_id =" in sql
+    assert "documents.chapter_id =" in sql
+
+
+class _FinalizeStubService:
+    def __init__(self, state: object) -> None:
+        self.state = state
+
+    async def _require_project_owner(self, *args: object, **kwargs: object) -> None:
+        return None
+
+    async def _chapter(self, *args: object, **kwargs: object) -> object:
+        return SimpleNamespace(id=CHAPTER_ID, current_draft_document_id=DOCUMENT_ID)
+
+    async def _run(self, *args: object, **kwargs: object) -> object:
+        return SimpleNamespace(id=RUN_ID)
+
+    async def _locked_state(self, run: object) -> tuple[object, object]:
+        return self.state, SimpleNamespace(checkpoint_index=1)
+
+
+@pytest.mark.anyio
+async def test_finalize_rechecks_state_binding_before_creating_action() -> None:
+    identity = _identity()
+    state = SimpleNamespace(
+        status=ChapterProductionStatus.DRAFTING,
+        awaiting_user=False,
+        document_id=str(UUID(int=999)),
+        document_version_id=str(identity.source_version_id),
+        content_hash=identity.source_content_hash,
+    )
+
+    with pytest.raises(ChapterProductionV2ValidationError):
+        await _finalize_feedback_revision(_FinalizeStubService(state), identity, ACTOR_ID)
+
+
+@pytest.mark.anyio
+async def test_persist_maps_post_write_identity_failure_to_commit_indeterminate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = _RecordingService()
+    version = SimpleNamespace(id=VERSION_ID, content_hash="c" * 64)
+    service.documents.written_version = version
+    saga = FeedbackCandidateSaga(service, lambda *a, **k: "revised", lambda **k: None)
+    plan = _plan()
+
+    async def revalidate(*args: object, **kwargs: object) -> None:
+        return None
+
+    async def candidates(*args: object, **kwargs: object) -> list[object]:
+        return []
+
+    def identity(*args: object, **kwargs: object) -> object:
+        raise RuntimeError("post-commit canary")
+
+    monkeypatch.setattr("app.services.feedback_candidate_saga._revalidate_revision_prewrite", revalidate)
+    monkeypatch.setattr("app.services.feedback_candidate_saga._candidates", candidates)
+    monkeypatch.setattr("app.services.feedback_candidate_saga._identity", identity)
+
+    with pytest.raises(ChapterProductionV2CommitIndeterminateError):
+        await saga.persist(plan, **_PERSIST_KWARGS)
+
+    assert service.release_calls == []
+    assert service.session.rolled_back == 1
+
+
+@pytest.mark.anyio
+async def test_persist_malformed_plan_with_usable_attempt_fields_releases_attempt() -> None:
+    service = _RecordingService()
+    saga = FeedbackCandidateSaga(service, lambda *a, **k: "revised", lambda **k: None)
+    plan = FeedbackRevisionPlan(
+        source_document_id=DOCUMENT_ID,
+        source_version_id=VERSION_ID,
+        source_content_hash="a" * 64,
+        operation_key="b" * 64,
+        attempt_id=str(UUID(int=1)),
+        attempt_checkpoint_index=1,
+        feedback="plain feedback",
+        target_segment_ids=[SEGMENT_ID],
+        segment_map=SimpleNamespace(),
+        candidate=SimpleNamespace(
+            segments=(SimpleNamespace(segment_id=SEGMENT_ID, content="New scene."),)
+        ),
+    )
+
+    with pytest.raises(ChapterProductionV2ValidationError):
+        await saga.persist(plan, **_PERSIST_KWARGS)
+
+    assert service.release_calls == [
+        (
+            RUN_ID,
+            {
+                "expected_key": plan.operation_key,
+                "expected_attempt_id": plan.attempt_id,
+                "expected_kind": "feedback",
+                "expected_checkpoint_index": plan.attempt_checkpoint_index,
+                "restore_feedback": True,
+            },
+        )
+    ]
+
+
+@pytest.mark.anyio
+async def test_release_skips_unusable_attempt_fields_without_raw_error() -> None:
+    service = _RecordingService()
+    plan = FeedbackRevisionPlan(
+        source_document_id=DOCUMENT_ID,
+        source_version_id=VERSION_ID,
+        source_content_hash="a" * 64,
+        operation_key=None,
+        attempt_id=None,
+        attempt_checkpoint_index=None,
+        feedback="plain feedback",
+        target_segment_ids=(SEGMENT_ID,),
+        segment_map=SimpleNamespace(),
+        candidate=SimpleNamespace(segments=()),
+    )
+
+    await _release(service, plan, RUN_ID)
+
+    assert service.release_calls == []

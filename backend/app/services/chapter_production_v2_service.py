@@ -1466,6 +1466,7 @@ class ChapterProductionV2Service:
                         document_id=document.id,
                         version_id=version.id,
                         source_version_id=UUID(state.document_version_id),
+                        source_content_hash=state.content_hash,
                         content_hash=version.content_hash,
                         operation_key=operation_key,
                         attempt_id=version.metadata_["attempt_id"],
