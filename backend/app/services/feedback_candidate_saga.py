@@ -46,6 +46,18 @@ def _valid_uuid(value: object) -> bool:
     return type(value) is UUID and value.int != 0
 
 
+def _uuid_facts(value: object) -> tuple[bool, bool, bool, bool, str]:
+    """WIP diagnostic: content-free facts about one UUID-shaped value."""
+
+    return (
+        type(value) is UUID,
+        value.__class__ is UUID,  # type: ignore[attr-defined]
+        getattr(value, "int", 0) != 0,
+        value == UUID(int=0),
+        type(UUID).__name__,
+    )
+
+
 def _valid_hash(value: object) -> bool:
     return (
         type(value) is str
@@ -301,6 +313,9 @@ def _validate_persist_inputs(
                 type(getattr(plan, "attempt_checkpoint_index", None)).__name__,
                 type(getattr(plan, "feedback", None)).__name__,
                 type(getattr(plan, "target_segment_ids", None)).__name__,
+                _uuid_facts(getattr(plan, "source_document_id", None)),
+                _uuid_facts(getattr(plan, "source_version_id", None)),
+                _uuid_facts(project_id),
             ),
             flush=True,
         )
