@@ -2177,7 +2177,7 @@ async def test_review_finalize_revalidates_claimed_report_after_document_commit(
     target = next(
         item.segment_id for item in segment_map.segments if item.kind.value == "paragraph"
     )
-    original_finalize = service._finalize_review_revision
+    original_finalize = service._review_saga.finalize
     engine = create_async_engine(integration_database_url, pool_pre_ping=True)
     sessions = async_sessionmaker(engine, expire_on_commit=False)
 
@@ -2192,7 +2192,7 @@ async def test_review_finalize_revalidates_claimed_report_after_document_commit(
             await mutation.commit()
         return await original_finalize(**kwargs)  # type: ignore[arg-type]
 
-    monkeypatch.setattr(service, "_finalize_review_revision", mutate_then_finalize)
+    monkeypatch.setattr(service._review_saga, "finalize", mutate_then_finalize)
     try:
         with pytest.raises(ChapterProductionV2ReconciliationError):
             await service.execute_review_revision(
