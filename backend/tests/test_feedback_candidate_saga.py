@@ -18,6 +18,7 @@ from app.services.feedback_candidate_saga import (
     _candidates,
     _exact_attempt,
     _finalize_feedback_revision,
+    _normalize_uuid,
     _release,
     _validate_persist_inputs,
 )
@@ -571,3 +572,31 @@ def test_validate_persist_inputs_accepts_real_handoff_plan_shape() -> None:
     _validate_persist_inputs(
         plan, PROJECT_ID, CHAPTER_ID, RUN_ID, ACTION_ID, ACTOR_ID
     )
+
+
+def test_validate_persist_inputs_accepts_pgproto_uuid_values() -> None:
+    import asyncpg
+    from uuid import uuid4
+
+    from app.workspace.hashing import sha256_content
+
+    source_document_id = asyncpg.pgproto.pgproto.UUID(uuid4().hex)
+    source_version_id = asyncpg.pgproto.pgproto.UUID(uuid4().hex)
+    plan = FeedbackRevisionPlan(
+        source_document_id=source_document_id,
+        source_version_id=source_version_id,
+        source_content_hash=sha256_content("source content"),
+        operation_key=sha256_content("operation key"),
+        attempt_id=str(uuid4()),
+        attempt_checkpoint_index=2,
+        feedback="plain feedback",
+        target_segment_ids=(SEGMENT_ID,),
+        segment_map=SimpleNamespace(),
+        candidate=SimpleNamespace(segments=()),
+    )
+
+    _validate_persist_inputs(
+        plan, PROJECT_ID, CHAPTER_ID, RUN_ID, ACTION_ID, ACTOR_ID
+    )
+    assert _normalize_uuid(plan.source_document_id) == UUID(str(plan.source_document_id))
+    assert _normalize_uuid(plan.source_version_id) == UUID(str(plan.source_version_id))
