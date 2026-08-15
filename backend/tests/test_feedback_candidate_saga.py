@@ -19,6 +19,7 @@ from app.services.feedback_candidate_saga import (
     _exact_attempt,
     _finalize_feedback_revision,
     _release,
+    _validate_persist_inputs,
 )
 from app.services.feedback_revision_handoff import FeedbackRevisionPlan
 from app.workflows.chapter_production import ChapterProductionStatus
@@ -547,3 +548,26 @@ async def test_release_skips_unusable_attempt_fields_without_raw_error() -> None
     await _release(service, plan, RUN_ID)
 
     assert service.release_calls == []
+
+
+def test_validate_persist_inputs_accepts_real_handoff_plan_shape() -> None:
+    from uuid import uuid4
+
+    from app.workspace.hashing import sha256_content
+
+    plan = FeedbackRevisionPlan(
+        source_document_id=DOCUMENT_ID,
+        source_version_id=VERSION_ID,
+        source_content_hash=sha256_content("source content"),
+        operation_key=sha256_content("operation key"),
+        attempt_id=str(uuid4()),
+        attempt_checkpoint_index=2,
+        feedback="plain feedback",
+        target_segment_ids=(SEGMENT_ID,),
+        segment_map=SimpleNamespace(),
+        candidate=SimpleNamespace(segments=()),
+    )
+
+    _validate_persist_inputs(
+        plan, PROJECT_ID, CHAPTER_ID, RUN_ID, ACTION_ID, ACTOR_ID
+    )

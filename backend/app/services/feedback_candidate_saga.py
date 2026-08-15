@@ -31,6 +31,7 @@ from app.workspace.hashing import sha256_content
 _CONTRACT_VERSION = "chapter-production-v2"
 _AUTHOR_ACTION_TYPE = "chapter_author_revision"
 _ATTEMPT_STATUS_CLAIMED = "claimed"
+_DEBUG_PERSIST_INPUTS = True  # WIP diagnostic: remove after CI reveals the failing condition
 
 
 def _invalid() -> ChapterProductionV2ValidationError:
@@ -262,21 +263,59 @@ def _validate_persist_inputs(
     action_request_id: UUID,
     actor_user_id: UUID,
 ) -> None:
-    if (
-        type(plan) is not FeedbackRevisionPlan
-        or not all(
-            _valid_uuid(value)
-            for value in (project_id, chapter_id, workflow_run_id, action_request_id, actor_user_id)
+    valid_plan = type(plan) is FeedbackRevisionPlan
+    valid_scope_ids = all(
+        _valid_uuid(value)
+        for value in (project_id, chapter_id, workflow_run_id, action_request_id, actor_user_id)
+    )
+    valid_source_document = valid_plan and _valid_uuid(plan.source_document_id)
+    valid_source_version = valid_plan and _valid_uuid(plan.source_version_id)
+    valid_source_hash = valid_plan and _valid_hash(plan.source_content_hash)
+    valid_operation_key = valid_plan and _valid_hash(plan.operation_key)
+    valid_attempt = valid_plan and _valid_attempt_token(plan.attempt_id)
+    valid_index_type = valid_plan and type(plan.attempt_checkpoint_index) is int
+    valid_index = valid_index_type and plan.attempt_checkpoint_index >= 0
+    valid_feedback = valid_plan and type(plan.feedback) is str
+    valid_targets = valid_plan and type(plan.target_segment_ids) is tuple
+    if _DEBUG_PERSIST_INPUTS:
+        print(
+            "PERSIST_INPUT_DEBUG",
+            (
+                valid_plan,
+                valid_scope_ids,
+                valid_source_document,
+                valid_source_version,
+                valid_source_hash,
+                valid_operation_key,
+                valid_attempt,
+                valid_index_type,
+                valid_index,
+                valid_feedback,
+                valid_targets,
+                type(plan).__name__,
+                type(getattr(plan, "source_document_id", None)).__name__,
+                type(getattr(plan, "source_version_id", None)).__name__,
+                type(getattr(plan, "source_content_hash", None)).__name__,
+                type(getattr(plan, "operation_key", None)).__name__,
+                type(getattr(plan, "attempt_id", None)).__name__,
+                type(getattr(plan, "attempt_checkpoint_index", None)).__name__,
+                type(getattr(plan, "feedback", None)).__name__,
+                type(getattr(plan, "target_segment_ids", None)).__name__,
+            ),
+            flush=True,
         )
-        or not _valid_uuid(plan.source_document_id)
-        or not _valid_uuid(plan.source_version_id)
-        or not _valid_hash(plan.source_content_hash)
-        or not _valid_hash(plan.operation_key)
-        or not _valid_attempt_token(plan.attempt_id)
-        or type(plan.attempt_checkpoint_index) is not int
-        or plan.attempt_checkpoint_index < 0
-        or type(plan.feedback) is not str
-        or type(plan.target_segment_ids) is not tuple
+    if not (
+        valid_plan
+        and valid_scope_ids
+        and valid_source_document
+        and valid_source_version
+        and valid_source_hash
+        and valid_operation_key
+        and valid_attempt
+        and valid_index_type
+        and valid_index
+        and valid_feedback
+        and valid_targets
     ):
         raise _invalid() from None
 
