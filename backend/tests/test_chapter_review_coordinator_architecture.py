@@ -205,6 +205,14 @@ def test_review_phase_modules_define_moved_bodies() -> None:
         assert f"def {name}" in validation or f"async def {name}" in validation, name
 
 
+def test_coordinator_uses_shared_reviewer_claim_status_constant() -> None:
+    source = COORDINATOR.read_text(encoding="utf-8")
+
+    assert "REVIEWER_CLAIM_STATUS_CLAIMED" in source
+    assert 'claim.get("status") != REVIEWER_CLAIM_STATUS_CLAIMED' in source
+    assert 'claim.get("status") != "claimed"' not in source
+
+
 def test_coordinator_and_phase_modules_use_typed_protocol() -> None:
     coordinator = COORDINATOR.read_text(encoding="utf-8")
     protocols = PROTOCOLS.read_text(encoding="utf-8")

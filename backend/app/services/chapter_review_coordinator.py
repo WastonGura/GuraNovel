@@ -8,6 +8,7 @@ from uuid import UUID
 from app.agents import ChapterReviewReport
 from app.llm import ProviderInvalidOutputError, ProviderTimeoutError
 from app.services.chapter_production_v2_contracts import (
+    REVIEWER_CLAIM_STATUS_CLAIMED,
     ChapterProductionV2CommitIndeterminateError,
     ChapterProductionV2ReconciliationError,
     ChapterProductionV2ReviewProviderError,
@@ -207,7 +208,7 @@ class ChapterReviewCoordinator:
                 type(claim) is not dict
                 or claim.get("operation_key") != expected_operation_key
                 or claim.get("claim_id") != expected_claim_id
-                or claim.get("status") != "claimed"
+                or claim.get("status") != REVIEWER_CLAIM_STATUS_CLAIMED
                 or claim.get("checkpoint_index") != checkpoint.checkpoint_index
                 or claim.get("stage") != stage.value
                 or await service._exact_review_report_count(
