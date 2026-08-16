@@ -249,7 +249,7 @@ class ChapterFinalizationSaga:
         )
         state, checkpoint = await service._locked_state(run)
         if state.status is ChapterProductionStatus.COMPLETED:
-            result = await _finalized_result_locked(service, 
+            result = await _finalized_result_locked(service,
                 chapter=chapter, run=run, state=state
             )
             await service.session.commit()
@@ -320,7 +320,7 @@ class ChapterFinalizationSaga:
         )
         state, _ = await service._locked_state(run)
         if state.status is ChapterProductionStatus.COMPLETED:
-            result = await _finalized_result_locked(service, 
+            result = await _finalized_result_locked(service,
                 chapter=chapter, run=run, state=state
             )
             await service.session.commit()
@@ -472,7 +472,7 @@ class ChapterFinalizationSaga:
         )
         state, checkpoint = await service._locked_state(run)
         if state.status is ChapterProductionStatus.COMPLETED:
-            result = await _finalized_result_locked(service, 
+            result = await _finalized_result_locked(service,
                 chapter=chapter, run=run, state=state
             )
             await service.session.commit()
@@ -488,7 +488,7 @@ class ChapterFinalizationSaga:
         policy, editor, chief, lore = await service._live_review_bindings_locked(
             run=run, state=state, document=document, version=version
         )
-        result = await _finalized_result_locked(service, 
+        result = await _finalized_result_locked(service,
             chapter=chapter, run=run, state=state
         )
         try:
