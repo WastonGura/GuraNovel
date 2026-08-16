@@ -10,7 +10,6 @@ chapter, run, and version facts; persisted mutable paths are never trusted.
 
 from __future__ import annotations
 
-import traceback
 from dataclasses import dataclass
 from pathlib import Path
 from uuid import UUID
@@ -34,6 +33,7 @@ from app.services.chapter_production_v2_contracts import (
     ChapterProductionV2Finalized,
     ChapterProductionV2ReconciliationError,
     ChapterProductionV2ValidationError,
+    valid_sha256 as _valid_sha256,
 )
 from app.services.document_service import DocumentCommitIndeterminateError
 from app.workspace.hashing import sha256_content
@@ -169,6 +169,9 @@ async def _finalized_result_locked(
     if len(documents) != 1 or documents[0].id != chapter.final_document_id:
         raise _reconciliation()
     document = documents[0]
+    if document.project is None:
+        raise _reconciliation()
+    workspace_root = str(document.project.workspace_root)
     version = await service._locked_current_document_version(document)
     if (
         version is None
@@ -191,43 +194,65 @@ async def _finalized_result_locked(
         }
     ):
         raise _reconciliation()
-    _verify_final_artifacts(service, document=document, version=version)
+    _verify_final_artifacts(
+        document=document,
+        version=version,
+        workspace_root=workspace_root,
+    )
     return ChapterProductionV2Finalized(run.id, document.id, version.id)
 
+def _verified_snapshot_content_plain(
+    *, document: Document, version: DocumentVersion, workspace_root: str
+) -> str:
+    if (
+        version.document_id != document.id
+        or type(version.version_number) is not int
+        or version.version_number < 1
+        or version.file_path != document.path
+        or version.snapshot_path
+        != version_snapshot_path(str(document.id), version.version_number).as_posix()
+        or type(version.byte_size) is not int
+        or version.byte_size < 0
+        or version.byte_size > MAX_CHAPTER_CONTENT_BYTES
+        or not _valid_sha256(version.content_hash)
+    ):
+        raise _invalid()
+    try:
+        content = MarkdownStore(Path(workspace_root)).read_bounded(
+            version.snapshot_path,
+            max_bytes=MAX_CHAPTER_CONTENT_BYTES,
+        )
+    except Exception:
+        raise _invalid() from None
+    if (
+        len(content.encode("utf-8")) != version.byte_size
+        or sha256_content(content) != version.content_hash
+    ):
+        raise _invalid()
+    return content
+
+
 def _verify_final_artifacts(
-    service: object, *, document: Document, version: DocumentVersion
+    *, document: Document, version: DocumentVersion, workspace_root: str
 ) -> None:
     read_failed = False
-    snapshot_read_raised = False
-    current_read_raised = False
     try:
-        try:
-            snapshot_content = service._verified_snapshot_content(
-                document, version
-            )
-        except Exception:
-            snapshot_read_raised = True
-            raise
-        try:
-            current_content = MarkdownStore(
-                Path(document.project.workspace_root)
-            ).read_bounded(
-                document.path,
-                max_bytes=MAX_CHAPTER_CONTENT_BYTES,
-            )
-        except Exception:
-            current_read_raised = True
-            raise
-    except Exception as error:
+        snapshot_content = _verified_snapshot_content_plain(
+            document=document,
+            version=version,
+            workspace_root=workspace_root,
+        )
+    except Exception:
         read_failed = True
         snapshot_content = ""
-        current_content = ""
-        print(
-            type(error).__name__,
-            [frame.name for frame in traceback.extract_tb(error.__traceback__)],
-            snapshot_read_raised,
-            current_read_raised,
+    try:
+        current_content = MarkdownStore(Path(workspace_root)).read_bounded(
+            document.path,
+            max_bytes=MAX_CHAPTER_CONTENT_BYTES,
         )
+    except Exception:
+        read_failed = True
+        current_content = ""
     if read_failed:
         raise _reconciliation()
     if (
