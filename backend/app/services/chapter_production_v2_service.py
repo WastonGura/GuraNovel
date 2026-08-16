@@ -1405,7 +1405,6 @@ class ChapterProductionV2Service:
         )
         return int(count or 0)
 
-    @staticmethod
     async def _live_review_bindings_locked(
         self,
         *,

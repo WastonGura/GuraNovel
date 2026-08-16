@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import traceback
 from uuid import UUID
 
 from sqlalchemy import func, select
@@ -405,27 +404,8 @@ async def persist_current_review(
     except ChapterProductionV2ValidationError:
         await service._rollback()
         raise
-    except Exception as error:
+    except Exception:
         await service._rollback()
-        if type(error) is TypeError:
-            _frames = [item.name for item in traceback.extract_tb(error.__traceback__)]
-            print(
-                f"DEBUG persist_current_review error_type=TypeError "
-                f"signature={str(error)} frames={_frames}"
-            )
-        else:
-            _tb = error.__traceback__
-            while _tb is not None and _tb.tb_next is not None:
-                _tb = _tb.tb_next
-            _frame_name = (
-                _tb.tb_frame.f_code.co_name
-                if _tb is not None and _tb.tb_frame is not None
-                else None
-            )
-            print(
-                f"DEBUG persist_current_review error_type={type(error).__name__} "
-                f"frame={_frame_name}"
-            )
         raise _invalid() from None
 
 

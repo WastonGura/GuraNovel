@@ -205,6 +205,34 @@ def test_review_phase_modules_define_moved_bodies() -> None:
         assert f"def {name}" in validation or f"async def {name}" in validation, name
 
 
+def test_facade_bound_helpers_are_not_staticmethods_with_self() -> None:
+    tree = _tree(FACADE)
+    owner = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.ClassDef)
+        and node.name == "ChapterProductionV2Service"
+    )
+    live_bindings = next(
+        node
+        for node in owner.body
+        if isinstance(node, ast.AsyncFunctionDef)
+        and node.name == "_live_review_bindings_locked"
+    )
+    assert live_bindings.args.args[0].arg == "self"
+
+    for node in owner.body:
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        decorator_names = {
+            decorator.id
+            for decorator in node.decorator_list
+            if isinstance(decorator, ast.Name)
+        }
+        if node.args.args and node.args.args[0].arg == "self":
+            assert "staticmethod" not in decorator_names, node.name
+
+
 def test_coordinator_uses_shared_reviewer_claim_status_constant() -> None:
     source = COORDINATOR.read_text(encoding="utf-8")
 
