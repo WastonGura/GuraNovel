@@ -404,8 +404,20 @@ async def persist_current_review(
     except ChapterProductionV2ValidationError:
         await service._rollback()
         raise
-    except Exception:
+    except Exception as error:
         await service._rollback()
+        _tb = error.__traceback__
+        while _tb is not None and _tb.tb_next is not None:
+            _tb = _tb.tb_next
+        _frame_name = (
+            _tb.tb_frame.f_code.co_name
+            if _tb is not None and _tb.tb_frame is not None
+            else None
+        )
+        print(
+            f"DEBUG persist_current_review error_type={type(error).__name__} "
+            f"frame={_frame_name}"
+        )
         raise _invalid() from None
 
 
