@@ -7,6 +7,10 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 FACADE = ROOT / "app/services/chapter_production_v2_service.py"
 COORDINATOR = ROOT / "app/services/chapter_review_coordinator.py"
+CLAIM = ROOT / "app/services/chapter_review_claim.py"
+PERSISTENCE = ROOT / "app/services/chapter_review_persistence.py"
+VALIDATION = ROOT / "app/services/chapter_review_validation.py"
+PROTOCOLS = ROOT / "app/services/chapter_review_protocols.py"
 
 
 def _tree(path: Path) -> ast.Module:
@@ -48,22 +52,9 @@ def _coordinator_method(name: str) -> str:
     return ast.get_source_segment(source, method) or ""
 
 
-def test_coordinator_exists_and_is_bounded() -> None:
-    assert COORDINATOR.exists()
-    source = COORDINATOR.read_text(encoding="utf-8")
-    tree = _tree(COORDINATOR)
-
-    assert len(source.splitlines()) <= 600
-    assert all(
-        _span(node) <= (400 if isinstance(node, ast.ClassDef) else 80)
-        for node in ast.walk(tree)
-        if isinstance(node, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef))
-    )
-
-
-def test_coordinator_does_not_import_the_facade() -> None:
-    tree = _tree(COORDINATOR)
-    imports = {
+def _module_imports(path: Path) -> set[str]:
+    tree = _tree(path)
+    return {
         alias.name
         for node in tree.body
         if isinstance(node, ast.Import)
@@ -72,8 +63,30 @@ def test_coordinator_does_not_import_the_facade() -> None:
         node.module or "" for node in tree.body if isinstance(node, ast.ImportFrom)
     }
 
-    assert "app.services.chapter_production_v2_service" not in imports
-    assert "ChapterProductionV2Service" not in COORDINATOR.read_text(encoding="utf-8")
+
+def test_review_modules_exist_and_are_bounded() -> None:
+    for path, limit in (
+        (COORDINATOR, 800),
+        (CLAIM, 800),
+        (PERSISTENCE, 800),
+        (VALIDATION, 800),
+        (PROTOCOLS, 800),
+    ):
+        assert path.exists(), path
+        source = path.read_text(encoding="utf-8")
+        tree = _tree(path)
+        assert len(source.splitlines()) <= limit, path
+        assert all(
+            _span(node) <= (400 if isinstance(node, ast.ClassDef) else 80)
+            for node in ast.walk(tree)
+            if isinstance(node, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef))
+        ), path
+
+
+def test_review_modules_do_not_import_the_facade() -> None:
+    for path in (COORDINATOR, CLAIM, PERSISTENCE, VALIDATION, PROTOCOLS):
+        assert "app.services.chapter_production_v2_service" not in _module_imports(path)
+        assert "ChapterProductionV2Service" not in path.read_text(encoding="utf-8")
 
 
 def test_provider_call_is_outside_transactions_and_orm_work() -> None:
@@ -86,8 +99,8 @@ def test_provider_call_is_outside_transactions_and_orm_work() -> None:
         "service.session",
         "select(",
         "with_for_update",
-        "_claim_current_review",
-        "_persist_current_review",
+        "claim_current_review",
+        "persist_current_review",
     ):
         assert forbidden not in provider
 
@@ -143,3 +156,60 @@ def test_acknowledge_reviewer_no_write_is_a_thin_review_delegate() -> None:
         "select(",
     ):
         assert forbidden not in method
+
+
+def test_facade_no_longer_defines_moved_review_bodies() -> None:
+    source = FACADE.read_text(encoding="utf-8")
+
+    for name in (
+        "_claim_current_review",
+        "_build_review_context_locked",
+        "_review_context_snapshots",
+        "_persist_current_review",
+        "_resolve_review_action_locked",
+        "_set_reviewer_claim",
+        "_release_reviewer_claim",
+        "_fail_reviewer",
+        "_validated_resolved_review_action",
+        "_validated_persisted_review_report",
+    ):
+        assert f"def {name}" not in source, name
+        assert f"async def {name}" not in source, name
+
+
+def test_review_phase_modules_define_moved_bodies() -> None:
+    claim = CLAIM.read_text(encoding="utf-8")
+    persistence = PERSISTENCE.read_text(encoding="utf-8")
+
+    for name in (
+        "claim_current_review",
+        "build_review_context_locked",
+        "review_context_snapshots",
+        "set_reviewer_claim",
+        "release_reviewer_claim",
+        "fail_reviewer",
+    ):
+        assert f"def {name}" in claim or f"async def {name}" in claim, name
+    validation = VALIDATION.read_text(encoding="utf-8")
+    for name in (
+        "persist_current_review",
+        "resolve_review_action_locked",
+    ):
+        assert f"def {name}" in persistence or f"async def {name}" in persistence, name
+    for name in (
+        "validated_persisted_review_report",
+        "validated_resolved_review_action",
+        "new_review_action",
+        "review_action_metadata",
+    ):
+        assert f"def {name}" in validation or f"async def {name}" in validation, name
+
+
+def test_coordinator_and_phase_modules_use_typed_protocol() -> None:
+    coordinator = COORDINATOR.read_text(encoding="utf-8")
+    protocols = PROTOCOLS.read_text(encoding="utf-8")
+
+    assert "class ChapterReviewCoordinator" in coordinator
+    assert "def __init__(self, service: ChapterReviewService)" in coordinator
+    assert "runtime_checkable" in protocols
+    assert "class ChapterReviewService" in protocols

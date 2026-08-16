@@ -2,10 +2,18 @@
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass, field
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from app.core.errors import AppError
+
+
+CONTRACT_VERSION = "chapter-production-v2"
+REVIEWER_CLAIM_STATUS_CLAIMED = "claimed"
+REVIEWER_CLAIM_STATUS_FAILED = "failed"
+REVIEW_WARNING_ACTION_TYPE = "chapter_review_warning"
+REVIEW_REVISION_ACTION_TYPE = "chapter_review_revision"
 
 
 def _valid_uuid(value: object) -> bool:
@@ -18,6 +26,32 @@ def _valid_sha256(value: object) -> bool:
         and len(value) == 64
         and all(character in "0123456789abcdef" for character in value)
     )
+
+
+def valid_nonzero_uuid(value: object) -> bool:
+    if type(value) is not str:
+        return False
+    try:
+        parsed = UUID(value)
+    except (TypeError, ValueError, AttributeError):
+        return False
+    return parsed.int != 0 and str(parsed) == value
+
+
+def valid_sha256(value: object) -> bool:
+    return _valid_sha256(value)
+
+
+def new_attempt_id() -> str:
+    """Create a content-free provider-attempt generation identifier."""
+
+    return str(uuid4())
+
+
+def safe_cancelled_error(_: BaseException) -> asyncio.CancelledError:
+    """Return a cancellation signal that cannot disclose provider exception data."""
+
+    return asyncio.CancelledError()
 
 
 class ChapterProductionV2ValidationError(AppError):
