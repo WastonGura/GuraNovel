@@ -9,6 +9,9 @@ from uuid import UUID
 from app.documents.chapter_segments import MAX_CHAPTER_CONTENT_BYTES
 from app.models import Document, DocumentVersion, ReviewMode
 from app.services.chapter_production_v2_contracts import (
+    CONTRACT_VERSION as _CONTRACT_VERSION,
+    REVIEWER_CLAIM_STATUS_CLAIMED as _ATTEMPT_STATUS_CLAIMED,
+    REVIEWER_CLAIM_STATUS_FAILED as _ATTEMPT_STATUS_FAILED,
     ChapterProductionV2ReconciliationError,
     ChapterProductionV2ValidationError,
     valid_sha256 as _valid_sha256,
@@ -18,10 +21,7 @@ from app.workspace.markdown_store import MarkdownStore
 from app.workspace.paths import version_snapshot_path
 
 
-_CONTRACT_VERSION = "chapter-production-v2"
 _AUTHOR_ACTION_TYPE = "chapter_author_revision"
-_ATTEMPT_STATUS_CLAIMED = "claimed"
-_ATTEMPT_STATUS_FAILED = "failed"
 
 
 def _invalid() -> ChapterProductionV2ValidationError:
