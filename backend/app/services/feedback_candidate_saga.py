@@ -13,6 +13,7 @@ from app.models import (
     DocumentSource,
     DocumentType,
     DocumentVersion,
+    WorkflowCheckpoint,
 )
 from app.services.chapter_production_v2_contracts import (
     ChapterProductionV2CommitIndeterminateError,
@@ -22,9 +23,13 @@ from app.services.chapter_production_v2_contracts import (
 )
 from app.services.document_service import DocumentCommitIndeterminateError
 from app.services.feedback_revision_handoff import FeedbackRevisionPlan
+from app.services.manual_edit_saga import _resolved_source_action
+from app.services.review_revision_saga import _reconciliation_candidates
 from app.workflows.chapter_production import (
     ChapterActionDecision,
+    ChapterProductionState,
     ChapterProductionStatus,
+    ChapterProductionValidationError,
 )
 from app.workspace.hashing import sha256_content
 
@@ -55,6 +60,10 @@ def _normalize_uuid(value: object) -> UUID:
 def _normalized_plan(plan: FeedbackRevisionPlan) -> FeedbackRevisionPlan:
     return replace(plan, source_document_id=_normalize_uuid(plan.source_document_id),
                    source_version_id=_normalize_uuid(plan.source_version_id))
+
+
+def _source_version_id(state: object) -> UUID | None:
+    return UUID(state.document_version_id) if state.document_version_id is not None else None
 
 
 def _valid_hash(value: object) -> bool:
@@ -466,6 +475,85 @@ async def _finalize_feedback_revision(
     )
 
 
+async def _candidate_matches_provider_attempt(
+    service: object, *, run: object, state: ChapterProductionState,
+    attempt: object, document: Document, version: DocumentVersion,
+) -> bool:
+    if (
+        type(attempt) is not dict
+        or attempt.get("status") != _ATTEMPT_STATUS_CLAIMED
+        or version.workflow_run_id != run.id
+        or version.metadata_ != {
+            "contract_version": _CONTRACT_VERSION,
+            "operation_key": attempt.get("key"),
+            "attempt_id": attempt.get("attempt_id"),
+        }
+        or document.current_version_id != version.id
+        or state.document_id is None
+        or attempt.get("source_document_id") != state.document_id
+        or attempt.get("source_version_id") != state.document_version_id
+        or version.document_id != UUID(state.document_id)
+        or version.parent_version_id != UUID(state.document_version_id)
+        or version.source != DocumentSource.WRITER_AGENT.value
+        or version.actor_user_id is not None
+        or version.agent_role != "revision_agent"
+    ):
+        return False
+    targets = tuple(UUID(item) for item in attempt["target_segment_ids"])
+    action_id = UUID(attempt["action_request_id"])
+    action = await service.session.get(ActionRequest, action_id, with_for_update=True)
+    if (
+        action is None or action.workflow_run_id != run.id
+        or action.user_decision != ChapterActionDecision.REQUEST_REVISION.value
+        or sha256_content(action.user_feedback or "") != attempt.get("feedback_hash")
+    ):
+        return False
+    expected_key = service._decision_operation_key(
+        run.id, action_id, UUID(state.document_version_id), "feedback",
+        target_segment_ids=targets, feedback_hash=attempt["feedback_hash"],
+    )
+    return attempt.get("key") == expected_key
+
+
+async def _restore_feedback_without_write(
+    service: object, run: object, state: ChapterProductionState, *,
+    source_checkpoint_index: int | None = None,
+) -> ChapterProductionState:
+    action = await _resolved_source_action(service, run.id, state)
+    if action.user_decision != ChapterActionDecision.REQUEST_REVISION.value:
+        raise _reconcile() from None
+    latest = await service.session.scalar(
+        select(WorkflowCheckpoint)
+        .where(WorkflowCheckpoint.workflow_run_id == run.id)
+        .order_by(WorkflowCheckpoint.checkpoint_index.desc())
+        .with_for_update()
+    )
+    if latest is None or latest.checkpoint_index < 1:
+        raise _reconcile() from None
+    previous_index = source_checkpoint_index if source_checkpoint_index is not None else latest.checkpoint_index - 1
+    previous = await service.session.scalar(
+        select(WorkflowCheckpoint)
+        .where(
+            WorkflowCheckpoint.workflow_run_id == run.id,
+            WorkflowCheckpoint.checkpoint_index == previous_index,
+        )
+        .with_for_update()
+    )
+    try:
+        restored = ChapterProductionState.from_checkpoint(previous.state_json)
+    except (AttributeError, ChapterProductionValidationError):
+        raise _reconcile() from None
+    if restored.status is not ChapterProductionStatus.AUTHOR_REVISION or restored.action_request_id != str(action.id):
+        raise _reconcile() from None
+    action.status = ActionRequestStatus.PENDING.value
+    action.user_decision = None
+    action.user_feedback = None
+    action.resolved_by_id = None
+    action.resolved_at = None
+    service._append_state(run, latest, restored)
+    return restored
+
+
 class FeedbackCandidateSaga:
     """Persist one feedback candidate and reopen the next author gate."""
 
@@ -473,6 +561,91 @@ class FeedbackCandidateSaga:
         self.service = service
         self._merge = merge
         self._prospective_map = prospective_map
+
+    async def reconcile_drafting(
+        self, *, project_id: UUID, chapter_id: UUID, run: object,
+        state: ChapterProductionState, checkpoint: object, chapter: object,
+        actor_user_id: UUID,
+    ) -> ChapterProductionState:
+        service = self.service
+        candidates = await _reconciliation_candidates(service, run, parent_version_id=_source_version_id(state))
+        attempt = service._run_metadata(run)["provider_attempt"]
+        if len(candidates) > 1:
+            raise _reconcile() from None
+        if not candidates:
+            if type(attempt) is dict and attempt.get("status") == _ATTEMPT_STATUS_CLAIMED:
+                raise _reconcile() from None
+            if state.document_id is None:
+                raise _reconcile() from None
+            canonical = await service.session.scalar(
+                select(Document).where(
+                    Document.id == UUID(state.document_id),
+                    Document.project_id == project_id,
+                    Document.chapter_id == chapter_id,
+                    Document.current_version_id == UUID(state.document_version_id),
+                ).with_for_update()
+            )
+            if canonical is None:
+                raise _reconcile() from None
+            state = await _restore_feedback_without_write(service, run, state)
+            await service._commit()
+            return state
+        document, version = candidates[0]
+        if document.current_version_id != version.id or chapter.current_draft_document_id != document.id:
+            raise _reconcile() from None
+        operation_key = version.metadata_.get("operation_key")
+        if type(operation_key) is not str or len(operation_key) != 64:
+            raise _reconcile() from None
+        if not await _candidate_matches_provider_attempt(
+            service, run=run, state=state, attempt=attempt,
+            document=document, version=version,
+        ):
+            raise _reconcile() from None
+        await service._commit()
+        if state.document_id is None:
+            raise _reconcile() from None
+        old_action = await _resolved_source_action(service, run.id, state)
+        identity = FeedbackCandidateIdentity(
+            project_id=project_id, chapter_id=chapter_id, workflow_run_id=run.id,
+            action_request_id=old_action.id, document_id=document.id,
+            version_id=version.id, source_version_id=UUID(state.document_version_id),
+            source_content_hash=state.content_hash, content_hash=version.content_hash,
+            operation_key=operation_key, attempt_id=version.metadata_["attempt_id"],
+        )
+        await service._commit()
+        await self.finalize(identity, actor_user_id=actor_user_id)
+        return await service.load_state(project_id, chapter_id, run.id, actor_user_id=actor_user_id)
+
+    async def acknowledge_no_write(
+        self, *, run: object, state: ChapterProductionState,
+        checkpoint: object, attempt: dict[str, object],
+    ) -> ChapterProductionState:
+        service = self.service
+        candidates = await _reconciliation_candidates(service, run, parent_version_id=_source_version_id(state))
+        if candidates:
+            raise _reconcile() from None
+        if state.document_id is None:
+            raise _reconcile() from None
+        canonical = await service.session.scalar(
+            select(Document.id)
+            .where(
+                Document.id == UUID(state.document_id),
+                Document.project_id == run.project_id,
+                Document.chapter_id == run.chapter_id,
+                Document.current_version_id == UUID(state.document_version_id),
+            )
+            .with_for_update()
+        )
+        if canonical != UUID(state.document_id):
+            raise _reconcile() from None
+        service._set_attempt(run, None)
+        state = await _restore_feedback_without_write(
+            service, run, state, source_checkpoint_index=checkpoint.checkpoint_index - 1
+        )
+        if state.status is not ChapterProductionStatus.AUTHOR_REVISION:
+            raise _reconcile() from None
+        await service._commit()
+        return state
 
     async def persist(
         self,

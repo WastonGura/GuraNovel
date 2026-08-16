@@ -7,6 +7,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 SAGA = ROOT / "app/services/manual_edit_saga.py"
 FACADE = ROOT / "app/services/chapter_production_v2_service.py"
+COORDINATOR = ROOT / "app/services/chapter_draft_revision_coordinator.py"
 PROVIDER_CALLS = {
     "draft_initial",
     "revise_from_user_feedback",
@@ -104,7 +105,9 @@ def test_submit_manual_edit_is_a_thin_delegate() -> None:
 def test_finalize_moved_into_the_saga_and_reconcile_delegates() -> None:
     facade_source = FACADE.read_text(encoding="utf-8")
     saga_source = SAGA.read_text(encoding="utf-8")
+    coordinator_source = COORDINATOR.read_text(encoding="utf-8")
 
     assert "def _finalize_manual_edit" not in facade_source
     assert "def _finalize_manual_edit" in saga_source
-    assert "self._manual_edit._finalize_manual_edit" in facade_source
+    assert "self._draft_revision.reconcile" in facade_source
+    assert "self._manual_edit.reconcile_manual" in coordinator_source
