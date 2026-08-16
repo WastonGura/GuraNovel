@@ -10,7 +10,6 @@ chapter, run, and version facts; persisted mutable paths are never trusted.
 
 from __future__ import annotations
 
-import traceback
 from dataclasses import dataclass
 from pathlib import Path
 from uuid import UUID
@@ -264,11 +263,7 @@ class ChapterFinalizationSaga:
         except ChapterProductionV2ValidationError:
             await service._rollback()
             raise
-        except Exception as error:
-            print(
-                type(error).__name__,
-                [frame.name for frame in traceback.extract_tb(error.__traceback__)],
-            )
+        except Exception:
             await service._rollback()
             raise _invalid() from None
 
@@ -323,11 +318,14 @@ class ChapterFinalizationSaga:
         else:
             await service.session.commit()
 
-        draft_document_id = document.id
-        draft_version_id = version.id
+        draft_document_id = _canonical_boundary_uuid(document.id)
+        draft_version_id = _canonical_boundary_uuid(version.id)
         draft_hash = version.content_hash
         content = service._verified_snapshot_content(document, version)
-        if version.id != draft_version_id or sha256_content(content) != draft_hash:
+        if (
+            _canonical_boundary_uuid(version.id) != draft_version_id
+            or sha256_content(content) != draft_hash
+        ):
             raise _invalid()
         await service.session.commit()
         return _ReadySourceEvidence(
@@ -372,17 +370,16 @@ class ChapterFinalizationSaga:
             state=state,
             chapter=chapter,
         )
+        locked_document_id = _canonical_boundary_uuid(document.id)
+        locked_version_id = _canonical_boundary_uuid(version.id)
         if (
-            document.id != evidence.draft_document_id
-            or version.id != evidence.draft_version_id
+            state.document_id is None
+            or state.document_version_id is None
+            or locked_document_id != UUID(state.document_id)
+            or locked_version_id != UUID(state.document_version_id)
+            or version.content_hash != state.content_hash
             or version.content_hash != evidence.draft_hash
         ):
-            print(
-                document.id != evidence.draft_document_id,
-                version.id != evidence.draft_version_id,
-                version.content_hash != evidence.draft_hash,
-                state.status.name,
-            )
             raise _reconciliation()
         final_documents = list(
             await service.session.scalars(
@@ -523,12 +520,6 @@ class ChapterFinalizationSaga:
             )
         except DocumentCommitIndeterminateError:
             raise ChapterProductionV2CommitIndeterminateError() from None
-        except BaseException as error:
-            print(
-                type(error).__name__,
-                [frame.name for frame in traceback.extract_tb(error.__traceback__)],
-            )
-            raise
 
     async def _complete_finalization_locked(
         self, evidence: _ReadySourceEvidence

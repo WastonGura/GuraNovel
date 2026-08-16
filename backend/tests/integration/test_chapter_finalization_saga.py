@@ -30,13 +30,16 @@ async def test_finalize_commit_ack_loss_at_each_db_commit_boundary_replays_once(
     project, chapter, owner, service, *_ = await review_ready_chapter(
         async_session, tmp_path / f"commit-ack-{fail_on_call}"
     )
+    project_id = project.id
+    chapter_id = chapter.id
+    owner_id = owner.id
     workflow_run_id = run_id(chapter)
     for _ in range(3):
         await service.execute_current_review(
-            project.id,
-            chapter.id,
+            project_id,
+            chapter_id,
             workflow_run_id,
-            actor_user_id=owner.id,
+            actor_user_id=owner_id,
         )
 
     original_commit = service._commit
@@ -53,18 +56,18 @@ async def test_finalize_commit_ack_loss_at_each_db_commit_boundary_replays_once(
     monkeypatch.setattr(service, "_commit", fail_commit_once)
     with pytest.raises(ChapterProductionV2CommitIndeterminateError):
         await service.finalize_without_reader_panel(
-            project.id,
-            chapter.id,
+            project_id,
+            chapter_id,
             workflow_run_id,
-            actor_user_id=owner.id,
+            actor_user_id=owner_id,
         )
     monkeypatch.setattr(service, "_commit", original_commit)
 
     result = await service.finalize_without_reader_panel(
-        project.id,
-        chapter.id,
+        project_id,
+        chapter_id,
         workflow_run_id,
-        actor_user_id=owner.id,
+        actor_user_id=owner_id,
     )
 
     assert (
@@ -72,7 +75,7 @@ async def test_finalize_commit_ack_loss_at_each_db_commit_boundary_replays_once(
             select(func.count())
             .select_from(Document)
             .where(
-                Document.chapter_id == chapter.id,
+                Document.chapter_id == chapter_id,
                 Document.type == DocumentType.CHAPTER_FINAL.value,
             )
         )
@@ -97,7 +100,7 @@ async def test_finalize_commit_ack_loss_at_each_db_commit_boundary_replays_once(
         )
         == 1
     )
-    persisted_chapter = await async_session.get(Chapter, chapter.id)
+    persisted_chapter = await async_session.get(Chapter, chapter_id)
     assert persisted_chapter is not None
     assert persisted_chapter.final_document_id == result.final_document_id
     assert persisted_chapter.status == "COMPLETED"
