@@ -38,6 +38,7 @@ from app.services.chapter_production_v2_contracts import (
     ChapterProductionV2ValidationError,
 )
 from app.services.chapter_production_v2_service import ChapterProductionV2Service
+from app.services import manual_edit_saga as manual_edit_saga
 from app.services.document_service import DocumentService
 from app.workflows.chapter_production import ChapterProductionStatus
 
@@ -499,7 +500,7 @@ async def test_manual_route_revalidates_cardinality_in_legacy_phase(
         )
         async with sessions() as caller:
             service = _service(caller, provider, source)
-            original = service._resolved_source_action
+            original = manual_edit_saga._resolved_source_action
 
             async def insert_after_preflight(
                 *args: object, **kwargs: object
@@ -548,7 +549,9 @@ async def test_manual_route_revalidates_cardinality_in_legacy_phase(
                 )
                 return result
 
-            monkeypatch.setattr(service, "_resolved_source_action", insert_after_preflight)
+            monkeypatch.setattr(
+                manual_edit_saga, "_resolved_source_action", insert_after_preflight
+            )
             with pytest.raises(ChapterProductionV2ReconciliationError) as raised:
                 await service.reconcile_indeterminate(
                     project.id,

@@ -61,6 +61,10 @@ def _normalized_plan(plan: ReviewRevisionPlan) -> ReviewRevisionPlan:
         target_segment_ids=tuple(_normalize_uuid(item) for item in plan.target_segment_ids),
     )
 
+def _source_version_id(state: object) -> UUID | None:
+    return UUID(state.document_version_id) if state.document_version_id is not None else None
+
+
 def _valid_hash(value: object) -> bool:
     return (
         type(value) is str
@@ -439,6 +443,88 @@ async def _finalize_review_revision(
         action_request_id=None,
     )
 
+
+async def _reconciliation_candidates(
+    service: object, run: object, *, parent_version_id: UUID | None
+) -> list[tuple[Document, DocumentVersion]]:
+    versions = list(await service.session.scalars(
+        select(DocumentVersion)
+        .where(
+            DocumentVersion.workflow_run_id == run.id,
+            DocumentVersion.parent_version_id == parent_version_id,
+        )
+        .with_for_update()
+    ))
+    candidates: list[tuple[Document, DocumentVersion]] = []
+    for version in versions:
+        if version.metadata_.get("contract_version") != _CONTRACT_VERSION:
+            raise _reconcile() from None
+        document = await service.session.scalar(
+            select(Document)
+            .options(selectinload(Document.project), selectinload(Document.current_version))
+            .where(
+                Document.id == version.document_id,
+                Document.project_id == run.project_id,
+                Document.chapter_id == run.chapter_id,
+                Document.type == DocumentType.CHAPTER_DRAFT.value,
+            )
+            .with_for_update()
+        )
+        if document is None:
+            raise _reconcile() from None
+        candidates.append((document, version))
+    return candidates
+
+
+async def _candidate_matches_provider_attempt(
+    service: object, *, run: object, state: object, attempt: object,
+    document: Document, version: DocumentVersion,
+) -> bool:
+    if (
+        type(attempt) is not dict
+        or attempt.get("status") != _ATTEMPT_STATUS_CLAIMED
+        or version.workflow_run_id != run.id
+        or version.metadata_ != {
+            "contract_version": _CONTRACT_VERSION,
+            "operation_key": attempt.get("key"),
+            "attempt_id": attempt.get("attempt_id"),
+        }
+        or document.current_version_id != version.id
+        or state.document_id is None
+        or attempt.get("source_document_id") != state.document_id
+        or attempt.get("source_version_id") != state.document_version_id
+        or version.document_id != UUID(state.document_id)
+        or version.parent_version_id != UUID(state.document_version_id)
+        or version.source != DocumentSource.WRITER_AGENT.value
+        or version.actor_user_id is not None
+        or version.agent_role != "revision_agent"
+    ):
+        return False
+    targets = tuple(UUID(item) for item in attempt["target_segment_ids"])
+    if attempt.get("kind") != "review":
+        return False
+    report_ids = tuple(UUID(item) for item in attempt["report_ids"])
+    reports_by_id = {
+        report.id: report
+        for report in await service.session.scalars(
+            select(ReviewReport)
+            .execution_options(populate_existing=True)
+            .where(ReviewReport.id.in_(report_ids))
+            .with_for_update()
+        )
+    }
+    if set(reports_by_id) != set(report_ids):
+        return False
+    reports = tuple(reports_by_id[item] for item in report_ids)
+    report_input_hash = service._review_report_input_hash(reports)
+    expected_key = service._review_operation_key(
+        workflow_run_id=run.id, source_version_id=UUID(state.document_version_id),
+        report_ids=report_ids, target_segment_ids=targets,
+        report_input_hash=report_input_hash,
+    )
+    return attempt.get("report_input_hash") == report_input_hash and attempt.get("key") == expected_key
+
+
 class ReviewRevisionSaga:
     """Persist one corrective-revision candidate and reopen the next review gate."""
 
@@ -446,6 +532,88 @@ class ReviewRevisionSaga:
         self.service = service
         self._merge = merge
         self._prospective_map = prospective_map
+
+    async def reconcile_review(
+        self, *, project_id: UUID, chapter_id: UUID, run: object, state: object,
+        checkpoint: object, chapter: object, actor_user_id: UUID,
+    ) -> object:
+        service = self.service
+        candidates = await _reconciliation_candidates(service, run, parent_version_id=_source_version_id(state))
+        attempt = service._run_metadata(run)["provider_attempt"]
+        if len(candidates) > 1:
+            raise _reconcile() from None
+        if not candidates:
+            if type(attempt) is dict and attempt.get("status") == _ATTEMPT_STATUS_CLAIMED:
+                raise _reconcile() from None
+            if state.document_id is None:
+                raise _reconcile() from None
+            canonical = await service.session.scalar(
+                select(Document).where(
+                    Document.id == UUID(state.document_id),
+                    Document.project_id == project_id,
+                    Document.chapter_id == chapter_id,
+                    Document.current_version_id == UUID(state.document_version_id),
+                ).with_for_update()
+            )
+            if canonical is None:
+                raise _reconcile() from None
+            await service._commit()
+            return state
+        document, version = candidates[0]
+        if document.current_version_id != version.id or chapter.current_draft_document_id != document.id:
+            raise _reconcile() from None
+        operation_key = version.metadata_.get("operation_key")
+        if type(operation_key) is not str or len(operation_key) != 64:
+            raise _reconcile() from None
+        if (
+            type(attempt) is not dict
+            or attempt.get("checkpoint_index") != checkpoint.checkpoint_index
+            or not await _candidate_matches_provider_attempt(
+                service, run=run, state=state, attempt=attempt, document=document, version=version
+            )
+        ):
+            raise _reconcile() from None
+        await service._commit()
+        identity = ReviewRevisionIdentity(
+            project_id=project_id, chapter_id=chapter_id, workflow_run_id=run.id,
+            document_id=document.id, version_id=version.id,
+            source_version_id=UUID(state.document_version_id),
+            source_content_hash=state.content_hash, content_hash=version.content_hash,
+            operation_key=operation_key, attempt_id=version.metadata_["attempt_id"],
+            report_ids=tuple(UUID(item) for item in (
+                state.editor_report_id, state.chief_editor_report_id, state.lore_report_id
+            ) if item is not None),
+            report_input_hash=attempt["report_input_hash"],
+        )
+        await service._commit()
+        await self.finalize(identity, actor_user_id=actor_user_id)
+        return await service.load_state(project_id, chapter_id, run.id, actor_user_id=actor_user_id)
+
+    async def acknowledge_no_write(
+        self, *, run: object, state: object, checkpoint: object, attempt: dict[str, object]
+    ) -> object:
+        service = self.service
+        candidates = await _reconciliation_candidates(service, run, parent_version_id=_source_version_id(state))
+        if candidates:
+            raise _reconcile() from None
+        if state.document_id is None:
+            raise _reconcile() from None
+        canonical = await service.session.scalar(
+            select(Document.id)
+            .where(
+                Document.id == UUID(state.document_id),
+                Document.project_id == run.project_id,
+                Document.chapter_id == run.chapter_id,
+                Document.current_version_id == UUID(state.document_version_id),
+            )
+            .with_for_update()
+        )
+        if canonical != UUID(state.document_id):
+            raise _reconcile() from None
+        service._set_attempt(run, None)
+        service._append_state(run, checkpoint, state)
+        await service._commit()
+        return state
 
     async def persist(
         self,

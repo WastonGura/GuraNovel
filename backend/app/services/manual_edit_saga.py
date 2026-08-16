@@ -36,8 +36,13 @@ from app.models import (
     WorkflowRun,
 )
 from app.services.author_accept_coordination import _StaleActionAdopted
+from app.services.review_revision_saga import (
+    _reconciliation_candidates,
+    _source_version_id,
+)
 from app.services.chapter_production_v2_contracts import (
     ChapterProductionV2CommitIndeterminateError,
+    ChapterProductionV2ReconciliationError,
     ChapterProductionV2Updated,
     ChapterProductionV2ValidationError,
     _valid_sha256,
@@ -70,6 +75,10 @@ class _FinalizeEvidence:
 
 def _invalid() -> ChapterProductionV2ValidationError:
     return ChapterProductionV2ValidationError()
+
+
+def _reconcile() -> ChapterProductionV2ReconciliationError:
+    return ChapterProductionV2ReconciliationError()
 
 
 def _expiry_precludes_resolution(expires_at: object, database_now: object) -> bool:
@@ -105,11 +114,79 @@ def _validated_prospective_map(
         raise _invalid() from None
 
 
+async def _resolved_source_action(
+    service: object, run_id: UUID, state: ChapterProductionState
+) -> ActionRequest:
+    actions = list(await service.session.scalars(
+        select(ActionRequest).where(ActionRequest.workflow_run_id == run_id).with_for_update()
+    ))
+    matches = [
+        action for action in actions
+        if action.status == ActionRequestStatus.REVISED.value
+        and action.metadata_.get("document_id") == state.document_id
+        and action.metadata_.get("document_version_id") == state.document_version_id
+    ]
+    if len(matches) != 1 or any(
+        action.status == ActionRequestStatus.PENDING.value for action in actions
+    ):
+        raise _reconcile() from None
+    return matches[0]
+
+
+def _binding_from_checkpoint_action(
+    service: object, state: ChapterProductionState, action: ActionRequest
+) -> ChapterActionBinding:
+    metadata = service._action_metadata(action)
+    if state.document_id is None or state.document_version_id is None:
+        raise _reconcile() from None
+    return ChapterActionBinding(
+        action_request_id=str(action.id), workflow_run_id=state.chapter_workflow_run_id,
+        chapter_id=state.chapter_id, request_type=action.request_type,
+        kind=ChapterActionKind.AUTHOR_REVISION, status=ActionRequestStatus.PENDING,
+        pending_count=1, document_id=state.document_id,
+        document_version_id=state.document_version_id,
+        content_hash=metadata["content_hash"], current_document_id=state.document_id,
+        current_document_version_id=state.document_version_id,
+        current_content_hash=metadata["content_hash"],
+    )
+
+
 class ManualEditCoordinator:
     """Persist an authorized user edit and replay it into the resolved state."""
 
     def __init__(self, service: object) -> None:
         self.service = service
+
+    async def reconcile_manual(
+        self, *, project_id: UUID, chapter_id: UUID, run: WorkflowRun,
+        state: ChapterProductionState, chapter: Chapter, actor_user_id: UUID,
+    ) -> ChapterProductionState:
+        service = self.service
+        candidates = await _reconciliation_candidates(service, run, parent_version_id=_source_version_id(state))
+        if len(candidates) != 1:
+            raise _reconcile() from None
+        document, version = candidates[0]
+        if (
+            document.current_version_id != version.id
+            or chapter.current_draft_document_id != document.id
+        ):
+            raise _reconcile() from None
+        operation_key = version.metadata_.get("operation_key")
+        if type(operation_key) is not str or len(operation_key) != 64:
+            raise _reconcile() from None
+        await service._commit()
+        action = await _resolved_source_action(service, run.id, state)
+        binding = _binding_from_checkpoint_action(service, state, action)
+        await self._finalize_manual_edit(
+            project_id=project_id, chapter_id=chapter_id, workflow_run_id=run.id,
+            action_request_id=action.id, actor_user_id=action.resolved_by_id,
+            document_id=document.id, version_id=version.id, old_binding=binding,
+            expected_parent_version_id=UUID(state.document_version_id),
+            operation_key=operation_key, finalize_actor_user_id=actor_user_id,
+        )
+        return await service.load_state(
+            project_id, chapter_id, run.id, actor_user_id=actor_user_id
+        )
 
     async def submit(
         self,
