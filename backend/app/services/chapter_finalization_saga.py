@@ -205,6 +205,10 @@ class ChapterFinalizationSaga:
         workflow_run_id: UUID,
         actor_user_id: UUID,
     ) -> ChapterProductionV2Finalized:
+        project_id = UUID(str(project_id))
+        chapter_id = UUID(str(chapter_id))
+        workflow_run_id = UUID(str(workflow_run_id))
+        actor_user_id = UUID(str(actor_user_id))
         service = self.service
         service._validated_ids(project_id, chapter_id, workflow_run_id, actor_user_id)
         try:
@@ -431,6 +435,7 @@ class ChapterFinalizationSaga:
             or final_version.content_hash != evidence.draft_hash
             or final_version.workflow_run_id != run.id
             or final_version.source != DocumentSource.SYSTEM.value
+            or final_version.parent_version_id is not None
             or final_version.metadata_
             != {
                 "contract_version": _CONTRACT_VERSION,
