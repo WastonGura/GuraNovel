@@ -64,23 +64,45 @@ async def _ready_pair_rows(
     return checkpoint, event
 
 
-async def test_store_enter_creates_exact_pair_for_zero_and_idempotently_reuses_for_one(
-    async_session: AsyncSession, tmp_path: Path
-) -> None:
-    project, chapter, owner, service, run = await _ready_context(async_session, tmp_path)
-    ready_checkpoint, ready_event = await _ready_pair_rows(async_session, run.id)
-    lore_checkpoint = await async_session.scalar(
+async def _finalizable_lore_checkpoint(
+    session: AsyncSession, run: WorkflowRun, ready_checkpoint: WorkflowCheckpoint
+) -> tuple[ChapterProductionState, WorkflowCheckpoint]:
+    checkpoint = await session.scalar(
         select(WorkflowCheckpoint).where(
             WorkflowCheckpoint.workflow_run_id == run.id,
             WorkflowCheckpoint.checkpoint_index == ready_checkpoint.checkpoint_index - 1,
         )
     )
-    assert lore_checkpoint is not None
+    assert checkpoint is not None
+    lore_report = await session.scalar(
+        select(ReviewReport).where(
+            ReviewReport.workflow_run_id == run.id,
+            ReviewReport.review_mode == "chapter_final_lore",
+        )
+    )
+    assert lore_report is not None
+    finalizable = ChapterProductionState.from_checkpoint(
+        {**checkpoint.state_json, "lore_report_id": str(lore_report.id)}
+    )
+    assert finalizable.status is ChapterProductionStatus.LORE_FINAL_REVIEW
+    assert finalizable.lore_report_id == str(lore_report.id)
+    checkpoint.node_name = finalizable.current_node
+    checkpoint.state_json = finalizable.to_checkpoint()
+    return finalizable, checkpoint
+
+
+async def test_store_enter_creates_exact_pair_for_zero_and_idempotently_reuses_for_one(
+    async_session: AsyncSession, tmp_path: Path
+) -> None:
+    project, chapter, owner, service, run = await _ready_context(async_session, tmp_path)
+    ready_checkpoint, ready_event = await _ready_pair_rows(async_session, run.id)
+    lore_state, lore_checkpoint = await _finalizable_lore_checkpoint(
+        async_session, run, ready_checkpoint
+    )
     payload = ready_checkpoint.state_json
     document = await async_session.get(Document, UUID(payload["document_id"]))
     version = await async_session.get(DocumentVersion, UUID(payload["document_version_id"]))
     assert document is not None and version is not None
-    lore_state = ChapterProductionState.from_checkpoint(lore_checkpoint.state_json)
 
     await async_session.delete(ready_event)
     await async_session.delete(ready_checkpoint)
@@ -151,33 +173,27 @@ async def test_store_enter_rejects_reuse_when_ready_pair_is_not_immediate_succes
 ) -> None:
     project, chapter, owner, service, run = await _ready_context(async_session, tmp_path)
     ready_checkpoint, _ = await _ready_pair_rows(async_session, run.id)
-    lore_checkpoint = await async_session.scalar(
-        select(WorkflowCheckpoint).where(
-            WorkflowCheckpoint.workflow_run_id == run.id,
-            WorkflowCheckpoint.checkpoint_index == ready_checkpoint.checkpoint_index - 1,
-        )
+    lore_state, _ = await _finalizable_lore_checkpoint(
+        async_session, run, ready_checkpoint
     )
-    assert lore_checkpoint is not None
     payload = ready_checkpoint.state_json
     document = await async_session.get(Document, UUID(payload["document_id"]))
     version = await async_session.get(DocumentVersion, UUID(payload["document_version_id"]))
     assert document is not None and version is not None
-    lore_state = ChapterProductionState.from_checkpoint(lore_checkpoint.state_json)
 
-    async_session.add(
-        WorkflowCheckpoint(
-            workflow_run_id=run.id,
-            checkpoint_index=ready_checkpoint.checkpoint_index + 1,
-            node_name="ARCHIVE_UPDATE",
-            state_json={**ready_checkpoint.state_json, "status": "ARCHIVE_UPDATE"},
-        )
+    later_checkpoint = WorkflowCheckpoint(
+        workflow_run_id=run.id,
+        checkpoint_index=ready_checkpoint.checkpoint_index + 1,
+        node_name="ARCHIVE_UPDATE",
+        state_json={**ready_checkpoint.state_json, "status": "ARCHIVE_UPDATE"},
     )
+    async_session.add(later_checkpoint)
     await async_session.commit()
 
     with pytest.raises(ChapterProductionV2ReconciliationError):
         await service._readiness.enter(
             run=run,
-            checkpoint=lore_checkpoint,
+            checkpoint=later_checkpoint,
             state=lore_state,
             document=document,
             version=version,
