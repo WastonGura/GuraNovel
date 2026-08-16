@@ -53,7 +53,6 @@ from app.models import (
     ReviewMode,
     ReviewReport,
     WorkflowCheckpoint,
-    WorkflowEvent,
     WorkflowRun,
 )
 from app.services.chapter_production_repository import (
@@ -80,10 +79,7 @@ from app.services.chapter_production_v2_contracts import (
     valid_nonzero_uuid as _valid_nonzero_uuid,
     valid_sha256 as _valid_sha256,
 )
-from app.services.document_service import (
-    DocumentCommitIndeterminateError,
-    DocumentService,
-)
+from app.services.document_service import DocumentService
 from app.services.author_accept_coordination import (
     AuthorAcceptCoordinator,
     _StaleActionAdopted,
@@ -91,6 +87,7 @@ from app.services.author_accept_coordination import (
 from app.services.chapter_draft_revision_coordinator import (
     ChapterDraftRevisionCoordinator,
 )
+from app.services.chapter_finalization_saga import ChapterFinalizationSaga
 from app.services.chapter_review_coordinator import (
     ChapterReviewCoordinator,
 )
@@ -377,6 +374,7 @@ class ChapterProductionV2Service:
                 }
             ),
         )
+        self._finalization = ChapterFinalizationSaga(self)
 
     async def start_from_approved_outline(
         self,
@@ -645,254 +643,12 @@ class ChapterProductionV2Service:
     ) -> ChapterProductionV2Finalized:
         """Promote the exact ready version through a restart-safe DB/filesystem saga."""
 
-        self._validated_ids(project_id, chapter_id, workflow_run_id, actor_user_id)
-        try:
-            await self._require_project_owner(project_id, actor_user_id)
-            chapter = await self._chapter(project_id, chapter_id, lock=True)
-            run = await self._run(project_id, chapter_id, workflow_run_id, lock=True)
-            state, checkpoint = await self._locked_state(run)
-            if state.status is ChapterProductionStatus.COMPLETED:
-                result = await self._finalized_result_locked(
-                    chapter=chapter, run=run, state=state
-                )
-                await self.session.commit()
-                return result
-            document, version = await self._locked_review_document(
-                project_id=project_id,
-                chapter_id=chapter_id,
-                state=state,
-                chapter=chapter,
-            )
-            if state.status is ChapterProductionStatus.REVISION_READY:
-                policy, editor, chief, lore = await self._live_review_bindings_locked(
-                    run=run, state=state, document=document, version=version
-                )
-                try:
-                    archive_state = state.begin_archive_update(
-                        policy=policy,
-                        document_id=str(document.id),
-                        current_document_version_id=str(version.id),
-                        version_content_hash=version.content_hash,
-                        editor_report=editor,
-                        chief_editor_report=chief,
-                        lore_report=lore,
-                    )
-                except ChapterProductionValidationError:
-                    raise _invalid() from None
-                self._append_state(run, checkpoint, archive_state)
-                chapter.status = ChapterProductionStatus.ARCHIVE_UPDATE.value
-                await self._commit()
-                state = archive_state
-            elif state.status is not ChapterProductionStatus.ARCHIVE_UPDATE:
-                raise _invalid()
-            else:
-                await self.session.commit()
-            draft_document_id = document.id
-            draft_version_id = version.id
-            draft_hash = version.content_hash
-        except ChapterProductionV2CommitIndeterminateError:
-            raise
-        except ChapterProductionV2ReconciliationError:
-            await self._rollback()
-            raise
-        except ChapterProductionV2ValidationError:
-            await self._rollback()
-            raise
-        except Exception:
-            await self._rollback()
-            raise _invalid() from None
-
-        try:
-            content = self._verified_snapshot_content(document, version)
-            if version.id != draft_version_id or sha256_content(content) != draft_hash:
-                raise _invalid()
-            await self.session.commit()
-        except ChapterProductionV2ValidationError:
-            await self._rollback()
-            raise
-        except Exception:
-            await self._rollback()
-            raise _invalid() from None
-
-        try:
-            await self._require_project_owner(project_id, actor_user_id)
-            chapter = await self._chapter(project_id, chapter_id, lock=True)
-            run = await self._run(project_id, chapter_id, workflow_run_id, lock=True)
-            state, _ = await self._locked_state(run)
-            if state.status is ChapterProductionStatus.COMPLETED:
-                result = await self._finalized_result_locked(
-                    chapter=chapter, run=run, state=state
-                )
-                await self.session.commit()
-                return result
-            if state.status is not ChapterProductionStatus.ARCHIVE_UPDATE:
-                raise _invalid()
-            document, version = await self._locked_review_document(
-                project_id=project_id,
-                chapter_id=chapter_id,
-                state=state,
-                chapter=chapter,
-            )
-            if (
-                document.id != draft_document_id
-                or version.id != draft_version_id
-                or version.content_hash != draft_hash
-            ):
-                raise ChapterProductionV2ReconciliationError()
-            final_operation_key = self._final_operation_key(run, state)
-            final_documents = list(
-                await self.session.scalars(
-                    select(Document)
-                    .options(selectinload(Document.project))
-                    .execution_options(populate_existing=True)
-                    .where(
-                        Document.project_id == project_id,
-                        Document.chapter_id == chapter_id,
-                        Document.type == DocumentType.CHAPTER_FINAL.value,
-                    )
-                    .with_for_update()
-                )
-            )
-            writes: tuple[tuple[str, str], ...]
-            if not final_documents:
-                final_document, current_write, snapshot_write = (
-                    await self.documents.stage_create_document(
-                        project_id=project_id,
-                        chapter_id=chapter_id,
-                        document_type=DocumentType.CHAPTER_FINAL,
-                        title=f"Chapter {chapter.chapter_number} final",
-                        path=self._final_document_path(chapter=chapter, run=run),
-                        content=content,
-                        source=DocumentSource.SYSTEM,
-                        workflow_run_id=run.id,
-                        change_summary="Promoted the reviewed Chapter Production V2 version.",
-                        version_metadata={
-                            "contract_version": _CONTRACT_VERSION,
-                            "operation_key": final_operation_key,
-                        },
-                    )
-                )
-                final_version = final_document.current_version
-                if final_version is None:
-                    raise _invalid()
-                writes = (current_write, snapshot_write)
-                chapter.final_document_id = final_document.id
-                await self._commit()
-            elif len(final_documents) == 1:
-                final_document = final_documents[0]
-                final_version = await self._locked_current_document_version(
-                    final_document
-                )
-                if (
-                    final_version is None
-                    or chapter.final_document_id != final_document.id
-                    or not self._valid_final_document_paths(
-                        chapter=chapter,
-                        run=run,
-                        document=final_document,
-                        version=final_version,
-                    )
-                    or final_version.content_hash != draft_hash
-                    or final_version.workflow_run_id != run.id
-                    or final_version.source != DocumentSource.SYSTEM.value
-                    or final_version.metadata_
-                    != {
-                        "contract_version": _CONTRACT_VERSION,
-                        "operation_key": final_operation_key,
-                    }
-                    or final_version.snapshot_path is None
-                ):
-                    raise ChapterProductionV2ReconciliationError()
-                writes = (
-                    (final_document.path, content),
-                    (final_version.snapshot_path, content),
-                )
-                await self.session.commit()
-            else:
-                raise ChapterProductionV2ReconciliationError()
-        except ChapterProductionV2CommitIndeterminateError:
-            raise
-        except ChapterProductionV2ReconciliationError:
-            await self._rollback()
-            raise
-        except ChapterProductionV2ValidationError:
-            await self._rollback()
-            raise
-        except Exception:
-            await self._rollback()
-            raise _invalid() from None
-
-        try:
-            self.documents.write_staged_files(final_document, writes)
-        except DocumentCommitIndeterminateError:
-            raise ChapterProductionV2CommitIndeterminateError() from None
-
-        try:
-            await self._require_project_owner(project_id, actor_user_id)
-            chapter = await self._chapter(project_id, chapter_id, lock=True)
-            run = await self._run(project_id, chapter_id, workflow_run_id, lock=True)
-            state, checkpoint = await self._locked_state(run)
-            if state.status is ChapterProductionStatus.COMPLETED:
-                result = await self._finalized_result_locked(
-                    chapter=chapter, run=run, state=state
-                )
-                await self.session.commit()
-                return result
-            if state.status is not ChapterProductionStatus.ARCHIVE_UPDATE:
-                raise ChapterProductionV2ReconciliationError()
-            document, version = await self._locked_review_document(
-                project_id=project_id,
-                chapter_id=chapter_id,
-                state=state,
-                chapter=chapter,
-            )
-            policy, editor, chief, lore = await self._live_review_bindings_locked(
-                run=run, state=state, document=document, version=version
-            )
-            result = await self._finalized_result_locked(
-                chapter=chapter, run=run, state=state
-            )
-            try:
-                completed = state.complete(
-                    policy=policy,
-                    document_id=str(document.id),
-                    current_document_version_id=str(version.id),
-                    version_content_hash=version.content_hash,
-                    editor_report=editor,
-                    chief_editor_report=chief,
-                    lore_report=lore,
-                )
-            except ChapterProductionValidationError:
-                raise _invalid() from None
-            self._append_state(run, checkpoint, completed)
-            chapter.status = ChapterProductionStatus.COMPLETED.value
-            self.session.add(
-                WorkflowEvent(
-                    workflow_run_id=run.id,
-                    event_type="chapter_finalized",
-                    node_name=completed.current_node,
-                    payload={
-                        "chapter_id": str(chapter.id),
-                        "document_version_id": state.document_version_id,
-                        "final_document_id": str(result.final_document_id),
-                        "final_version_id": str(result.final_version_id),
-                        "status": completed.status.value,
-                    },
-                )
-            )
-            await self._commit()
-            return result
-        except ChapterProductionV2CommitIndeterminateError:
-            raise
-        except ChapterProductionV2ReconciliationError:
-            await self._rollback()
-            raise
-        except ChapterProductionV2ValidationError:
-            await self._rollback()
-            raise
-        except Exception:
-            await self._rollback()
-            raise _invalid() from None
+        return await self._finalization.finalize(
+            project_id=project_id,
+            chapter_id=chapter_id,
+            workflow_run_id=workflow_run_id,
+            actor_user_id=actor_user_id,
+        )
 
     async def load_state(
         self,
@@ -1440,121 +1196,6 @@ class ChapterProductionV2Service:
         self, run: WorkflowRun, checkpoint: WorkflowCheckpoint
     ) -> ChapterProductionState:
         return await self._readiness.restore_marker(run, checkpoint)
-
-    @staticmethod
-    def _final_operation_key(
-        run: WorkflowRun, state: ChapterProductionState
-    ) -> str:
-        if state.document_version_id is None:
-            raise _invalid()
-        return sha256_content(
-            ":".join(
-                (
-                    _CONTRACT_VERSION,
-                    str(run.id),
-                    state.document_version_id,
-                    state.review_policy_version,
-                    "non-panel-final-promotion",
-                )
-            )
-        )
-
-    @staticmethod
-    def _final_document_path(*, chapter: Chapter, run: WorkflowRun) -> str:
-        return f"chapters/chapter-{chapter.chapter_number:04d}-{run.id}-final.md"
-
-    @classmethod
-    def _valid_final_document_paths(
-        cls,
-        *,
-        chapter: Chapter,
-        run: WorkflowRun,
-        document: Document,
-        version: DocumentVersion,
-    ) -> bool:
-        return (
-            document.path == cls._final_document_path(chapter=chapter, run=run)
-            and type(version.version_number) is int
-            and version.version_number == 1
-            and version.file_path == document.path
-            and version.snapshot_path
-            == version_snapshot_path(str(document.id), version.version_number).as_posix()
-        )
-
-    def _verify_final_artifacts(
-        self, *, document: Document, version: DocumentVersion
-    ) -> None:
-        read_failed = False
-        try:
-            snapshot_content = self._verified_snapshot_content(document, version)
-            current_content = MarkdownStore(
-                Path(document.project.workspace_root)
-            ).read_bounded(
-                document.path,
-                max_bytes=MAX_CHAPTER_CONTENT_BYTES,
-            )
-        except Exception:
-            read_failed = True
-            snapshot_content = ""
-            current_content = ""
-        if read_failed:
-            raise ChapterProductionV2ReconciliationError()
-        if (
-            current_content != snapshot_content
-            or len(current_content.encode("utf-8")) != version.byte_size
-            or sha256_content(current_content) != version.content_hash
-        ):
-            raise ChapterProductionV2ReconciliationError()
-
-    async def _finalized_result_locked(
-        self,
-        *,
-        chapter: Chapter,
-        run: WorkflowRun,
-        state: ChapterProductionState,
-    ) -> ChapterProductionV2Finalized:
-        if chapter.final_document_id is None or state.content_hash is None:
-            raise ChapterProductionV2ReconciliationError()
-        documents = list(
-            await self.session.scalars(
-                select(Document)
-                .options(selectinload(Document.project))
-                .execution_options(populate_existing=True)
-                .where(
-                    Document.project_id == run.project_id,
-                    Document.chapter_id == chapter.id,
-                    Document.type == DocumentType.CHAPTER_FINAL.value,
-                )
-                .with_for_update()
-            )
-        )
-        if len(documents) != 1 or documents[0].id != chapter.final_document_id:
-            raise ChapterProductionV2ReconciliationError()
-        document = documents[0]
-        version = await self._locked_current_document_version(document)
-        if (
-            version is None
-            or document.current_version_id != version.id
-            or version.document_id != document.id
-            or not self._valid_final_document_paths(
-                chapter=chapter,
-                run=run,
-                document=document,
-                version=version,
-            )
-            or version.content_hash != state.content_hash
-            or version.workflow_run_id != run.id
-            or version.source != DocumentSource.SYSTEM.value
-            or version.parent_version_id is not None
-            or version.metadata_
-            != {
-                "contract_version": _CONTRACT_VERSION,
-                "operation_key": self._final_operation_key(run, state),
-            }
-        ):
-            raise ChapterProductionV2ReconciliationError()
-        self._verify_final_artifacts(document=document, version=version)
-        return ChapterProductionV2Finalized(run.id, document.id, version.id)
 
     async def _locked_current_document_version(
         self, document: Document
