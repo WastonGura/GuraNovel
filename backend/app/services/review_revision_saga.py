@@ -22,6 +22,10 @@ from app.services.chapter_production_v2_contracts import (
     ChapterProductionV2Updated,
     ChapterProductionV2ValidationError,
 )
+from app.services.chapter_review_validation import (
+    validated_persisted_review_report,
+    validated_resolved_review_action,
+)
 from app.services.document_service import DocumentCommitIndeterminateError
 from app.services.review_revision_handoff import ReviewRevisionPlan
 from app.workflows.chapter_production import (
@@ -370,7 +374,8 @@ async def _source_and_reports(
         )
         if report is None:
             raise _reconcile() from None
-        await service._validated_persisted_review_report(
+        await validated_persisted_review_report(
+            service,
             row=report, run=run, document=source_document,
             version=source_version, stage=_review_stage(expected_mode),
         )
@@ -409,7 +414,8 @@ async def _finalize_review_revision(
         service, identity=identity, run=run, report_slots=report_slots,
     )
     trigger_mode = report_slots[-1][1]
-    await service._validated_resolved_review_action(
+    await validated_resolved_review_action(
+        service,
         run=run,
         document=source_document,
         version=source_version,
