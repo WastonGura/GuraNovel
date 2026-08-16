@@ -10,6 +10,7 @@ chapter, run, and version facts; persisted mutable paths are never trusted.
 
 from __future__ import annotations
 
+import traceback
 from dataclasses import dataclass
 from pathlib import Path
 from uuid import UUID
@@ -246,7 +247,16 @@ class ChapterFinalizationSaga:
         except ChapterProductionV2ValidationError:
             await service._rollback()
             raise
-        except Exception:
+        except Exception as error:
+            frame_name = ""
+            if error.__traceback__ is not None:
+                frames = traceback.extract_tb(error.__traceback__)
+                if frames:
+                    frame_name = frames[-1].name
+            if type(error).__name__ == "TypeError":
+                print(type(error).__name__, frame_name, str(error))
+            else:
+                print(type(error).__name__, frame_name)
             await service._rollback()
             raise _invalid() from None
 
