@@ -10,6 +10,7 @@ chapter, run, and version facts; persisted mutable paths are never trusted.
 
 from __future__ import annotations
 
+import traceback
 from dataclasses import dataclass
 from pathlib import Path
 from uuid import UUID
@@ -197,20 +198,36 @@ def _verify_final_artifacts(
     service: object, *, document: Document, version: DocumentVersion
 ) -> None:
     read_failed = False
+    snapshot_read_raised = False
+    current_read_raised = False
     try:
-        snapshot_content = service._verified_snapshot_content(
-            document, version
-        )
-        current_content = MarkdownStore(
-            Path(document.project.workspace_root)
-        ).read_bounded(
-            document.path,
-            max_bytes=MAX_CHAPTER_CONTENT_BYTES,
-        )
-    except Exception:
+        try:
+            snapshot_content = service._verified_snapshot_content(
+                document, version
+            )
+        except Exception:
+            snapshot_read_raised = True
+            raise
+        try:
+            current_content = MarkdownStore(
+                Path(document.project.workspace_root)
+            ).read_bounded(
+                document.path,
+                max_bytes=MAX_CHAPTER_CONTENT_BYTES,
+            )
+        except Exception:
+            current_read_raised = True
+            raise
+    except Exception as error:
         read_failed = True
         snapshot_content = ""
         current_content = ""
+        print(
+            type(error).__name__,
+            [frame.name for frame in traceback.extract_tb(error.__traceback__)],
+            snapshot_read_raised,
+            current_read_raised,
+        )
     if read_failed:
         raise _reconciliation()
     if (
