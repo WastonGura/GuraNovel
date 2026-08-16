@@ -32,6 +32,7 @@ from app.models import (
     WorkflowRun,
 )
 from app.documents.chapter_segments import MAX_CHAPTER_CONTENT_BYTES
+from app.services.chapter_review_claim import claim_current_review
 from app.services.chapter_production_v2_service import (
     ChapterProductionV2CommitIndeterminateError,
     ChapterProductionV2Finalized,
@@ -844,7 +845,8 @@ async def test_operator_acknowledges_exact_claim_before_safe_retry(
     )
     project_id, chapter_id, owner_id = project.id, chapter.id, owner.id
     workflow_run_id = run_id(chapter)
-    context = await service._claim_current_review(
+    context = await claim_current_review(
+        service,
         project_id=project_id,
         chapter_id=chapter_id,
         workflow_run_id=workflow_run_id,

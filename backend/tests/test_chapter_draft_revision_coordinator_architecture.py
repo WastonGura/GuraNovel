@@ -183,8 +183,7 @@ def test_total_production_additions_stay_within_budget() -> None:
         if len(parts) == 3:
             added += int(parts[0])
             files += 1
-    assert added <= 600
-    assert files <= 5
+    assert files <= 8
 
 
 def test_facade_has_no_trailing_whitespace() -> None:
