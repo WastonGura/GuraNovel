@@ -120,6 +120,11 @@ from app.services.review_revision_saga import (
     ReviewRevisionSaga,
     _reconciliation_candidates,
 )
+from app.services.revision_readiness_store import (
+    RevisionReadyPair,
+    RevisionReadinessStore,
+    _ReviewStateReferences,
+)
 from app.workflows.chapter_production import (
     ChapterActionBinding,
     ChapterActionDecision,
@@ -141,7 +146,6 @@ _REVIEW_POLICY_VERSION = "chapter-quality-v1"
 _AUTHOR_ACTION_TYPE = "chapter_author_revision"
 _ATTEMPT_STATUS_CLAIMED = "claimed"
 _ATTEMPT_STATUS_FAILED = "failed"
-_READY_EVENT_TYPE = "revision_ready"
 
 
 def _new_attempt_id() -> str:
@@ -150,22 +154,6 @@ def _new_attempt_id() -> str:
 
 def _safe_cancelled_error(error: BaseException) -> asyncio.CancelledError:
     return safe_cancelled_error(error)
-
-
-@dataclass(frozen=True, slots=True)
-class _ReviewStateReferences:
-    review_policy_version: str
-    chief_editor_required: bool
-    editor_report_id: str | None
-    chief_editor_report_id: str | None
-    lore_report_id: str | None
-
-
-@dataclass(frozen=True, slots=True)
-class _ReadyPair:
-    state: ChapterProductionState
-    checkpoint: WorkflowCheckpoint
-    event: WorkflowEvent
 
 
 @dataclass(frozen=True, slots=True)
@@ -378,6 +366,7 @@ class ChapterProductionV2Service:
         )
         self._review_coordinator = ChapterReviewCoordinator(self)
         self.documents = DocumentService(session)
+        self._readiness = RevisionReadinessStore(self)
         self.repository = ChapterProductionRepository(
             session,
             contract_version=_CONTRACT_VERSION,
@@ -1418,89 +1407,11 @@ class ChapterProductionV2Service:
         ChapterReviewBinding | None,
         ChapterReviewBinding,
     ]:
-        metadata = self._run_metadata(run)
-        policy = ChapterReviewPolicyBinding(
-            workflow_run_id=str(run.id),
-            chapter_id=str(run.chapter_id),
-            review_policy_version=metadata["review_policy_version"],
-            chief_editor_required=metadata["chief_editor_required"],
-        )
-        expected = _review_report_slots(
-            editor_report_id=UUID(state.editor_report_id) if state.editor_report_id else None,
-            chief_editor_report_id=(
-                UUID(state.chief_editor_report_id) if state.chief_editor_report_id else None
-            ),
-            lore_report_id=UUID(state.lore_report_id) if state.lore_report_id else None,
-        )
-        required_count = 3 if state.chief_editor_required else 2
-        if len(expected) != required_count:
-            raise _invalid()
-        rows = list(
-            await self.session.scalars(
-                select(ReviewReport)
-                .execution_options(populate_existing=True)
-                .where(
-                    ReviewReport.project_id == run.project_id,
-                    ReviewReport.chapter_id == run.chapter_id,
-                    ReviewReport.workflow_run_id == run.id,
-                    ReviewReport.target_document_id == document.id,
-                    ReviewReport.target_version_id == version.id,
-                    ReviewReport.review_mode.in_(
-                        (
-                            ReviewMode.CHAPTER_EDITOR.value,
-                            ReviewMode.CHAPTER_CHIEF_FINAL.value,
-                            ReviewMode.CHAPTER_FINAL_LORE.value,
-                        )
-                    ),
-                )
-                .with_for_update()
-            )
-        )
-        if len(rows) != required_count or {row.id for row in rows} != {
-            item[0] for item in expected
-        }:
-            raise ChapterProductionV2ReconciliationError()
-        by_id = {row.id: row for row in rows}
-        bindings: dict[ChapterReviewStage, ChapterReviewBinding] = {}
-        for report_id, mode, role in expected:
-            row = by_id[report_id]
-            stage = {
-                ReviewMode.CHAPTER_EDITOR.value: ChapterReviewStage.EDITOR,
-                ReviewMode.CHAPTER_CHIEF_FINAL.value: ChapterReviewStage.CHIEF_EDITOR,
-                ReviewMode.CHAPTER_FINAL_LORE.value: ChapterReviewStage.LORE,
-            }[mode]
-            if (
-                row.review_mode != mode
-                or row.reviewer_agent_role != role
-                or row.passed is not True
-                or row.target_document_id != document.id
-                or row.target_version_id != version.id
-            ):
-                raise ChapterProductionV2ReconciliationError()
-            await validated_persisted_review_report(
-                self,
-                row=row,
-                run=run,
-                document=document,
-                version=version,
-                stage=stage,
-            )
-            bindings[stage] = ChapterReviewBinding(
-                report_id=str(row.id),
-                stage=stage,
-                workflow_run_id=str(run.id),
-                chapter_id=str(run.chapter_id),
-                document_id=str(document.id),
-                document_version_id=str(version.id),
-                review_mode=row.review_mode,
-                reviewer_agent_role=row.reviewer_agent_role,
-                passed=row.passed,
-            )
-        return (
-            policy,
-            bindings[ChapterReviewStage.EDITOR],
-            bindings.get(ChapterReviewStage.CHIEF_EDITOR),
-            bindings[ChapterReviewStage.LORE],
+        return await self._readiness.live_review_bindings_locked(
+            run=run,
+            state=state,
+            document=document,
+            version=version,
         )
 
     async def _enter_revision_ready_locked(
@@ -1512,237 +1423,23 @@ class ChapterProductionV2Service:
         document: Document,
         version: DocumentVersion,
     ) -> ChapterProductionState:
-        policy, editor, chief, lore = await self._live_review_bindings_locked(
-            run=run, state=state, document=document, version=version
+        return await self._readiness.enter(
+            run=run,
+            checkpoint=checkpoint,
+            state=state,
+            document=document,
+            version=version,
         )
-        try:
-            ready = state.finalize_revision_ready(
-                policy=policy,
-                document_id=str(document.id),
-                current_document_version_id=str(version.id),
-                version_content_hash=version.content_hash,
-                editor_report=editor,
-                chief_editor_report=chief,
-                lore_report=lore,
-            )
-        except ChapterProductionValidationError:
-            raise _invalid() from None
-        pairs = await self._validated_ready_pairs_locked(run)
-        semantic_key = (str(run.id), str(version.id), policy.review_policy_version)
-        matches = [pair for pair in pairs if pair.state.semantic_ready_key == semantic_key]
-        if not matches:
-            ready_checkpoint = WorkflowCheckpoint(
-                workflow_run_id=run.id,
-                checkpoint_index=checkpoint.checkpoint_index + 1,
-                node_name=ready.current_node,
-                state_json=ready.to_checkpoint(),
-            )
-            self.session.add(ready_checkpoint)
-            await self.session.flush()
-            self.session.add(
-                WorkflowEvent(
-                    workflow_run_id=run.id,
-                    event_type=_READY_EVENT_TYPE,
-                    node_name=ready.current_node,
-                    payload={
-                        "chapter_id": str(run.chapter_id),
-                        "checkpoint_id": str(ready_checkpoint.id),
-                        "checkpoint_index": ready_checkpoint.checkpoint_index,
-                        "document_id": str(document.id),
-                        "document_version_id": str(version.id),
-                        "content_hash": version.content_hash,
-                        "review_policy_version": policy.review_policy_version,
-                        "status": ChapterProductionStatus.REVISION_READY.value,
-                    },
-                )
-            )
-            self._project_state(run, ready)
-            return ready
-        if len(matches) == 1:
-            ready_checkpoint = matches[0].checkpoint
-            event = matches[0].event
-            expected_payload = {
-                "chapter_id": str(run.chapter_id),
-                "checkpoint_id": str(ready_checkpoint.id),
-                "checkpoint_index": ready_checkpoint.checkpoint_index,
-                "document_id": str(document.id),
-                "document_version_id": str(version.id),
-                "content_hash": version.content_hash,
-                "review_policy_version": policy.review_policy_version,
-                "status": ChapterProductionStatus.REVISION_READY.value,
-            }
-            if (
-                ready_checkpoint.node_name != ready.current_node
-                or ready_checkpoint.state_json != ready.to_checkpoint()
-                or event.node_name != ready.current_node
-                or event.payload != expected_payload
-            ):
-                raise ChapterProductionV2ReconciliationError()
-            self._project_state(run, ready)
-            return ready
-        raise ChapterProductionV2ReconciliationError()
 
     async def _validated_ready_pairs_locked(
         self, run: WorkflowRun
-    ) -> tuple[_ReadyPair, ...]:
-        checkpoints = list(
-            await self.session.scalars(
-                select(WorkflowCheckpoint)
-                .execution_options(populate_existing=True)
-                .where(WorkflowCheckpoint.workflow_run_id == run.id)
-                .order_by(WorkflowCheckpoint.checkpoint_index)
-                .with_for_update()
-            )
-        )
-        markers = [
-            item
-            for item in checkpoints
-            if item.node_name == ChapterProductionStatus.REVISION_READY.value
-            or (
-                type(item.state_json) is dict
-                and item.state_json.get("status")
-                == ChapterProductionStatus.REVISION_READY.value
-            )
-        ]
-        restored: list[tuple[ChapterProductionState, WorkflowCheckpoint]] = []
-        for marker in markers:
-            if (
-                marker.node_name != ChapterProductionStatus.REVISION_READY.value
-                or type(marker.state_json) is not dict
-                or marker.state_json.get("status")
-                != ChapterProductionStatus.REVISION_READY.value
-                or sum(
-                    item.checkpoint_index == marker.checkpoint_index - 1
-                    for item in checkpoints
-                )
-                != 1
-            ):
-                raise ChapterProductionV2ReconciliationError()
-            restored.append((await self._restore_ready_marker_locked(run, marker), marker))
-
-        events = list(
-            await self.session.scalars(
-                select(WorkflowEvent)
-                .execution_options(populate_existing=True)
-                .where(
-                    WorkflowEvent.workflow_run_id == run.id,
-                    WorkflowEvent.event_type == _READY_EVENT_TYPE,
-                )
-                .with_for_update()
-            )
-        )
-        expected_event_keys = {
-            "chapter_id",
-            "checkpoint_id",
-            "checkpoint_index",
-            "document_id",
-            "document_version_id",
-            "content_hash",
-            "review_policy_version",
-            "status",
-        }
-        if len(events) != len(restored) or any(
-            type(item.payload) is not dict or set(item.payload) != expected_event_keys
-            for item in events
-        ):
-            raise ChapterProductionV2ReconciliationError()
-        pairs: list[_ReadyPair] = []
-        used_events: set[UUID] = set()
-        for state, marker in restored:
-            matching = [
-                item
-                for item in events
-                if item.payload.get("checkpoint_id") == str(marker.id)
-            ]
-            expected_payload = {
-                "chapter_id": str(run.chapter_id),
-                "checkpoint_id": str(marker.id),
-                "checkpoint_index": marker.checkpoint_index,
-                "document_id": state.document_id,
-                "document_version_id": state.document_version_id,
-                "content_hash": state.content_hash,
-                "review_policy_version": state.review_policy_version,
-                "status": ChapterProductionStatus.REVISION_READY.value,
-            }
-            if (
-                len(matching) != 1
-                or matching[0].id in used_events
-                or matching[0].node_name != ChapterProductionStatus.REVISION_READY.value
-                or matching[0].payload != expected_payload
-            ):
-                raise ChapterProductionV2ReconciliationError()
-            used_events.add(matching[0].id)
-            pairs.append(_ReadyPair(state, marker, matching[0]))
-        return tuple(pairs)
+    ) -> tuple[RevisionReadyPair, ...]:
+        return await self._readiness.validated_pairs(run)
 
     async def _restore_ready_marker_locked(
         self, run: WorkflowRun, checkpoint: WorkflowCheckpoint
     ) -> ChapterProductionState:
-        payload = checkpoint.state_json
-        try:
-            if type(payload) is not dict:
-                raise ChapterProductionValidationError("READY payload is malformed.")
-            references = _ReviewStateReferences(
-                review_policy_version=payload["review_policy_version"],
-                chief_editor_required=payload["chief_editor_required"],
-                editor_report_id=payload["editor_report_id"],
-                chief_editor_report_id=payload["chief_editor_report_id"],
-                lore_report_id=payload["lore_report_id"],
-            )
-            document_id = UUID(payload["document_id"])
-            version_id = UUID(payload["document_version_id"])
-            document = await self.session.scalar(
-                select(Document)
-                .options(selectinload(Document.project))
-                .execution_options(populate_existing=True)
-                .where(
-                    Document.id == document_id,
-                    Document.project_id == run.project_id,
-                    Document.chapter_id == run.chapter_id,
-                    Document.type == DocumentType.CHAPTER_DRAFT.value,
-                )
-                .with_for_update()
-            )
-            version = await self.session.scalar(
-                select(DocumentVersion)
-                .execution_options(populate_existing=True)
-                .where(
-                    DocumentVersion.id == version_id,
-                    DocumentVersion.document_id == document_id,
-                    DocumentVersion.content_hash == payload["content_hash"],
-                )
-                .with_for_update()
-            )
-            if document is None or version is None:
-                raise ChapterProductionValidationError("READY version is stale.")
-            policy, editor, chief, lore = await self._live_review_bindings_locked(
-                run=run,
-                state=references,
-                document=document,
-                version=version,
-            )
-            return ChapterProductionState.from_revision_ready_checkpoint(
-                payload,
-                policy=policy,
-                workflow_run_id=str(run.id),
-                chapter_id=str(run.chapter_id),
-                run_workflow_type=run.workflow_type,
-                run_status=ChapterProductionStatus.REVISION_READY.value,
-                run_current_node=ChapterProductionStatus.REVISION_READY.value,
-                run_awaiting_user=False,
-                checkpoint_workflow_run_id=str(checkpoint.workflow_run_id),
-                checkpoint_node_name=checkpoint.node_name,
-                document_id=str(document.id),
-                current_document_version_id=str(version.id),
-                version_content_hash=version.content_hash,
-                editor_report=editor,
-                chief_editor_report=chief,
-                lore_report=lore,
-            )
-        except ChapterProductionV2ReconciliationError:
-            raise
-        except (ChapterProductionValidationError, KeyError, TypeError, ValueError):
-            raise ChapterProductionV2ReconciliationError() from None
+        return await self._readiness.restore_marker(run, checkpoint)
 
     @staticmethod
     def _final_operation_key(
@@ -2825,49 +2522,17 @@ class ChapterProductionV2Service:
         chief: ChapterReviewBinding | None,
         lore: ChapterReviewBinding,
     ) -> None:
-        semantic_key = (str(run.id), str(version.id), policy.review_policy_version)
-        matches = [
-            pair
-            for pair in await self._validated_ready_pairs_locked(run)
-            if pair.state.semantic_ready_key == semantic_key
-        ]
-        if len(matches) != 1:
-            raise ChapterProductionV2ReconciliationError()
-        ready_checkpoint = matches[0].checkpoint
-        event = matches[0].event
-        ready = ChapterProductionState.from_revision_ready_checkpoint(
-            ready_checkpoint.state_json,
+        await self._readiness.validate_existing_pair(
+            run=run,
+            state=state,
             policy=policy,
-            workflow_run_id=str(run.id),
-            chapter_id=str(run.chapter_id),
-            run_workflow_type=run.workflow_type,
-            run_status=ChapterProductionStatus.REVISION_READY.value,
-            run_current_node="REVISION_READY",
-            run_awaiting_user=False,
-            checkpoint_workflow_run_id=str(ready_checkpoint.workflow_run_id),
-            checkpoint_node_name=ready_checkpoint.node_name,
-            document_id=str(document.id),
-            current_document_version_id=str(version.id),
-            version_content_hash=version.content_hash,
-            editor_report=editor,
-            chief_editor_report=chief,
-            lore_report=lore,
+            document=document,
+            version=version,
+            editor=editor,
+            chief=chief,
+            lore=lore,
         )
-        if ready.semantic_ready_key != (
-            str(run.id),
-            str(version.id),
-            policy.review_policy_version,
-        ) or event.payload != {
-            "chapter_id": str(run.chapter_id),
-            "checkpoint_id": str(ready_checkpoint.id),
-            "checkpoint_index": ready_checkpoint.checkpoint_index,
-            "document_id": str(document.id),
-            "document_version_id": str(version.id),
-            "content_hash": version.content_hash,
-            "review_policy_version": policy.review_policy_version,
-            "status": ChapterProductionStatus.REVISION_READY.value,
-        }:
-            raise ChapterProductionV2ReconciliationError()
+
     @staticmethod
     def _project_state(run: WorkflowRun, state: ChapterProductionState) -> None:
         run.status = state.status.value
