@@ -43,16 +43,31 @@ def _service_method(name: str) -> tuple[str, ast.AsyncFunctionDef]:
     return ast.get_source_segment(source, method) or "", method
 
 
+def _budget_base_ref() -> str:
+    for ref in ("main", "origin/main", "refs/remotes/origin/main"):
+        result = subprocess.run(
+            ["git", "rev-parse", "--verify", ref],
+            cwd=REPO,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        if result.returncode == 0:
+            return ref
+    raise AssertionError("no main/origin/main ref available for production budget gate")
+
+
 def _production_additions() -> tuple[int, int]:
+    ref = _budget_base_ref()
     result = subprocess.run(
-        ["git", "diff", "main...HEAD", "--numstat", "--", "backend/app"],
+        ["git", "diff", f"{ref}...HEAD", "--numstat", "--", "backend/app"],
         cwd=REPO,
         text=True,
         capture_output=True,
         check=False,
     )
     if result.returncode != 0:
-        return 0, 0
+        raise AssertionError(result.stderr)
     added = 0
     files = 0
     for line in result.stdout.splitlines():

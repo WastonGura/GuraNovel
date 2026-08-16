@@ -150,15 +150,30 @@ def test_removed_private_recovery_bodies_are_absent_from_facade() -> None:
         assert name not in source
 
 
+def _budget_base_ref() -> str:
+    for ref in ("main", "origin/main", "refs/remotes/origin/main"):
+        result = subprocess.run(
+            ["git", "rev-parse", "--verify", ref],
+            cwd=REPO,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        if result.returncode == 0:
+            return ref
+    raise AssertionError("no main/origin/main ref available for production budget gate")
+
+
 def test_total_production_additions_stay_within_budget() -> None:
+    ref = _budget_base_ref()
     result = subprocess.run(
-        ["git", "diff", "main...HEAD", "--numstat", "--", "backend/app"],
+        ["git", "diff", f"{ref}...HEAD", "--numstat", "--", "backend/app"],
         cwd=REPO,
         text=True,
         capture_output=True,
         check=False,
     )
-    assert result.returncode == 0
+    assert result.returncode == 0, result.stderr
     added = 0
     files = 0
     for line in result.stdout.splitlines():
