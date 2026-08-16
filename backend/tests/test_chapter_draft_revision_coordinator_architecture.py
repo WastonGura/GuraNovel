@@ -151,7 +151,7 @@ def test_removed_private_recovery_bodies_are_absent_from_facade() -> None:
 
 
 def _budget_base_ref() -> str:
-    for ref in ("main", "origin/main", "refs/remotes/origin/main"):
+    for ref in ("main", "origin/main", "refs/remotes/origin/main", "HEAD^1"):
         result = subprocess.run(
             ["git", "rev-parse", "--verify", ref],
             cwd=REPO,

@@ -40,7 +40,7 @@ def _service_method(name: str) -> tuple[str, ast.AsyncFunctionDef]:
 
 
 def _budget_base_ref() -> str:
-    for ref in ("main", "origin/main", "refs/remotes/origin/main"):
+    for ref in ("main", "origin/main", "refs/remotes/origin/main", "HEAD^1"):
         result = subprocess.run(
             ["git", "rev-parse", "--verify", ref],
             cwd=REPO,
