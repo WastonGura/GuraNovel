@@ -146,6 +146,44 @@ async def test_store_enter_creates_exact_pair_for_zero_and_idempotently_reuses_f
     )
 
 
+async def test_store_enter_rejects_reuse_when_ready_pair_is_not_immediate_successor(
+    async_session: AsyncSession, tmp_path: Path
+) -> None:
+    project, chapter, owner, service, run = await _ready_context(async_session, tmp_path)
+    ready_checkpoint, _ = await _ready_pair_rows(async_session, run.id)
+    lore_checkpoint = await async_session.scalar(
+        select(WorkflowCheckpoint).where(
+            WorkflowCheckpoint.workflow_run_id == run.id,
+            WorkflowCheckpoint.checkpoint_index == ready_checkpoint.checkpoint_index - 1,
+        )
+    )
+    assert lore_checkpoint is not None
+    payload = ready_checkpoint.state_json
+    document = await async_session.get(Document, UUID(payload["document_id"]))
+    version = await async_session.get(DocumentVersion, UUID(payload["document_version_id"]))
+    assert document is not None and version is not None
+    lore_state = ChapterProductionState.from_checkpoint(lore_checkpoint.state_json)
+
+    async_session.add(
+        WorkflowCheckpoint(
+            workflow_run_id=run.id,
+            checkpoint_index=ready_checkpoint.checkpoint_index + 1,
+            node_name="ARCHIVE_UPDATE",
+            state_json={**ready_checkpoint.state_json, "status": "ARCHIVE_UPDATE"},
+        )
+    )
+    await async_session.commit()
+
+    with pytest.raises(ChapterProductionV2ReconciliationError):
+        await service._readiness.enter(
+            run=run,
+            checkpoint=lore_checkpoint,
+            state=lore_state,
+            document=document,
+            version=version,
+        )
+
+
 @pytest.mark.parametrize(
     "corruption",
     [

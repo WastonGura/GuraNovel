@@ -109,6 +109,17 @@ def ready_event_payload(
     }
 
 
+def _is_immediate_successor(
+    run: WorkflowRun, checkpoint: WorkflowCheckpoint, pair_checkpoint: WorkflowCheckpoint
+) -> bool:
+    """Return True when the READY checkpoint is the exact next checkpoint."""
+
+    return (
+        pair_checkpoint.workflow_run_id == run.id
+        and pair_checkpoint.checkpoint_index == checkpoint.checkpoint_index + 1
+    )
+
+
 @dataclass(frozen=True, slots=True, repr=False)
 class RevisionReadyPair:
     """One validated READY checkpoint/event pair."""
@@ -132,11 +143,11 @@ class _ReviewStateReferences:
 
 def _review_slots(state: ChapterProductionState | _ReviewStateReferences) -> tuple:
     slots: list[tuple[UUID, str, str]] = []
-    if state.editor_report_id is not None:
+    if state.editor_report_id:
         slots.append(
             (UUID(state.editor_report_id), ReviewMode.CHAPTER_EDITOR.value, "editor_agent")
         )
-    if state.chief_editor_report_id is not None:
+    if state.chief_editor_report_id:
         slots.append(
             (
                 UUID(state.chief_editor_report_id),
@@ -144,7 +155,7 @@ def _review_slots(state: ChapterProductionState | _ReviewStateReferences) -> tup
                 "chief_editor_agent",
             )
         )
-    if state.lore_report_id is not None:
+    if state.lore_report_id:
         slots.append(
             (UUID(state.lore_report_id), ReviewMode.CHAPTER_FINAL_LORE.value, "lore_agent")
         )
@@ -316,11 +327,9 @@ class RevisionReadinessStore:
                     event_type=_READY_EVENT_TYPE,
                     node_name=ready.current_node,
                     payload=ready_event_payload(
-                        chapter_id=run.chapter_id,
-                        checkpoint_id=ready_checkpoint.id,
+                        chapter_id=run.chapter_id, checkpoint_id=ready_checkpoint.id,
                         checkpoint_index=ready_checkpoint.checkpoint_index,
-                        document_id=document.id,
-                        document_version_id=version.id,
+                        document_id=document.id, document_version_id=version.id,
                         content_hash=version.content_hash,
                         review_policy_version=policy.review_policy_version,
                     ),
@@ -330,12 +339,12 @@ class RevisionReadinessStore:
             return ready
         if len(matches) == 1:
             pair = matches[0]
+            if not _is_immediate_successor(run, checkpoint, pair.checkpoint):
+                raise _reconciliation() from None
             expected_payload = ready_event_payload(
-                chapter_id=run.chapter_id,
-                checkpoint_id=pair.checkpoint.id,
+                chapter_id=run.chapter_id, checkpoint_id=pair.checkpoint.id,
                 checkpoint_index=pair.checkpoint.checkpoint_index,
-                document_id=document.id,
-                document_version_id=version.id,
+                document_id=document.id, document_version_id=version.id,
                 content_hash=version.content_hash,
                 review_policy_version=policy.review_policy_version,
             )

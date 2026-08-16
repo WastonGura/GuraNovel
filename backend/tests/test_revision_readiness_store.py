@@ -89,6 +89,45 @@ def test_ready_pair_is_frozen_and_repr_is_content_free() -> None:
         pair.state = SimpleNamespace(status="ARCHIVE_UPDATE")
 
 
+def test_review_slots_treat_empty_report_ids_as_missing_like_old_facade() -> None:
+    module = _module()
+
+    state = SimpleNamespace(
+        editor_report_id="",
+        chief_editor_report_id=None,
+        lore_report_id=None,
+    )
+    assert module._review_slots(state) == ()
+
+    state = SimpleNamespace(
+        editor_report_id=None,
+        chief_editor_report_id="",
+        lore_report_id=None,
+    )
+    assert module._review_slots(state) == ()
+
+
+def test_ready_reuse_requires_same_run_and_immediate_successor() -> None:
+    module = _module()
+
+    run_id = uuid4()
+    run = SimpleNamespace(id=run_id)
+    checkpoint = SimpleNamespace(checkpoint_index=5)
+    same = SimpleNamespace(workflow_run_id=run_id, checkpoint_index=6)
+    wrong_run = SimpleNamespace(workflow_run_id=uuid4(), checkpoint_index=6)
+    wrong_index = SimpleNamespace(workflow_run_id=run_id, checkpoint_index=7)
+
+    assert module._is_immediate_successor(
+        run=run, checkpoint=checkpoint, pair_checkpoint=same
+    )
+    assert not module._is_immediate_successor(
+        run=run, checkpoint=checkpoint, pair_checkpoint=wrong_run
+    )
+    assert not module._is_immediate_successor(
+        run=run, checkpoint=checkpoint, pair_checkpoint=wrong_index
+    )
+
+
 def test_store_constructor_rejects_non_service() -> None:
     module = _module()
 
