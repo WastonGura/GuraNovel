@@ -146,3 +146,12 @@ def test_recovery_defines_recovery_bodies() -> None:
         "locked_state",
     ):
         assert f"async def {name}" in source or f"def {name}" in source, name
+
+
+def test_stale_author_adoption_requires_agent_role_and_workflow_run_none() -> None:
+    source = (
+        ROOT / "app/services/chapter_production_recovery_evidence.py"
+    ).read_text(encoding="utf-8")
+
+    assert "or stale_version.agent_role is not None" in source
+    assert "or stale_version.workflow_run_id is not None" in source

@@ -236,8 +236,8 @@ async def _adopt_stale_author_context(
         or stale_version.source != DocumentSource.USER.value
         or stale_version.actor_user_id is None
         or str(stale_version.actor_user_id) != str(actor_user_id)
-        or stale_version.agent_role is None
-        or stale_version.workflow_run_id is None
+        or stale_version.agent_role is not None
+        or stale_version.workflow_run_id is not None
     ):
         raise _invalid()
     await _commit_stale_author_adoption(
