@@ -10,6 +10,7 @@ chapter, run, and version facts; persisted mutable paths are never trusted.
 
 from __future__ import annotations
 
+import traceback
 from dataclasses import dataclass
 from pathlib import Path
 from uuid import UUID
@@ -263,7 +264,11 @@ class ChapterFinalizationSaga:
         except ChapterProductionV2ValidationError:
             await service._rollback()
             raise
-        except Exception:
+        except Exception as error:
+            print(
+                type(error).__name__,
+                [frame.name for frame in traceback.extract_tb(error.__traceback__)],
+            )
             await service._rollback()
             raise _invalid() from None
 
@@ -372,6 +377,12 @@ class ChapterFinalizationSaga:
             or version.id != evidence.draft_version_id
             or version.content_hash != evidence.draft_hash
         ):
+            print(
+                document.id != evidence.draft_document_id,
+                version.id != evidence.draft_version_id,
+                version.content_hash != evidence.draft_hash,
+                state.status.name,
+            )
             raise _reconciliation()
         final_documents = list(
             await service.session.scalars(
@@ -512,6 +523,12 @@ class ChapterFinalizationSaga:
             )
         except DocumentCommitIndeterminateError:
             raise ChapterProductionV2CommitIndeterminateError() from None
+        except BaseException as error:
+            print(
+                type(error).__name__,
+                [frame.name for frame in traceback.extract_tb(error.__traceback__)],
+            )
+            raise
 
     async def _complete_finalization_locked(
         self, evidence: _ReadySourceEvidence
