@@ -565,9 +565,12 @@ class ReviewRevisionSaga:
         operation_key = version.metadata_.get("operation_key")
         if type(operation_key) is not str or len(operation_key) != 64:
             raise _reconcile() from None
-        if not await _candidate_matches_provider_attempt(
-            service, run=run, state=state, attempt=attempt,
-            document=document, version=version,
+        if (
+            type(attempt) is not dict
+            or attempt.get("checkpoint_index") != checkpoint.checkpoint_index
+            or not await _candidate_matches_provider_attempt(
+                service, run=run, state=state, attempt=attempt, document=document, version=version
+            )
         ):
             raise _reconcile() from None
         await service._commit()

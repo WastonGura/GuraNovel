@@ -168,3 +168,24 @@ def test_total_production_additions_stay_within_budget() -> None:
             files += 1
     assert added <= 600
     assert files <= 5
+
+
+def test_facade_has_no_trailing_whitespace() -> None:
+    for number, line in enumerate(FACADE.read_text(encoding="utf-8").splitlines(), 1):
+        assert line == line.rstrip(), f"trailing whitespace at line {number}"
+
+
+def test_draft_reconcile_guards_checkpoint_index_before_candidate_match() -> None:
+    feedback = (ROOT / "app/services/feedback_candidate_saga.py").read_text(encoding="utf-8")
+    review = (ROOT / "app/services/review_revision_saga.py").read_text(encoding="utf-8")
+    guard = 'attempt.get("checkpoint_index") != checkpoint.checkpoint_index'
+
+    assert guard in feedback
+    assert guard in review
+
+
+def test_feedback_candidate_matcher_rejects_non_feedback_attempt_kind() -> None:
+    feedback = (ROOT / "app/services/feedback_candidate_saga.py").read_text(encoding="utf-8")
+    guard = 'attempt.get("kind") != "feedback"'
+
+    assert guard in feedback

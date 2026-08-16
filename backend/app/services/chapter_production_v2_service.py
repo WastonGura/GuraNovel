@@ -3276,7 +3276,7 @@ class ChapterProductionV2Service:
         if restore_feedback:
             if attempt_checkpoint_index < 1:
                 raise ChapterProductionV2ReconciliationError()
-            await _restore_feedback_without_write(self, 
+            await _restore_feedback_without_write(self,
                 run,
                 recovered,
                 source_checkpoint_index=attempt_checkpoint_index - 1,
