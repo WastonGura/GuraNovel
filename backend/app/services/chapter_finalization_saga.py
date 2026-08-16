@@ -56,6 +56,19 @@ def _reconciliation() -> ChapterProductionV2ReconciliationError:
     return ChapterProductionV2ReconciliationError()
 
 
+def _canonical_boundary_uuid(value: object) -> UUID:
+    """Return a canonical stdlib UUID for saga boundary IDs, or fail closed."""
+    if isinstance(value, (str, bytes)):
+        raise _invalid()
+    try:
+        parsed = UUID(str(value))
+    except (AttributeError, TypeError, ValueError):
+        raise _invalid() from None
+    if str(parsed) != str(value) or parsed.int == 0:
+        raise _invalid()
+    return parsed
+
+
 @dataclass(frozen=True, slots=True)
 class _ReadySourceEvidence:
     project_id: UUID
@@ -205,10 +218,10 @@ class ChapterFinalizationSaga:
         workflow_run_id: UUID,
         actor_user_id: UUID,
     ) -> ChapterProductionV2Finalized:
-        project_id = UUID(str(project_id))
-        chapter_id = UUID(str(chapter_id))
-        workflow_run_id = UUID(str(workflow_run_id))
-        actor_user_id = UUID(str(actor_user_id))
+        project_id = _canonical_boundary_uuid(project_id)
+        chapter_id = _canonical_boundary_uuid(chapter_id)
+        workflow_run_id = _canonical_boundary_uuid(workflow_run_id)
+        actor_user_id = _canonical_boundary_uuid(actor_user_id)
         service = self.service
         service._validated_ids(project_id, chapter_id, workflow_run_id, actor_user_id)
         try:

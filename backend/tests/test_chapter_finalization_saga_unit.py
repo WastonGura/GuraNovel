@@ -166,7 +166,43 @@ async def test_finalize_normalizes_pgproto_uuid_boundary_ids_before_validation(
         )
 
     assert service.validated_ids is not None
+    assert len(service.validated_ids) == 4
     assert all(type(value) is UUID for value in service.validated_ids)
+
+
+@pytest.mark.anyio
+async def test_finalize_rejects_malformed_string_boundary_id_as_validation_error() -> None:
+    """Malformed boundary IDs must fail closed as validation errors, never ValueError."""
+
+    service = _RecordingService()
+    saga = ChapterFinalizationSaga(service)
+    with pytest.raises(ChapterProductionV2ValidationError) as raised:
+        await saga.finalize(
+            project_id="not-a-uuid",  # type: ignore[arg-type]
+            chapter_id=uuid4(),
+            workflow_run_id=uuid4(),
+            actor_user_id=uuid4(),
+        )
+
+    assert not isinstance(raised.value, ValueError)
+    assert service.validated_ids is None
+
+
+@pytest.mark.anyio
+async def test_finalize_rejects_plain_string_uuid_boundary_id_as_validation_error() -> None:
+    """String UUIDs must keep the facade rejection policy, not be silently accepted."""
+
+    service = _RecordingService()
+    saga = ChapterFinalizationSaga(service)
+    with pytest.raises(ChapterProductionV2ValidationError):
+        await saga.finalize(
+            project_id=str(uuid4()),  # type: ignore[arg-type]
+            chapter_id=uuid4(),
+            workflow_run_id=uuid4(),
+            actor_user_id=uuid4(),
+        )
+
+    assert service.validated_ids is None
 
 
 class _RecoverySession:
