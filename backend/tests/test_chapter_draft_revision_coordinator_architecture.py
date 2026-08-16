@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import ast
+import subprocess
 from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
+REPO = ROOT.parent
 FACADE = ROOT / "app/services/chapter_production_v2_service.py"
 COORDINATOR = ROOT / "app/services/chapter_draft_revision_coordinator.py"
 
@@ -146,3 +148,23 @@ def test_removed_private_recovery_bodies_are_absent_from_facade() -> None:
         "def _restore_feedback_without_write",
     ):
         assert name not in source
+
+
+def test_total_production_additions_stay_within_budget() -> None:
+    result = subprocess.run(
+        ["git", "diff", "main...HEAD", "--numstat", "--", "backend/app"],
+        cwd=REPO,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert result.returncode == 0
+    added = 0
+    files = 0
+    for line in result.stdout.splitlines():
+        parts = line.split()
+        if len(parts) == 3:
+            added += int(parts[0])
+            files += 1
+    assert added <= 600
+    assert files <= 5
