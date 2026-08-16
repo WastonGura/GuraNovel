@@ -44,24 +44,30 @@ def _module_imports(path: Path) -> set[str]:
     }
 
 
-def test_recovery_module_exists_and_is_bounded() -> None:
-    assert RECOVERY.exists(), RECOVERY
-    source = RECOVERY.read_text(encoding="utf-8")
-    tree = _tree(RECOVERY)
+def _recovery_modules() -> tuple[Path, ...]:
+    return tuple(
+        sorted(ROOT.glob("app/services/chapter_production_recovery*.py"))
+    )
 
-    assert len(source.splitlines()) <= 800
-    for node in ast.walk(tree):
-        if isinstance(node, ast.ClassDef):
-            assert _span(node) <= 400, node.name
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            assert _span(node) <= 80, node.name
+
+def test_recovery_module_exists_and_is_bounded() -> None:
+    modules = _recovery_modules()
+    assert modules
+    for path in modules:
+        source = path.read_text(encoding="utf-8")
+        tree = _tree(path)
+        assert len(source.splitlines()) <= 800, path
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ClassDef):
+                assert _span(node) <= 400, (path, node.name)
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                assert _span(node) <= 80, (path, node.name)
 
 
 def test_recovery_does_not_import_the_facade() -> None:
-    imports = _module_imports(RECOVERY)
-
-    assert "app.services.chapter_production_v2_service" not in imports
-    assert "ChapterProductionV2Service" not in RECOVERY.read_text(encoding="utf-8")
+    for path in _recovery_modules():
+        assert "app.services.chapter_production_v2_service" not in _module_imports(path)
+        assert "ChapterProductionV2Service" not in path.read_text(encoding="utf-8")
 
 
 def test_facade_constructs_recovery_once() -> None:

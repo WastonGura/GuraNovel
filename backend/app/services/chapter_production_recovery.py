@@ -1,10 +1,8 @@
-"""Scoped recovery facade for Chapter Production V2.
+"""Thin recovery router for Chapter Production V2.
 
-The heavy recovery and state-loading bodies live in
-``chapter_production_recovery_impl``; this module exposes the small
-``ChapterProductionRecovery`` coordinator the facade constructs.  Keeping the
-coordinator here preserves the module/class/function size contract while the
-facade keeps only thin delegates.
+Recovery-owned bodies live in per-cluster modules:
+``chapter_production_recovery_attempts``, ``_evidence``, ``_reconstruction``,
+and ``_shared``.  This module only routes facade delegates to those modules.
 """
 
 from __future__ import annotations
@@ -20,9 +18,25 @@ from app.models import (
     WorkflowCheckpoint,
     WorkflowRun,
 )
-from app.services.chapter_production_recovery_impl import (
+from app.services.chapter_production_recovery_attempts import (
+    fail_provider,
+    recover_failed_attempt,
+    release_attempt,
+)
+from app.services.chapter_production_recovery_evidence import (
+    author_context,
+    exact_review_report_count,
+    locked_current_revision,
+    locked_review_document,
+    review_revision_context,
+)
+from app.services.chapter_production_recovery_reconstruction import (
+    load_state,
+    locked_state,
+    reconcile_review_route,
+)
+from app.services.chapter_production_recovery_shared import (
     _AuthorContext,
-    _ChapterProductionRecoveryImpl,
     _ReviewRevisionContext,
     _review_report_slots,  # noqa: F401  (re-export)
     verified_snapshot_content,
@@ -36,10 +50,10 @@ from app.workflows.chapter_production import (
 
 
 class ChapterProductionRecovery:
-    """Thin coordinator over the recovery implementation module."""
+    """Thin coordinator over the recovery cluster modules."""
 
     def __init__(self, service: object) -> None:
-        self._impl = _ChapterProductionRecoveryImpl(service)
+        self._service = service
 
     async def load_state(
         self,
@@ -50,7 +64,7 @@ class ChapterProductionRecovery:
         workflow_run_id: UUID,
         actor_user_id: UUID,
     ) -> ChapterProductionState:
-        return await self._impl.load_state(
+        return await load_state(
             service,
             project_id=project_id,
             chapter_id=chapter_id,
@@ -67,7 +81,7 @@ class ChapterProductionRecovery:
         *,
         actor_user_id: UUID,
     ) -> ChapterProductionState:
-        return await self._impl.reconcile_review_route(
+        return await reconcile_review_route(
             service,
             project_id,
             chapter_id,
@@ -86,7 +100,7 @@ class ChapterProductionRecovery:
         expected_attempt_key: str,
         expected_attempt_id: str,
     ) -> bool:
-        return await self._impl.fail_provider(
+        return await fail_provider(
             service,
             workflow_run_id,
             failure_code,
@@ -111,7 +125,7 @@ class ChapterProductionRecovery:
         report_ids: Sequence[UUID] = (),
         restore_feedback: bool = False,
     ) -> None:
-        return await self._impl.recover_failed_attempt(
+        await recover_failed_attempt(
             service,
             project_id=project_id,
             chapter_id=chapter_id,
@@ -136,7 +150,7 @@ class ChapterProductionRecovery:
         expected_checkpoint_index: int,
         restore_feedback: bool = False,
     ) -> None:
-        return await self._impl.release_attempt(
+        await release_attempt(
             service,
             workflow_run_id,
             expected_key=expected_key,
@@ -156,7 +170,7 @@ class ChapterProductionRecovery:
         action_request_id: UUID,
         actor_user_id: UUID,
     ) -> _AuthorContext:
-        return await self._impl.author_context(
+        return await author_context(
             service,
             project_id=project_id,
             chapter_id=chapter_id,
@@ -175,7 +189,7 @@ class ChapterProductionRecovery:
         report_ids: Sequence[UUID],
         actor_user_id: UUID,
     ) -> _ReviewRevisionContext:
-        return await self._impl.review_revision_context(
+        return await review_revision_context(
             service,
             project_id=project_id,
             chapter_id=chapter_id,
@@ -193,7 +207,7 @@ class ChapterProductionRecovery:
         state: ChapterProductionState,
         chapter: Chapter,
     ) -> tuple[Document, DocumentVersion]:
-        return await self._impl.locked_review_document(
+        return await locked_review_document(
             service,
             project_id=project_id,
             chapter_id=chapter_id,
@@ -209,7 +223,7 @@ class ChapterProductionRecovery:
         version: DocumentVersion,
         stage: ChapterReviewStage,
     ) -> int:
-        return await self._impl.exact_review_report_count(
+        return await exact_review_report_count(
             service,
             run=run,
             version=version,
@@ -219,7 +233,7 @@ class ChapterProductionRecovery:
     async def locked_state(
         self, service: object, run: WorkflowRun
     ) -> tuple[ChapterProductionState, WorkflowCheckpoint]:
-        return await self._impl.locked_state(service, run)
+        return await locked_state(service, run)
 
     @staticmethod
     def verified_snapshot_content(
@@ -243,7 +257,7 @@ class ChapterProductionRecovery:
         operation_key: str,
         expected_attempt_id: str | None = None,
     ) -> tuple[Document, DocumentVersion]:
-        return await self._impl.locked_current_revision(
+        return await locked_current_revision(
             service,
             project_id=project_id,
             chapter_id=chapter_id,
