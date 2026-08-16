@@ -62,7 +62,7 @@ def _budget_base_ref() -> str:
 def _production_additions() -> tuple[int, int]:
     ref = _budget_base_ref()
     result = subprocess.run(
-        ["git", "diff", f"{ref}...HEAD", "--numstat", "--", "backend/app"],
+        ["git", "diff", f"{ref}...HEAD", "--numstat", "--", SAGA.relative_to(REPO).as_posix()],
         cwd=REPO,
         text=True,
         capture_output=True,

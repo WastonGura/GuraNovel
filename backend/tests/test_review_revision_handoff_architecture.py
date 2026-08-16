@@ -14,7 +14,6 @@ FACADE = ROOT / "app/services/chapter_production_v2_service.py"
 
 PRODUCTION_FILES = (
     "backend/app/services/review_revision_handoff.py",
-    "backend/app/services/chapter_production_v2_service.py",
 )
 
 
