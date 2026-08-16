@@ -10,7 +10,6 @@ chapter, run, and version facts; persisted mutable paths are never trusted.
 
 from __future__ import annotations
 
-import traceback
 from dataclasses import dataclass
 from pathlib import Path
 from uuid import UUID
@@ -84,8 +83,25 @@ class _ReadySourceEvidence:
 
 @dataclass(frozen=True, slots=True)
 class _StagedFinal:
-    final_document: Document
+    document_id: UUID
+    version_id: UUID
+    content: str
+    path: str
+    snapshot_path: str
+    byte_size: int
+    content_hash: str
+    workspace_root: str
     writes: tuple[tuple[str, str], ...]
+
+
+@dataclass(frozen=True, slots=True)
+class _WriteProject:
+    workspace_root: str
+
+
+@dataclass(frozen=True, slots=True)
+class _WriteDocument:
+    project: _WriteProject
 
 
 def _final_operation_key(
@@ -237,7 +253,7 @@ class ChapterFinalizationSaga:
             staged = await self._stage_final_document_locked(evidence)
             if isinstance(staged, ChapterProductionV2Finalized):
                 return staged
-            await self._materialize_final_files(staged)
+            self._materialize_final_files(staged)
             return await self._complete_finalization_locked(evidence)
         except ChapterProductionV2CommitIndeterminateError:
             raise
@@ -247,16 +263,7 @@ class ChapterFinalizationSaga:
         except ChapterProductionV2ValidationError:
             await service._rollback()
             raise
-        except Exception as error:
-            frame_name = ""
-            if error.__traceback__ is not None:
-                frames = traceback.extract_tb(error.__traceback__)
-                if frames:
-                    frame_name = frames[-1].name
-            if type(error).__name__ == "TypeError":
-                print(type(error).__name__, frame_name, str(error))
-            else:
-                print(type(error).__name__, frame_name)
+        except Exception:
             await service._rollback()
             raise _invalid() from None
 
@@ -423,14 +430,24 @@ class ChapterFinalizationSaga:
             )
         )
         final_version = final_document.current_version
-        if final_version is None:
+        if final_version is None or final_version.snapshot_path is None:
             raise _invalid()
-        chapter.final_document_id = final_document.id
-        await service._commit()
-        return _StagedFinal(
-            final_document=final_document,
+        if final_document.project is None:
+            raise _invalid()
+        staged = _StagedFinal(
+            document_id=final_document.id,
+            version_id=final_version.id,
+            content=evidence.content,
+            path=final_document.path,
+            snapshot_path=final_version.snapshot_path,
+            byte_size=final_version.byte_size,
+            content_hash=final_version.content_hash,
+            workspace_root=final_document.project.workspace_root,
             writes=(current_write, snapshot_write),
         )
+        chapter.final_document_id = final_document.id
+        await service._commit()
+        return staged
 
     async def _recover_existing_final_document(
         self,
@@ -465,19 +482,33 @@ class ChapterFinalizationSaga:
                 "operation_key": final_operation_key,
             }
             or final_version.snapshot_path is None
+            or final_document.project is None
         ):
             raise _reconciliation()
-        writes = (
-            (final_document.path, evidence.content),
-            (final_version.snapshot_path, evidence.content),
+        staged = _StagedFinal(
+            document_id=final_document.id,
+            version_id=final_version.id,
+            content=evidence.content,
+            path=final_document.path,
+            snapshot_path=final_version.snapshot_path,
+            byte_size=final_version.byte_size,
+            content_hash=final_version.content_hash,
+            workspace_root=final_document.project.workspace_root,
+            writes=(
+                (final_document.path, evidence.content),
+                (final_version.snapshot_path, evidence.content),
+            ),
         )
         await service.session.commit()
-        return _StagedFinal(final_document=final_document, writes=writes)
+        return staged
 
     def _materialize_final_files(self, staged: _StagedFinal) -> None:
         try:
+            write_document = _WriteDocument(
+                _WriteProject(staged.workspace_root)
+            )
             self.service.documents.write_staged_files(
-                staged.final_document, staged.writes
+                write_document, staged.writes
             )
         except DocumentCommitIndeterminateError:
             raise ChapterProductionV2CommitIndeterminateError() from None
