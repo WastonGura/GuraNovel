@@ -23,7 +23,7 @@ dev = [
 [tool.pytest.ini_options]
 pythonpath = ["."]
 testpaths = ["tests"]
-addopts = "-m 'not integration'"
+addopts = "-m 'not integration' -x"
 markers = [
     "integration: requires an explicit PostgreSQL test database",
 ]
