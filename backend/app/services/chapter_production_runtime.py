@@ -13,8 +13,6 @@ from app.services.chapter_production_v2_contracts import (
 )
 
 SCHEDULER_KIND_SERVICE_V2 = "service_v2"
-SCHEDULER_KIND_SERVICE_V2_LEGACY = "service_v2_legacy"
-SCHEDULER_KIND_LEGACY = "legacy"
 _GRAPH_ID = "chapter-production-v2"
 _GRAPH_VERSION = "0"
 _RUNTIME_KEYS = frozenset({"scheduler_kind", "graph_id", "graph_version"})
@@ -32,29 +30,17 @@ def chapter_production_runtime_pin() -> dict[str, str]:
     }
 
 
-def strict_runtime(value: object) -> dict[str, str] | None:
-    """Return the exact runtime namespace, or None for legacy absence."""
-    if type(value) is not dict:
+def strict_runtime(value: object) -> dict[str, str]:
+    """Return the exact runtime namespace, or fail closed."""
+    if type(value) is not dict or not value:
         raise _invalid()
-    if not value:
-        return None
     if set(value) != _RUNTIME_KEYS or any(type(item) is not str for item in value.values()):
         raise _invalid()
-    scheduler_kind = value["scheduler_kind"]
-    if scheduler_kind != SCHEDULER_KIND_SERVICE_V2:
+    if value["scheduler_kind"] != SCHEDULER_KIND_SERVICE_V2:
         raise _invalid()
     if value["graph_id"] != _GRAPH_ID or value["graph_version"] != _GRAPH_VERSION:
         raise _invalid()
     return dict(value)
-
-
-def classify_runtime(metadata: object) -> str:
-    """Classify one run's runtime without rewriting its metadata."""
-    if type(metadata) is dict and "chapter_production_runtime" in metadata:
-        runtime = strict_runtime(metadata["chapter_production_runtime"])
-        assert runtime is not None
-        return runtime["scheduler_kind"]
-    return SCHEDULER_KIND_LEGACY
 
 
 async def next_event_sequence(
@@ -62,19 +48,16 @@ async def next_event_sequence(
 ) -> int:
     """Allocate the next per-run event ordinal under the caller's run lock."""
     latest = await session.scalar(
-        select(func.max(WorkflowEvent.event_sequence))
-        .where(WorkflowEvent.workflow_run_id == workflow_run_id)
-        .with_for_update()
+        select(func.max(WorkflowEvent.event_sequence)).where(
+            WorkflowEvent.workflow_run_id == workflow_run_id
+        )
     )
     return (latest or 0) + 1
 
 
 __all__ = [
-    "SCHEDULER_KIND_LEGACY",
     "SCHEDULER_KIND_SERVICE_V2",
-    "SCHEDULER_KIND_SERVICE_V2_LEGACY",
     "chapter_production_runtime_pin",
-    "classify_runtime",
     "next_event_sequence",
     "strict_runtime",
 ]

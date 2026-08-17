@@ -1,17 +1,22 @@
 from __future__ import annotations
 
+import ast
+from pathlib import Path
+
 import pytest
 
 from app.services.chapter_production_runtime import (
-    SCHEDULER_KIND_LEGACY,
     SCHEDULER_KIND_SERVICE_V2,
-    SCHEDULER_KIND_SERVICE_V2_LEGACY,
     chapter_production_runtime_pin,
-    classify_runtime,
     strict_runtime,
 )
 from app.services.chapter_production_v2_contracts import (
     ChapterProductionV2ValidationError,
+)
+
+MODULE = (
+    Path(__file__).resolve().parents[1]
+    / "app/services/chapter_production_runtime.py"
 )
 
 
@@ -26,14 +31,10 @@ def test_pin_is_exact_and_server_owned() -> None:
     assert strict_runtime(pin) == pin
 
 
-def test_absent_runtime_is_legacy() -> None:
-    assert strict_runtime({}) is None
-    assert classify_runtime({}) == SCHEDULER_KIND_LEGACY
-
-
 @pytest.mark.parametrize(
     "payload",
     (
+        {},
         {"scheduler_kind": "service_v2", "graph_id": "g", "graph_version": "0", "extra": 1},
         {"scheduler_kind": "service_v2", "graph_id": "g"},
         {"scheduler_kind": "service_v2", "graph_id": "g", "graph_version": None},
@@ -47,12 +48,13 @@ def test_malformed_or_noncanonical_runtime_fails_closed(payload: object) -> None
         strict_runtime(payload)
 
 
-def test_service_v2_legacy_is_rejected_as_pin() -> None:
-    payload = {
-        "scheduler_kind": SCHEDULER_KIND_SERVICE_V2_LEGACY,
-        "graph_id": "chapter-production-v2",
-        "graph_version": "0",
-    }
+def test_allocator_sql_has_no_aggregate_for_update() -> None:
+    source = MODULE.read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    function = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.AsyncFunctionDef) and node.name == "next_event_sequence"
+    )
 
-    with pytest.raises(ChapterProductionV2ValidationError):
-        strict_runtime(payload)
+    assert "with_for_update" not in ast.get_source_segment(source, function)
