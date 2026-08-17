@@ -63,6 +63,7 @@ from app.services.chapter_production_recovery import (
 )
 from app.services.chapter_phase_session_lease import ChapterPhaseSessionLease
 from app.services.chapter_phase_session_source import ChapterPhaseSessionSource
+from app.services.chapter_production_runtime import strict_runtime
 from app.services.chapter_production_v2_contracts import (
     CONTRACT_VERSION as _CONTRACT_VERSION,
     REVIEWER_CLAIM_STATUS_CLAIMED as _REVIEWER_CLAIM_STATUS_CLAIMED,
@@ -1470,7 +1471,7 @@ class ChapterProductionV2Service:
     @staticmethod
     def _run_metadata(run: WorkflowRun) -> dict[str, str]:
         metadata = run.metadata_
-        expected = {
+        base = {
             "contract_version",
             "review_policy_version",
             "chief_editor_required",
@@ -1480,16 +1481,21 @@ class ChapterProductionV2Service:
             "segmenter_version",
             "operation_key",
             "provider_attempt",
-            "reviewer_claim",
         }
-        legacy_expected = expected - {"reviewer_claim"}
-        if type(metadata) is dict and set(metadata) == legacy_expected:
+        legacy = base | {"reviewer_claim"}
+        expected = legacy | {"chapter_production_runtime"}
+        if type(metadata) is dict and set(metadata) == base:
             metadata = {**metadata, "reviewer_claim": None}
             run.metadata_ = metadata
+        if type(metadata) is not dict or set(metadata) not in {legacy, expected}:
+            raise _invalid()
+        if "chapter_production_runtime" in metadata:
+            try:
+                strict_runtime(metadata["chapter_production_runtime"])
+            except ChapterProductionV2ValidationError:
+                raise _invalid() from None
         if (
-            type(metadata) is not dict
-            or set(metadata) != expected
-            or metadata.get("contract_version") != _CONTRACT_VERSION
+            metadata.get("contract_version") != _CONTRACT_VERSION
             or metadata.get("review_policy_version") != _REVIEW_POLICY_VERSION
             or type(metadata.get("chief_editor_required")) is not bool
             or metadata.get("segmenter_version") != CURRENT_CHAPTER_SEGMENTER_VERSION
