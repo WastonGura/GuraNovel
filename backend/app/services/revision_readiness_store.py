@@ -21,6 +21,7 @@ from app.models import (
     WorkflowEvent,
     WorkflowRun,
 )
+from app.services.chapter_production_runtime import next_event_sequence
 from app.services.chapter_production_v2_contracts import (
     ChapterProductionV2ReconciliationError,
     ChapterProductionV2ValidationError,
@@ -324,6 +325,7 @@ class RevisionReadinessStore:
             self._service.session.add(
                 WorkflowEvent(
                     workflow_run_id=run.id,
+                    event_sequence=await next_event_sequence(self._service.session, run.id),
                     event_type=_READY_EVENT_TYPE,
                     node_name=ready.current_node,
                     payload=ready_event_payload(

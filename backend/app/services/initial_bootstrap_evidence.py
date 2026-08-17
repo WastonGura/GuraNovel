@@ -6,17 +6,15 @@ from dataclasses import dataclass
 from uuid import UUID
 
 from app.documents.chapter_segments import CURRENT_CHAPTER_SEGMENTER_VERSION
+from app.services.chapter_production_runtime import chapter_production_runtime_pin
 from app.services.chapter_production_v2_contracts import ChapterProductionV2ValidationError
 from app.workflows.chapter_production import ChapterProductionState
-
 
 _CONTRACT_VERSION = "chapter-production-v2"
 _REVIEW_POLICY_VERSION = "chapter-quality-v1"
 
-
 def _invalid() -> ChapterProductionV2ValidationError:
     return ChapterProductionV2ValidationError()
-
 
 def _valid_uuid(value: object) -> bool:
     return type(value) is UUID and value.int != 0
@@ -26,7 +24,6 @@ def _valid_hash(value: object) -> bool:
     return type(value) is str and len(value) == 64 and all(
         character in "0123456789abcdef" for character in value
     )
-
 
 def _require_binding(value: object) -> InitialBootstrapBinding:
     failed = type(value) is not InitialBootstrapBinding
@@ -98,6 +95,7 @@ def pristine_run_metadata(binding: InitialBootstrapBinding) -> dict[str, object]
         "operation_key": binding.operation_key,
         "provider_attempt": None,
         "reviewer_claim": None,
+        "chapter_production_runtime": chapter_production_runtime_pin(),
     }
 
 
@@ -120,16 +118,18 @@ def pristine_checkpoint(binding: InitialBootstrapBinding) -> dict[str, object]:
 
 def _validated_metadata(binding: InitialBootstrapBinding, value: object) -> dict[str, object]:
     expected = pristine_run_metadata(binding)
-    if type(value) is not dict:
+    if type(value) is not dict or any(type(key) is not str for key in value):
         raise _invalid() from None
-    keys = tuple(value)
-    if any(type(key) is not str for key in keys):
-        raise _invalid() from None
-    legacy = {key: item for key, item in expected.items() if key != "reviewer_claim"}
-    if _exact_payload(value, expected) or (
-        set(keys) == set(legacy) and _exact_payload(value, legacy)
-    ):
+    wr = {key: item for key, item in expected.items() if key != "reviewer_claim"}
+    nr = {key: item for key, item in wr.items() if key != "chapter_production_runtime"}
+    if _exact_payload(value, expected):
         return expected
+    if set(value) == set(wr) and _exact_payload(value, wr):
+        return expected
+    if set(value) == set(nr) and _exact_payload(value, nr):
+        return {**value, "reviewer_claim": None}
+    if set(value) == set(nr) | {"reviewer_claim"} and _exact_payload(value, {**nr, "reviewer_claim": None}):
+        return value
     raise _invalid() from None
 
 

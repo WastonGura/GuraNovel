@@ -16,6 +16,7 @@ from app.models import (
     WorkflowEvent,
     WorkflowRun,
 )
+from app.services.chapter_production_runtime import next_event_sequence
 from app.services.chapter_production_v2_contracts import (
     CONTRACT_VERSION,
     REVIEWER_CLAIM_STATUS_CLAIMED,
@@ -271,6 +272,7 @@ async def _persist_review_transition(
     service.session.add(
         WorkflowEvent(
             workflow_run_id=run.id,
+            event_sequence=await next_event_sequence(service.session, run.id),
             event_type=_REVIEW_EVENT_TYPE,
             node_name=next_state.current_node,
             payload={
@@ -572,6 +574,7 @@ async def _resolve_review_action_apply(
     service.session.add(
         WorkflowEvent(
             workflow_run_id=run.id,
+            event_sequence=await next_event_sequence(service.session, run.id),
             event_type="chapter_review_action_resolved",
             node_name=next_state.current_node,
             actor_type="user",
