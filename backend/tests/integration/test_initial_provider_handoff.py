@@ -363,8 +363,9 @@ async def test_concurrent_execute_calls_provider_once(
         handoff.execute(project.id, chapter.id, actor_user_id=owner.id)
     )
     try:
-        await provider.entered.wait()
+        await asyncio.wait_for(provider.entered.wait(), timeout=10.0)
         with pytest.raises(ChapterProductionV2ReconciliationError):
+
             await handoff.execute(project.id, chapter.id, actor_user_id=owner.id)
         assert provider.calls == 1
         provider.release.set()

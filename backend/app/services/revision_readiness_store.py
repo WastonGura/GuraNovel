@@ -439,6 +439,7 @@ class RevisionReadinessStore:
             pairs.append(RevisionReadyPair(state, marker, matching[0]))
         return tuple(pairs)
 
+
     async def restore_marker(
         self, run: WorkflowRun, checkpoint: WorkflowCheckpoint
     ) -> ChapterProductionState:
