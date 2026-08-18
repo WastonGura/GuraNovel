@@ -93,8 +93,6 @@ jobs:
           --health-interval 5s
           --health-timeout 5s
           --health-retries 5
-          -c lock_timeout=10000
-          -c statement_timeout=30000
     defaults:
       run:
         working-directory: backend
