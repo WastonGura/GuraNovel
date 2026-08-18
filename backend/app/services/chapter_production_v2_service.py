@@ -1471,7 +1471,7 @@ class ChapterProductionV2Service:
     @staticmethod
     def _run_metadata(run: WorkflowRun) -> dict[str, str]:
         metadata = run.metadata_
-        base = {
+        base = frozenset({
             "contract_version",
             "review_policy_version",
             "chief_editor_required",
@@ -1481,17 +1481,16 @@ class ChapterProductionV2Service:
             "segmenter_version",
             "operation_key",
             "provider_attempt",
-        }
-        legacy = base | {"reviewer_claim"}
-        expected = legacy | {"chapter_production_runtime"}
-        if type(metadata) is dict and set(metadata) == base:
+        })
+        legacy = base | frozenset({"reviewer_claim"})
+        expected = legacy | frozenset({"chapter_production_runtime"})
+        if type(metadata) is dict and "reviewer_claim" not in metadata:
             metadata = {**metadata, "reviewer_claim": None}
             run.metadata_ = metadata
-        if type(metadata) is dict and set(metadata) == base | {"chapter_production_runtime"}:
-            metadata = {**metadata, "reviewer_claim": None}
-            run.metadata_ = metadata
-        if type(metadata) is not dict or set(metadata) not in {legacy, expected}:
+        if type(metadata) is not dict or set(metadata) not in (legacy, expected):
             raise _invalid()
+
+
 
 
         if "chapter_production_runtime" in metadata:
