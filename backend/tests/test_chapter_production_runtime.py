@@ -58,3 +58,24 @@ def test_allocator_sql_has_no_aggregate_for_update() -> None:
     )
 
     assert "with_for_update" not in ast.get_source_segment(source, function)
+
+
+@pytest.mark.anyio
+async def test_next_event_sequence_considers_db_and_unflushed_events() -> None:
+    from unittest.mock import AsyncMock, MagicMock
+    from uuid import uuid4
+    from app.models import WorkflowEvent
+    from app.services.chapter_production_runtime import next_event_sequence
+
+    run_id = uuid4()
+    session = MagicMock()
+    session.scalar = AsyncMock(return_value=3)
+    session.new = {
+        WorkflowEvent(workflow_run_id=run_id, event_sequence=4, event_type="t1"),
+        WorkflowEvent(workflow_run_id=run_id, event_sequence=5, event_type="t2"),
+        WorkflowEvent(workflow_run_id=uuid4(), event_sequence=99, event_type="other"),
+    }
+
+    seq = await next_event_sequence(session, run_id)
+    assert seq == 6
+

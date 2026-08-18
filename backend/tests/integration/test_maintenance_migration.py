@@ -189,7 +189,7 @@ async def test_real_upgrade_from_v070_and_clean_downgrade(
             None,
         )
         await seed_v070_rows(integration_database_url, project_id, run_id)
-        run_alembic(integration_database_url, "upgrade", "head")
+        run_alembic(integration_database_url, "upgrade", "0002_maintenance_persistence")
         assert await schema_snapshot(integration_database_url) == (
             "0002_maintenance_persistence",
             "maintenance_changes",

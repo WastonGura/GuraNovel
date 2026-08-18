@@ -47,12 +47,20 @@ async def next_event_sequence(
     session: AsyncSession, workflow_run_id: UUID
 ) -> int:
     """Allocate the next per-run event ordinal under the caller's run lock."""
+    in_memory = [
+        obj.event_sequence
+        for obj in session.new
+        if isinstance(obj, WorkflowEvent)
+        and obj.workflow_run_id == workflow_run_id
+        and obj.event_sequence is not None
+    ]
     latest = await session.scalar(
         select(func.max(WorkflowEvent.event_sequence)).where(
             WorkflowEvent.workflow_run_id == workflow_run_id
         )
     )
-    return (latest or 0) + 1
+    current_max = max([latest or 0, *in_memory])
+    return current_max + 1
 
 
 __all__ = [
