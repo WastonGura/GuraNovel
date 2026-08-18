@@ -2,14 +2,83 @@ name: Backend CI
 
 on:
   pull_request:
+    paths:
+      - 'backend/**'
+      - '.github/workflows/backend-ci.yml'
   push:
     branches:
       - main
+    paths:
+      - 'backend/**'
+      - '.github/workflows/backend-ci.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
-  lint-and-test:
-    name: Lint and test backend
+  lint:
+    name: Lint & Code Style
     runs-on: ubuntu-latest
+    timeout-minutes: 5
+    defaults:
+      run:
+        working-directory: backend
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.11.21"
+          enable-cache: true
+
+      - name: Install dependencies
+        run: uv sync --frozen --all-groups
+
+      - name: Run Ruff
+        run: uv run ruff check .
+
+  unit-tests:
+    name: Unit tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: backend
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.11.21"
+          enable-cache: true
+
+      - name: Install dependencies
+        run: uv sync --frozen --all-groups
+
+      - name: Run unit tests
+        run: uv run pytest -m "not integration"
+
+  integration-tests:
+    name: PostgreSQL integration tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
     services:
       postgres:
         image: postgres:16
@@ -40,18 +109,11 @@ jobs:
       - name: Set up uv
         uses: astral-sh/setup-uv@v6
         with:
-          # Avoid setup-uv's GitHub API "latest release" lookup: a GitHub API
-          # outage must not prevent an otherwise reproducible CI run from starting.
           version: "0.11.21"
+          enable-cache: true
 
       - name: Install dependencies
         run: uv sync --frozen --all-groups
-
-      - name: Run Ruff
-        run: uv run ruff check .
-
-      - name: Run tests
-        run: uv run pytest -m "not integration"
 
       - name: Run PostgreSQL integration tests
         env:
