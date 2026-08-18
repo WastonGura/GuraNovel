@@ -30,7 +30,11 @@ def apply_migrations(database_url: str) -> None:
 async def clean_test_data(database_url: str) -> None:
     """Remove all mapped application data from the already-validated test database."""
     table_names = ", ".join(f'"{table.name}"' for table in Base.metadata.sorted_tables)
-    engine = create_async_engine(database_url, pool_pre_ping=True)
+    engine = create_async_engine(
+        database_url,
+        pool_pre_ping=True,
+        connect_args={"server_settings": {"lock_timeout": "5000", "statement_timeout": "15000"}},
+    )
     try:
         async with engine.begin() as connection:
             await connection.execute(text(f"TRUNCATE TABLE {table_names} RESTART IDENTITY CASCADE"))
@@ -48,7 +52,11 @@ def integration_database_url() -> str:
 @pytest.fixture
 async def async_session(integration_database_url: str) -> AsyncIterator[AsyncSession]:
     await clean_test_data(integration_database_url)
-    engine = create_async_engine(integration_database_url, pool_pre_ping=True)
+    engine = create_async_engine(
+        integration_database_url,
+        pool_pre_ping=True,
+        connect_args={"server_settings": {"lock_timeout": "5000", "statement_timeout": "15000"}},
+    )
     session_factory = async_sessionmaker(engine, expire_on_commit=False)
     try:
         async with session_factory() as session:
@@ -57,3 +65,4 @@ async def async_session(integration_database_url: str) -> AsyncIterator[AsyncSes
     finally:
         await engine.dispose()
         await clean_test_data(integration_database_url)
+

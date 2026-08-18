@@ -118,4 +118,4 @@ jobs:
       - name: Run PostgreSQL integration tests
         env:
           TEST_DATABASE_URL: postgresql+asyncpg://postgres:postgres@127.0.0.1:5432/guranovel_test
-        run: uv run pytest -m integration
+        run: uv run pytest -m integration -v
