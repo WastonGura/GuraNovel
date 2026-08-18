@@ -63,27 +63,24 @@ def integration_database_url() -> str:
     return database_url
 
 
-@pytest.fixture(scope="session")
-def integration_engine(integration_database_url: str):
+@pytest.fixture
+async def async_session(integration_database_url: str) -> AsyncIterator[AsyncSession]:
     engine = create_async_engine(
         integration_database_url,
         pool_pre_ping=True,
-        pool_size=10,
-        max_overflow=20,
         connect_args={"server_settings": {"lock_timeout": "5000", "statement_timeout": "15000"}},
     )
-    yield engine
-
-
-@pytest.fixture
-async def async_session(integration_engine, integration_database_url: str) -> AsyncIterator[AsyncSession]:
-    await clean_test_data(integration_engine)
-    session_factory = async_sessionmaker(integration_engine, expire_on_commit=False)
+    await clean_test_data(engine)
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
     try:
         async with session_factory() as session:
             yield session
             await session.rollback()
     finally:
-        await clean_test_data(integration_engine)
+        try:
+            await clean_test_data(engine)
+        finally:
+            await engine.dispose()
+
 
 
