@@ -17,14 +17,33 @@ def run_alembic(database_url: str, *args: str) -> None:
     subprocess.run(
         [sys.executable, "-m", "alembic", *args],
         cwd=BACKEND_DIR,
-        env=os.environ | {"DATABASE_URL": database_url},
+        env=os.environ | {
+            "DATABASE_URL": database_url,
+            "PGOPTIONS": "-c lock_timeout=5000 -c statement_timeout=15000",
+        },
         check=True,
         capture_output=True,
         text=True,
+        timeout=30,
     )
 
 
+async def terminate_other_connections(database_url: str) -> None:
+    engine = create_async_engine(database_url, pool_pre_ping=True)
+    try:
+        async with engine.begin() as connection:
+            await connection.execute(
+                text(
+                    "SELECT pg_terminate_backend(pid) FROM pg_stat_activity "
+                    "WHERE datname = current_database() AND pid <> pg_backend_pid()"
+                )
+            )
+    finally:
+        await engine.dispose()
+
+
 async def schema_snapshot(database_url: str) -> tuple[str, str | None, str | None]:
+
     engine = create_async_engine(database_url, pool_pre_ping=True)
     try:
         async with engine.connect() as connection:
@@ -182,6 +201,7 @@ async def test_real_upgrade_from_v070_and_clean_downgrade(
     project_id = UUID("10000000-0000-4000-8000-000000000091")
     run_id = UUID("20000000-0000-4000-8000-000000000091")
     try:
+        await terminate_other_connections(integration_database_url)
         run_alembic(integration_database_url, "downgrade", "0001_initial_mvp_schema")
         assert await schema_snapshot(integration_database_url) == (
             "0001_initial_mvp_schema",
@@ -189,6 +209,7 @@ async def test_real_upgrade_from_v070_and_clean_downgrade(
             None,
         )
         await seed_v070_rows(integration_database_url, project_id, run_id)
+        await terminate_other_connections(integration_database_url)
         run_alembic(integration_database_url, "upgrade", "0002_maintenance_persistence")
         assert await schema_snapshot(integration_database_url) == (
             "0002_maintenance_persistence",
@@ -229,6 +250,7 @@ async def test_real_upgrade_from_v070_and_clean_downgrade(
             "maintenance_affected_items_existing_document_id_fkey": "n",
             "maintenance_affected_items_existing_chapter_id_fkey": "n",
         }
+        await terminate_other_connections(integration_database_url)
         run_alembic(integration_database_url, "downgrade", "0001_initial_mvp_schema")
         assert await schema_snapshot(integration_database_url) == (
             "0001_initial_mvp_schema",
@@ -238,5 +260,7 @@ async def test_real_upgrade_from_v070_and_clean_downgrade(
         await assert_v070_rows_survive(integration_database_url, project_id, run_id)
         await assert_no_0002_residue(integration_database_url)
     finally:
+        await terminate_other_connections(integration_database_url)
         run_alembic(integration_database_url, "upgrade", "head")
         await cleanup_seed(integration_database_url, project_id)
+

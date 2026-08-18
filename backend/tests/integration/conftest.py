@@ -22,9 +22,14 @@ def apply_migrations(database_url: str) -> None:
     subprocess.run(
         [sys.executable, "-m", "alembic", "upgrade", "head"],
         cwd=BACKEND_DIR,
-        env=os.environ | {"DATABASE_URL": database_url},
+        env=os.environ | {
+            "DATABASE_URL": database_url,
+            "PGOPTIONS": "-c lock_timeout=5000 -c statement_timeout=15000",
+        },
         check=True,
+        timeout=60,
     )
+
 
 
 async def clean_test_data(database_url: str) -> None:
