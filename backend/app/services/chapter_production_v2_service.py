@@ -1487,8 +1487,13 @@ class ChapterProductionV2Service:
         if type(metadata) is dict and set(metadata) == base:
             metadata = {**metadata, "reviewer_claim": None}
             run.metadata_ = metadata
+        if type(metadata) is dict and set(metadata) == base | {"chapter_production_runtime"}:
+            metadata = {**metadata, "reviewer_claim": None}
+            run.metadata_ = metadata
         if type(metadata) is not dict or set(metadata) not in {legacy, expected}:
             raise _invalid()
+
+
         if "chapter_production_runtime" in metadata:
             try:
                 strict_runtime(metadata["chapter_production_runtime"])
