@@ -175,6 +175,33 @@ async def test_reconstruction_rejects_terminal_run_with_awaiting_user(
         await reconstruct_scheduler_input(async_session, run_id)
 
 
+@pytest.mark.parametrize(
+    ("status", "expected_cursor"),
+    (
+        ("EDITOR_REVIEW", "editor_review"),
+        ("CHIEF_FINAL_REVIEW", "chief_editor_review"),
+        ("LORE_FINAL_REVIEW", "lore_review"),
+        ("REVIEW_REVISION", "corrective_revision"),
+    ),
+)
+async def test_reconstruction_accepts_legal_review_awaiting_states(
+    async_session: object,
+    status: str,
+    expected_cursor: str,
+) -> None:
+    run_id = uuid4()
+    await _insert_run_and_checkpoint(
+        async_session,
+        run_id=run_id,
+        status=status,
+        awaiting_user=True,
+    )
+
+    state = await reconstruct_scheduler_input(async_session, run_id)
+
+    assert state["cursor"] == expected_cursor
+
+
 async def test_reconstruction_uses_cancelled_cursor_for_cancelled_run(
     async_session: object,
 ) -> None:

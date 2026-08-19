@@ -33,7 +33,16 @@ _CURSOR_BY_STATUS = {
     "FAILED": "reconcile",
 }
 
-_AWAITABLE_STATUS = frozenset({"AUTHOR_REVISION"})
+_AUTHOR_GATE_STATUS = frozenset({"AUTHOR_REVISION"})
+_AWAITING_STATUSES = frozenset(
+    {
+        "AUTHOR_REVISION",
+        "EDITOR_REVIEW",
+        "REVIEW_REVISION",
+        "CHIEF_FINAL_REVIEW",
+        "LORE_FINAL_REVIEW",
+    }
+)
 
 
 def _invalid() -> GraphError:
@@ -74,9 +83,9 @@ def _optional_uuid(value: object) -> UUID | None:
 def _cursor_for(status: str, awaiting_user: bool) -> str:
     if status not in _CURSOR_BY_STATUS:
         raise _invalid() from None
-    if awaiting_user:
-        if status not in _AWAITABLE_STATUS:
-            raise _invalid() from None
+    if awaiting_user and status not in _AWAITING_STATUSES:
+        raise _invalid() from None
+    if status in _AUTHOR_GATE_STATUS and awaiting_user:
         return "await_author_action"
     return _CURSOR_BY_STATUS[status]
 

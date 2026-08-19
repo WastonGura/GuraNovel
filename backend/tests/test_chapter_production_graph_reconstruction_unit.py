@@ -16,6 +16,10 @@ def test_cursor_for_known_status_and_awaiting_user_consistency() -> None:
     assert _cursor_for("DRAFTING", False) == "draft"
     assert _cursor_for("AUTHOR_REVISION", False) == "author_revision"
     assert _cursor_for("AUTHOR_REVISION", True) == "await_author_action"
+    assert _cursor_for("EDITOR_REVIEW", True) == "editor_review"
+    assert _cursor_for("CHIEF_FINAL_REVIEW", True) == "chief_editor_review"
+    assert _cursor_for("LORE_FINAL_REVIEW", True) == "lore_review"
+    assert _cursor_for("REVIEW_REVISION", True) == "corrective_revision"
     assert _cursor_for("CANCELLED", False) == "cancelled"
     assert _cursor_for("COMPLETED", False) == "complete"
 
