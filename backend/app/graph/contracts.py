@@ -120,7 +120,12 @@ def _canonical_uuid(value: object, *, optional: bool = False) -> UUID | None:
         if str(parsed) != value:
             raise _invalid() from None
     else:
-        raise _invalid() from None
+        try:
+            parsed = UUID(str(value))
+        except (ValueError, AttributeError, TypeError):
+            raise _invalid() from None
+        if str(parsed) != str(value) or getattr(value, "int", 0) == 0:
+            raise _invalid() from None
     if parsed.int == 0:
         raise _invalid() from None
     return parsed

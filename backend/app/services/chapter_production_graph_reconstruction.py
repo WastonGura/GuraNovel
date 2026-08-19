@@ -77,7 +77,13 @@ def _optional_uuid(value: object) -> UUID | None:
         if str(parsed) != value:
             raise _invalid() from None
         return parsed
-    raise _invalid() from None
+    try:
+        parsed = UUID(str(value))
+    except (ValueError, AttributeError, TypeError):
+        raise _invalid() from None
+    if str(parsed) != str(value) or getattr(value, "int", 0) == 0:
+        raise _invalid() from None
+    return parsed
 
 
 def _cursor_for(status: str, awaiting_user: bool) -> str:

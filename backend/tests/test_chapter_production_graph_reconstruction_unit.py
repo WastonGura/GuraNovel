@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 
@@ -10,6 +10,20 @@ from app.services.chapter_production_graph_reconstruction import (
     _optional_uuid,
     _strict_runtime,
 )
+
+
+class _PgProtoUuid:
+    """Minimal asyncpg.pgproto.UUID look-alike for regression coverage."""
+
+    def __init__(self, value: UUID) -> None:
+        self._value = value
+        self.int = value.int
+
+    def __str__(self) -> str:
+        return str(self._value)
+
+    def __repr__(self) -> str:
+        return repr(self._value)
 
 
 def test_cursor_for_known_status_and_awaiting_user_consistency() -> None:
@@ -60,6 +74,9 @@ def test_optional_uuid_accepts_only_none_uuid_or_canonical_string() -> None:
     assert _optional_uuid(None) is None
     assert _optional_uuid(value) == value
     assert _optional_uuid(str(value)) == value
+    parsed = _optional_uuid(_PgProtoUuid(value))
+    assert type(parsed) is UUID
+    assert parsed == value
 
     for payload in ("not-a-uuid", str(value).upper(), [], object()):
         with pytest.raises(GraphError):

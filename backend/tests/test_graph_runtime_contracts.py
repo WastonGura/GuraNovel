@@ -48,6 +48,20 @@ def _valid_state() -> dict[str, object]:
     }
 
 
+class _PgProtoUuid:
+    """Minimal asyncpg.pgproto.UUID look-alike: same repr/int/str contract."""
+
+    def __init__(self, value: UUID) -> None:
+        self._value = value
+        self.int = value.int
+
+    def __str__(self) -> str:
+        return str(self._value)
+
+    def __repr__(self) -> str:
+        return repr(self._value)
+
+
 def test_graph_state_exact_allowlist_parses_and_canonicalizes() -> None:
     state = parse_graph_state(_valid_state())
 
@@ -71,6 +85,17 @@ def test_graph_state_exact_allowlist_parses_and_canonicalizes() -> None:
     assert type(state["invocation_id"]) is UUID
     assert state["attempt_id"] is None
     assert state["resume_reason"] == "new"
+
+
+def test_graph_state_accepts_canonical_uuid_like_values_and_normalizes() -> None:
+    run_id = _uuid()
+    payload = _valid_state()
+    payload["workflow_run_id"] = _PgProtoUuid(run_id)
+
+    state = parse_graph_state(payload)
+
+    assert type(state["workflow_run_id"]) is UUID
+    assert state["workflow_run_id"] == run_id
 
 
 @pytest.mark.parametrize(
