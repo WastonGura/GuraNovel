@@ -14,7 +14,7 @@ from app.services.chapter_production_graph_reconstruction import (
     reconstruct_scheduler_input,
 )
 
-pytestmark = pytest.mark.integration
+pytestmark = [pytest.mark.integration, pytest.mark.anyio]
 
 
 def _runtime_pin(*, graph_version: str = GRAPH_VERSION) -> dict[str, str]:
