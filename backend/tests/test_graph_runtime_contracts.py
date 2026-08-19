@@ -10,7 +10,10 @@ from langgraph.types import Command
 from app.graph.contracts import (
     GRAPH_ID,
     GRAPH_VERSION,
+    CompletionCode,
+    Cursor,
     GraphError,
+    OutcomeKind,
     parse_graph_outcome,
     parse_graph_state,
     sanitize_checkpoint_payload,
@@ -216,7 +219,9 @@ def test_checked_node_validates_state_and_outcome_and_returns_command() -> None:
         assert state["cursor"] == "draft"
         return {"kind": "continue", "next_cursor": "editor_review"}
 
-    wrapper = checked_node(port, lambda outcome: "review")
+    wrapper = checked_node(
+        port, lambda outcome: "review", allowed_targets=frozenset({"review"})
+    )
 
     result = wrapper(_valid_state())
     assert isinstance(result, Command)
@@ -230,7 +235,108 @@ def test_checked_node_validates_state_and_outcome_and_returns_command() -> None:
         return {"kind": "unknown"}
 
     with pytest.raises(GraphError):
-        checked_node(bad_port, lambda outcome: "review")(_valid_state())
+        checked_node(
+            bad_port, lambda outcome: "review", allowed_targets=frozenset({"review"})
+        )(_valid_state())
+
+
+def test_checked_graph_rejects_extra_state_before_checkpoint_persistence() -> None:
+    run_id = _uuid()
+    saver = InMemorySaver()
+    definition = GraphDefinition(
+        graph_id=GRAPH_ID,
+        graph_version=GRAPH_VERSION,
+        nodes=(("reconstruct", fake_reconstruct_port, lambda outcome: END),),
+    )
+    compiled = definition.compile(checkpointer=saver)
+    state = _valid_state()
+    state["workflow_run_id"] = run_id
+    state["invocation_id"] = _uuid()
+    state["cursor"] = "complete"
+
+    with pytest.raises(GraphError):
+        compiled.invoke({**state, "prose": "leak"}, config=build_config(run_id))
+
+    assert saver.get_tuple({"configurable": {"thread_id": str(run_id)}}) is None
+
+
+def test_checked_graph_rejects_unknown_config_at_invoke_boundary() -> None:
+    run_id = _uuid()
+    definition = GraphDefinition(
+        graph_id=GRAPH_ID,
+        graph_version=GRAPH_VERSION,
+        nodes=(("reconstruct", fake_reconstruct_port, lambda outcome: END),),
+    )
+    compiled = definition.compile()
+    state = _valid_state()
+    state["workflow_run_id"] = run_id
+    state["invocation_id"] = _uuid()
+    state["cursor"] = "complete"
+
+    with pytest.raises(GraphError):
+        compiled.invoke(
+            state,
+            config={
+                "configurable": {"thread_id": str(run_id), "tags": ["x"]},
+                "recursion_limit": 25,
+            },
+        )
+
+
+def test_graph_definition_rejects_unknown_node_name() -> None:
+    with pytest.raises(GraphError):
+        GraphDefinition(
+            graph_id=GRAPH_ID,
+            graph_version=GRAPH_VERSION,
+            nodes=(("not-a-node", fake_reconstruct_port, lambda outcome: END),),
+        ).compile()
+
+
+def test_checked_node_rejects_unknown_route_target() -> None:
+    def port(_: dict[str, object]) -> dict[str, object]:
+        return {"kind": "complete", "completion_code": "success"}
+
+    wrapper = checked_node(
+        port,
+        lambda outcome: "unknown-target",
+        allowed_targets=frozenset({"reconstruct", END}),
+    )
+
+    with pytest.raises(GraphError):
+        wrapper(_valid_state())
+
+
+def test_graph_outcome_kind_is_canonical_plain_str() -> None:
+    outcome = parse_graph_outcome(
+        {
+            "kind": OutcomeKind.COMPLETE,
+            "completion_code": CompletionCode.SUCCESS,
+        }
+    )
+
+    assert type(outcome["kind"]) is str
+    assert type(outcome["completion_code"]) is str
+
+
+def test_observability_projection_validates_raw_inputs() -> None:
+    with pytest.raises(GraphError):
+        observability_projection(
+            state={**_valid_state(), "prose": "leak"},
+            node_name="reconstruct",
+            outcome=None,
+        )
+    with pytest.raises(GraphError):
+        observability_projection(
+            state=_valid_state(),
+            node_name="reconstruct",
+            outcome={"kind": "retryable-failure", "failure_code": "arbitrary"},
+        )
+
+
+def test_fake_reconstruct_port_returns_cancelled_for_cancelled_cursor() -> None:
+    state = parse_graph_state({**_valid_state(), "cursor": Cursor.CANCELLED.value})
+
+    assert fake_reconstruct_port(state) == {"kind": "cancelled"}
 
 
 def test_graph_definition_compiles_and_invokes_with_memory_checkpointer() -> None:

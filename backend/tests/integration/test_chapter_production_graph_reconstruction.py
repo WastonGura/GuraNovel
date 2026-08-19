@@ -33,7 +33,8 @@ async def _insert_run_and_checkpoint(
     awaiting_user: bool = False,
     graph_version: str = GRAPH_VERSION,
     checkpoint_index: int = 0,
-    state_json: dict[str, object] | None = None,
+    state_json: object = None,
+    additional_checkpoint_indices: tuple[int, ...] = (),
 ) -> None:
     session.add(  # type: ignore[attr-defined]
         WorkflowRun(
@@ -44,15 +45,16 @@ async def _insert_run_and_checkpoint(
             metadata_={"chapter_production_runtime": _runtime_pin(graph_version=graph_version)},
         )
     )
-    session.add(  # type: ignore[attr-defined]
-        WorkflowCheckpoint(
-            id=uuid4(),
-            workflow_run_id=run_id,
-            checkpoint_index=checkpoint_index,
-            node_name="reconstruct",
-            state_json=state_json if state_json is not None else {},
+    for index in (checkpoint_index, *additional_checkpoint_indices):
+        session.add(  # type: ignore[attr-defined]
+            WorkflowCheckpoint(
+                id=uuid4(),
+                workflow_run_id=run_id,
+                checkpoint_index=index,
+                node_name="reconstruct",
+                state_json=state_json if state_json is not None else {},
+            )
         )
-    )
     await session.commit()  # type: ignore[attr-defined]
 
 
@@ -131,6 +133,62 @@ async def test_reconstruction_rejects_corrupt_checkpoint(
 
     with pytest.raises(GraphError):
         await reconstruct_scheduler_input(async_session, run_id)
+
+
+async def test_reconstruction_rejects_non_dict_state_json(
+    async_session: object,
+) -> None:
+    run_id = uuid4()
+    await _insert_run_and_checkpoint(async_session, run_id=run_id, state_json=["leak"])
+
+    with pytest.raises(GraphError):
+        await reconstruct_scheduler_input(async_session, run_id)
+
+
+async def test_reconstruction_rejects_discontinuous_checkpoints(
+    async_session: object,
+) -> None:
+    run_id = uuid4()
+    await _insert_run_and_checkpoint(
+        async_session,
+        run_id=run_id,
+        checkpoint_index=5,
+        additional_checkpoint_indices=(3,),
+    )
+
+    with pytest.raises(GraphError):
+        await reconstruct_scheduler_input(async_session, run_id)
+
+
+async def test_reconstruction_rejects_terminal_run_with_awaiting_user(
+    async_session: object,
+) -> None:
+    run_id = uuid4()
+    await _insert_run_and_checkpoint(
+        async_session,
+        run_id=run_id,
+        status="COMPLETED",
+        awaiting_user=True,
+    )
+
+    with pytest.raises(GraphError):
+        await reconstruct_scheduler_input(async_session, run_id)
+
+
+async def test_reconstruction_uses_cancelled_cursor_for_cancelled_run(
+    async_session: object,
+) -> None:
+    run_id = uuid4()
+    await _insert_run_and_checkpoint(
+        async_session,
+        run_id=run_id,
+        status="CANCELLED",
+        awaiting_user=False,
+    )
+
+    state = await reconstruct_scheduler_input(async_session, run_id)
+
+    assert state["cursor"] == "cancelled"
 
 
 async def test_deleting_graph_state_permits_reconstruction_from_postgresql(

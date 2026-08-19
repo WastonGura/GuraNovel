@@ -68,6 +68,26 @@ def test_graph_package_exists_and_all_modules_are_bounded() -> None:
                 assert _span(node) <= 80, (path, node.name)
 
 
+def test_cursor_enum_is_closed_and_matches_server_topology() -> None:
+    from app.graph.contracts import Cursor
+
+    assert {cursor.value for cursor in Cursor} == {
+        "reconstruct",
+        "draft",
+        "await_author_action",
+        "author_revision",
+        "editor_review",
+        "chief_editor_review",
+        "lore_review",
+        "corrective_revision",
+        "mark_revision_ready",
+        "finalize",
+        "reconcile",
+        "complete",
+        "cancelled",
+    }
+
+
 def test_graph_package_has_no_database_or_domain_authority_imports() -> None:
     for path in _graph_modules():
         imports = _module_imports(path)
