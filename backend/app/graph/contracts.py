@@ -45,7 +45,7 @@ class GraphError(Exception):
 
 
 class Cursor(str, Enum):
-    START = "start"
+    RECONSTRUCT = "reconstruct"
     DRAFT = "draft"
     AWAIT_ACTION = "await_author_action"
     AUTHOR_REVISION = "author_revision"
@@ -57,6 +57,7 @@ class Cursor(str, Enum):
     FINALIZE = "finalize"
     RECONCILE = "reconcile"
     COMPLETE = "complete"
+    CANCELLED = "cancelled"
 
 
 class ResumeReason(str, Enum):
@@ -167,48 +168,35 @@ def parse_graph_state(value: object) -> GraphState:
     }
 
 
+_OUTCOME_FIELDS: dict[str, tuple[str, type[Enum] | type[UUID]] | None] = {
+    OutcomeKind.CONTINUE.value: ("next_cursor", Cursor),
+    OutcomeKind.AWAIT_USER.value: ("action_request_id", UUID),
+    OutcomeKind.RETRYABLE_FAILURE.value: ("failure_code", FailureCode),
+    OutcomeKind.RECONCILIATION_REQUIRED.value: ("failure_code", FailureCode),
+    OutcomeKind.CANCELLED.value: None,
+    OutcomeKind.COMPLETE.value: ("completion_code", CompletionCode),
+}
+
+
 def parse_graph_outcome(value: object) -> dict[str, Any]:
     """Return a canonical closed typed outcome or fail closed."""
     if type(value) is not dict:
         raise _invalid() from None
-    kind = value.get("kind")
-    if kind == OutcomeKind.CONTINUE.value:
-        if set(value) != {"kind", "next_cursor"}:
-            raise _invalid() from None
-        return {"kind": kind, "next_cursor": _enum_value(value["next_cursor"], Cursor)}
-    if kind == OutcomeKind.AWAIT_USER.value:
-        if set(value) != {"kind", "action_request_id"}:
-            raise _invalid() from None
-        return {
-            "kind": kind,
-            "action_request_id": _canonical_uuid(value["action_request_id"]),
-        }
-    if kind == OutcomeKind.RETRYABLE_FAILURE.value:
-        if set(value) != {"kind", "failure_code"}:
-            raise _invalid() from None
-        return {
-            "kind": kind,
-            "failure_code": _enum_value(value["failure_code"], FailureCode),
-        }
-    if kind == OutcomeKind.RECONCILIATION_REQUIRED.value:
-        if set(value) != {"kind", "failure_code"}:
-            raise _invalid() from None
-        return {
-            "kind": kind,
-            "failure_code": _enum_value(value["failure_code"], FailureCode),
-        }
-    if kind == OutcomeKind.CANCELLED.value:
+    kind = _enum_value(value.get("kind"), OutcomeKind)
+    spec = _OUTCOME_FIELDS[kind]
+    if spec is None:
         if set(value) != {"kind"}:
             raise _invalid() from None
         return {"kind": kind}
-    if kind == OutcomeKind.COMPLETE.value:
-        if set(value) != {"kind", "completion_code"}:
-            raise _invalid() from None
-        return {
-            "kind": kind,
-            "completion_code": _enum_value(value["completion_code"], CompletionCode),
-        }
-    raise _invalid() from None
+    field, field_type = spec
+    if set(value) != {"kind", field}:
+        raise _invalid() from None
+    parsed = (
+        _canonical_uuid(value[field])
+        if field_type is UUID
+        else _enum_value(value[field], field_type)
+    )
+    return {"kind": kind, field: parsed}
 
 
 def sanitize_checkpoint_payload(value: object) -> GraphState:
@@ -249,21 +237,3 @@ def sanitize_metadata(value: object) -> dict[str, Any]:
         "workflow_checkpoint_index": _bounded_index(value["workflow_checkpoint_index"]),
         "invocation_id": _canonical_uuid(value["invocation_id"]),
     }
-
-
-__all__ = [
-    "GRAPH_ID",
-    "GRAPH_VERSION",
-    "CompletionCode",
-    "Cursor",
-    "FailureCode",
-    "GraphError",
-    "GraphState",
-    "OutcomeKind",
-    "ResumeReason",
-    "parse_graph_outcome",
-    "parse_graph_state",
-    "sanitize_checkpoint_payload",
-    "sanitize_config",
-    "sanitize_metadata",
-]

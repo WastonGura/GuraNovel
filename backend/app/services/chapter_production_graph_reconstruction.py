@@ -29,9 +29,11 @@ _CURSOR_BY_STATUS = {
     "REVISION_READY": "mark_revision_ready",
     "ARCHIVE_UPDATE": "finalize",
     "COMPLETED": "complete",
-    "CANCELLED": "complete",
+    "CANCELLED": "cancelled",
     "FAILED": "reconcile",
 }
+
+_AWAITABLE_STATUS = frozenset({"AUTHOR_REVISION"})
 
 
 def _invalid() -> GraphError:
@@ -70,12 +72,13 @@ def _optional_uuid(value: object) -> UUID | None:
 
 
 def _cursor_for(status: str, awaiting_user: bool) -> str:
-    if awaiting_user:
-        return "await_author_action"
-    cursor = _CURSOR_BY_STATUS.get(status)
-    if cursor is None:
+    if status not in _CURSOR_BY_STATUS:
         raise _invalid() from None
-    return cursor
+    if awaiting_user:
+        if status not in _AWAITABLE_STATUS:
+            raise _invalid() from None
+        return "await_author_action"
+    return _CURSOR_BY_STATUS[status]
 
 
 async def reconstruct_scheduler_input(
@@ -89,15 +92,25 @@ async def reconstruct_scheduler_input(
     if run is None or run.workflow_type != WorkflowType.CHAPTER_PRODUCTION.value:
         raise _invalid() from None
     graph_id, graph_version = _strict_runtime(run.metadata_)
-    checkpoint = await session.scalar(
-        select(WorkflowCheckpoint)
-        .where(WorkflowCheckpoint.workflow_run_id == workflow_run_id)
-        .order_by(WorkflowCheckpoint.checkpoint_index.desc())
-        .limit(1)
-    )
-    if checkpoint is None:
+    checkpoints = (
+        await session.scalars(
+            select(WorkflowCheckpoint)
+            .where(WorkflowCheckpoint.workflow_run_id == workflow_run_id)
+            .order_by(WorkflowCheckpoint.checkpoint_index.desc())
+            .limit(2)
+        )
+    ).all()
+    if not checkpoints:
         raise _invalid() from None
-    state_json = checkpoint.state_json if type(checkpoint.state_json) is dict else {}
+    checkpoint = checkpoints[0]
+    if len(checkpoints) > 1 and (
+        checkpoints[1].checkpoint_index == checkpoint.checkpoint_index
+        or checkpoints[1].checkpoint_index != checkpoint.checkpoint_index - 1
+    ):
+        raise _invalid() from None
+    if type(checkpoint.state_json) is not dict:
+        raise _invalid() from None
+    state_json = checkpoint.state_json
     return parse_graph_state(
         {
             "workflow_run_id": run.id,
