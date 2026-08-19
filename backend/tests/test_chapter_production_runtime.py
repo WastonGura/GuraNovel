@@ -6,7 +6,9 @@ from pathlib import Path
 import pytest
 
 from app.services.chapter_production_runtime import (
+    SCHEDULER_KIND_LANGGRAPH,
     SCHEDULER_KIND_SERVICE_V2,
+    chapter_production_langgraph_pin,
     chapter_production_runtime_pin,
     strict_runtime,
 )
@@ -29,6 +31,27 @@ def test_pin_is_exact_and_server_owned() -> None:
         "graph_version": "0",
     }
     assert strict_runtime(pin) == pin
+
+
+def test_langgraph_pin_is_exact_server_owned_and_accepted() -> None:
+    pin = chapter_production_langgraph_pin()
+
+    assert pin == {
+        "scheduler_kind": SCHEDULER_KIND_LANGGRAPH,
+        "graph_id": "chapter-production-langgraph",
+        "graph_version": "0",
+    }
+    assert strict_runtime(pin) == pin
+
+
+def test_langgraph_pin_constants_match_app_graph_contracts() -> None:
+    from app.graph.contracts import GRAPH_ID, GRAPH_VERSION
+
+    assert chapter_production_langgraph_pin() == {
+        "scheduler_kind": "langgraph",
+        "graph_id": GRAPH_ID,
+        "graph_version": GRAPH_VERSION,
+    }
 
 
 @pytest.mark.parametrize(
