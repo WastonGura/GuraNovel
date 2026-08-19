@@ -3,6 +3,7 @@ from __future__ import annotations
 from uuid import UUID, uuid4
 
 import pytest
+from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph import END
 from langgraph.types import Command
 
@@ -253,6 +254,24 @@ def test_graph_definition_compiles_and_invokes_with_memory_checkpointer() -> Non
     assert result["graph_id"] == GRAPH_ID
     assert result["workflow_run_id"] == run_id
     assert result["cursor"] == "complete"
+
+
+def test_deleting_graph_state_permits_reconstruction_from_business_truth() -> None:
+    business_truth = parse_graph_state(_valid_state())
+    run_id = business_truth["workflow_run_id"]
+    saver = InMemorySaver()
+    definition = GraphDefinition(
+        graph_id=GRAPH_ID,
+        graph_version=GRAPH_VERSION,
+        nodes=(("reconstruct", fake_reconstruct_port, lambda outcome: END),),
+    )
+    compiled = definition.compile(checkpointer=saver)
+    compiled.invoke(business_truth, config=build_config(run_id))
+    saver.delete_thread(str(run_id))
+
+    rebuilt = parse_graph_state(business_truth)
+
+    assert rebuilt == business_truth
 
 
 def test_build_config_uses_thread_id_equal_to_workflow_run_id() -> None:
