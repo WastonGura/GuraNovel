@@ -1,0 +1,242 @@
+name: CI
+
+on:
+  pull_request:
+    branches:
+      - main
+    types:
+      - opened
+      - synchronize
+      - reopened
+  push:
+    branches:
+      - main
+      - 'ci/**'
+      - 'feature/**'
+      - 'fix/**'
+      - 'refactor/**'
+  workflow_dispatch:
+
+
+
+
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  detect-changes:
+    name: "Detect changes"
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      backend: ${{ steps.filter.outputs.backend }}
+      frontend: ${{ steps.filter.outputs.frontend }}
+    steps:
+      - name: "Check out repository"
+        uses: actions/checkout@v4
+
+      - name: "Filter changed paths"
+        uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            backend:
+              - 'backend/**'
+              - '.github/workflows/ci.yml'
+            frontend:
+              - 'frontend/**'
+              - '.github/workflows/ci.yml'
+
+  backend-lint:
+    name: "Backend - Lint & Code Style"
+    needs: detect-changes
+    if: needs.detect-changes.outputs.backend == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    defaults:
+      run:
+        working-directory: backend
+
+    steps:
+      - name: "Check out repository"
+        uses: actions/checkout@v4
+
+      - name: "Set up Python"
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: "Set up uv"
+        uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.11.21"
+          enable-cache: true
+
+      - name: "Install dependencies"
+        run: uv sync --frozen --all-groups
+
+      - name: "Run Ruff"
+        run: uv run ruff check .
+
+  backend-unit:
+    name: "Backend - Unit tests"
+    needs: detect-changes
+    if: needs.detect-changes.outputs.backend == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: backend
+
+    steps:
+      - name: "Check out repository"
+        uses: actions/checkout@v4
+
+      - name: "Set up Python"
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: "Set up uv"
+        uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.11.21"
+          enable-cache: true
+
+      - name: "Install dependencies"
+        run: uv sync --frozen --all-groups
+
+      - name: "Run architecture tests"
+        run: uv run pytest tests/test_*_architecture.py -v
+
+      - name: "Run unit tests"
+        run: uv run pytest -m "not integration"
+
+  backend-integration:
+    name: "Backend - PostgreSQL integration tests"
+    needs: detect-changes
+    if: needs.detect-changes.outputs.backend == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_DB: guranovel_test
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d guranovel_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 5
+    defaults:
+      run:
+        working-directory: backend
+
+    steps:
+      - name: "Check out repository"
+        uses: actions/checkout@v4
+
+      - name: "Set up Python"
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: "Set up uv"
+        uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.11.21"
+          enable-cache: true
+
+      - name: "Install dependencies"
+        run: uv sync --frozen --all-groups
+
+      - name: "Run PostgreSQL integration tests"
+        env:
+          TEST_DATABASE_URL: postgresql+asyncpg://postgres:postgres@127.0.0.1:5432/guranovel_test
+        run: uv run pytest -m integration -v
+
+  frontend-quality:
+    name: "Frontend - Quality gates"
+    needs: detect-changes
+    if: needs.detect-changes.outputs.frontend == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: frontend
+    env:
+      VITE_API_BASE_URL: /api/v1
+
+    steps:
+      - name: "Check out repository"
+        uses: actions/checkout@v4
+
+      - name: "Set up Node.js"
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22.12.0'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: "Install dependencies"
+        run: npm ci
+
+      - name: "Run ESLint"
+        run: npm run lint
+
+      - name: "Run Vitest"
+        run: npm run test -- --run
+
+      - name: "Build frontend"
+        run: npm run build
+
+      - name: "Lint design document"
+        run: npx --no-install @google/design.md lint DESIGN.md
+
+      - name: "Cache Playwright browsers"
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: ${{ runner.os }}-playwright-${{ hashFiles('frontend/package-lock.json') }}
+
+      - name: "Install Playwright Chromium"
+        run: npx playwright install --with-deps chromium
+
+      - name: "Run Playwright smoke test"
+        run: npm run test:e2e
+
+  all-checks-passed:
+    name: "All Checks Passed"
+    needs:
+      - detect-changes
+      - backend-lint
+      - backend-unit
+      - backend-integration
+      - frontend-quality
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: "Verify job statuses"
+        env:
+          NEEDS_JSON: ${{ toJson(needs) }}
+        run: |
+          python3 -c '
+          import json, os, sys
+          needs = json.loads(os.environ["NEEDS_JSON"])
+          failed_jobs = [
+              job_name
+              for job_name, job_data in needs.items()
+              if job_data.get("result") in ("failure", "cancelled")
+          ]
+          if failed_jobs:
+              print(f"CI failed due to failing/cancelled jobs: {failed_jobs}", file=sys.stderr)
+              sys.exit(1)
+          print("All CI checks passed (or were intentionally skipped due to path filtering).")
+          '
