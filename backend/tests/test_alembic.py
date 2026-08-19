@@ -52,3 +52,11 @@ def test_maintenance_migration_downgrades_in_dependency_order() -> None:
     changes = sql.index("DROP TABLE maintenance_changes")
     workflow_unique = sql.index("DROP CONSTRAINT uq_workflow_runs_project_id_id")
     assert affected < changes < workflow_unique
+
+
+def test_runtime_pin_migration_downgrades_in_dependency_order() -> None:
+    sql = run_alembic("downgrade", "0003_runtime_pin_event_sequence:0002_maintenance_persistence", "--sql")
+
+    assert "DROP INDEX uq_workflow_events_run_sequence" in sql
+    assert "DROP COLUMN event_sequence" in sql
+

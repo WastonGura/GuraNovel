@@ -27,6 +27,7 @@ from app.models import (
     WorkflowEvent,
     WorkflowRun,
 )
+from app.services.chapter_production_runtime import next_event_sequence
 from app.services.chapter_production_v2_contracts import (
     CONTRACT_VERSION,
     ChapterProductionV2CommitIndeterminateError,
@@ -617,6 +618,7 @@ class ChapterFinalizationSaga:
         service.session.add(
             WorkflowEvent(
                 workflow_run_id=run.id,
+                event_sequence=await next_event_sequence(service.session, run.id),
                 event_type="chapter_finalized",
                 node_name=completed.current_node,
                 payload={

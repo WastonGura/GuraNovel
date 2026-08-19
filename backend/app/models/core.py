@@ -164,7 +164,17 @@ class WorkflowCheckpoint(Base):
 
 class WorkflowEvent(Base):
     __tablename__ = "workflow_events"
-    __table_args__ = (Index("idx_workflow_events_run_id", "workflow_run_id"), Index("idx_workflow_events_type", "event_type"))
+    __table_args__ = (
+        Index("idx_workflow_events_run_id", "workflow_run_id"),
+        Index("idx_workflow_events_type", "event_type"),
+        Index(
+            "uq_workflow_events_run_sequence",
+            "workflow_run_id",
+            "event_sequence",
+            unique=True,
+            postgresql_where=text("event_sequence IS NOT NULL"),
+        ),
+    )
 
     id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True, default=uuid4, server_default=text("gen_random_uuid()"))
     workflow_run_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), ForeignKey("workflow_runs.id", ondelete="CASCADE"), nullable=False)
@@ -174,6 +184,7 @@ class WorkflowEvent(Base):
     actor_id: Mapped[str | None] = mapped_column(Text)
     message: Mapped[str | None] = mapped_column(Text)
     payload: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb"))
+    event_sequence: Mapped[int | None] = mapped_column(Integer, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
     workflow_run: Mapped[WorkflowRun] = relationship(back_populates="events")
 

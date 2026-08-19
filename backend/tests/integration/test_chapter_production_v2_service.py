@@ -639,6 +639,11 @@ async def test_start_from_approved_outline_persists_exact_v2_draft_gate_and_repl
         "operation_key": run.metadata_["operation_key"],
         "provider_attempt": None,
         "reviewer_claim": None,
+        "chapter_production_runtime": {
+            "scheduler_kind": "service_v2",
+            "graph_id": "chapter-production-v2",
+            "graph_version": "0",
+        },
     }
     assert draft.project_id == project.id and draft.chapter_id == chapter.id
     assert draft.type == DocumentType.CHAPTER_DRAFT.value
@@ -1675,8 +1680,9 @@ async def test_two_sessions_initial_resume_claims_exactly_one_provider_and_candi
             ).start_from_approved_outline(project_id, chapter_id, actor_user_id=owner_id)
 
     first = asyncio.create_task(start_once())
-    await provider.entered.wait()
+    await asyncio.wait_for(provider.entered.wait(), timeout=10.0)
     try:
+
         with pytest.raises(ChapterProductionV2ReconciliationError):
             await start_once()
     finally:
@@ -1748,8 +1754,9 @@ async def test_two_sessions_feedback_claims_one_provider_version_and_successor_a
             )
 
     first = asyncio.create_task(revise_once())
-    await provider.entered.wait()
+    await asyncio.wait_for(provider.entered.wait(), timeout=10.0)
     try:
+
         with pytest.raises(ChapterProductionV2ValidationError):
             await revise_once()
     finally:
@@ -1804,7 +1811,7 @@ async def test_claimed_no_candidate_requires_explicit_ack_before_restart(
             ).start_from_approved_outline(project_id, chapter_id, actor_user_id=owner_id)
 
     pending = asyncio.create_task(start_claim())
-    await provider.entered.wait()
+    await asyncio.wait_for(provider.entered.wait(), timeout=10.0)
     try:
         async with sessions() as restarted:
             service = ChapterProductionV2Service(
@@ -1841,7 +1848,8 @@ async def test_claimed_no_candidate_requires_explicit_ack_before_restart(
                 ).start_from_approved_outline(project_id, chapter_id, actor_user_id=owner_id)
 
         retry = asyncio.create_task(restart_claim())
-        await retry_provider.entered.wait()
+        await asyncio.wait_for(retry_provider.entered.wait(), timeout=10.0)
+
         provider.release.set()
         expected_error = {
             "success": ChapterProductionV2ReconciliationError,
@@ -2131,8 +2139,9 @@ async def test_review_report_summary_mutation_invalidates_claimed_work_identity(
             )
 
     pending = asyncio.create_task(revise())
-    await provider.entered.wait()
+    await asyncio.wait_for(provider.entered.wait(), timeout=10.0)
     try:
+
         async with sessions() as mutation:
             current = await mutation.get(ReviewReport, report.id)
             assert current is not None

@@ -77,6 +77,11 @@ def test_builds_exact_pristine_metadata_and_checkpoint() -> None:
         "operation_key": OPERATION_KEY,
         "provider_attempt": None,
         "reviewer_claim": None,
+        "chapter_production_runtime": {
+            "scheduler_kind": "service_v2",
+            "graph_id": "chapter-production-v2",
+            "graph_version": "0",
+        },
     }
     assert checkpoint["chapter_workflow_run_id"] == str(binding.workflow_run_id)
     assert checkpoint["chapter_id"] == str(binding.chapter_id)
