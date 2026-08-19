@@ -14,17 +14,17 @@ concurrency:
 
 jobs:
   detect-changes:
-    name: Detect changes
+    name: "Detect changes"
     runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:
       backend: ${{ steps.filter.outputs.backend }}
       frontend: ${{ steps.filter.outputs.frontend }}
     steps:
-      - name: Check out repository
+      - name: "Check out repository"
         uses: actions/checkout@v4
 
-      - name: Filter changed paths
+      - name: "Filter changed paths"
         uses: dorny/paths-filter@v3
         id: filter
         with:
@@ -37,7 +37,7 @@ jobs:
               - '.github/workflows/ci.yml'
 
   backend-lint:
-    name: Backend: Lint & Code Style
+    name: "Backend - Lint & Code Style"
     needs: detect-changes
     if: needs.detect-changes.outputs.backend == 'true'
     runs-on: ubuntu-latest
@@ -47,28 +47,28 @@ jobs:
         working-directory: backend
 
     steps:
-      - name: Check out repository
+      - name: "Check out repository"
         uses: actions/checkout@v4
 
-      - name: Set up Python
+      - name: "Set up Python"
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
 
-      - name: Set up uv
+      - name: "Set up uv"
         uses: astral-sh/setup-uv@v6
         with:
           version: "0.11.21"
           enable-cache: true
 
-      - name: Install dependencies
+      - name: "Install dependencies"
         run: uv sync --frozen --all-groups
 
-      - name: Run Ruff
+      - name: "Run Ruff"
         run: uv run ruff check .
 
   backend-unit:
-    name: Backend: Unit tests
+    name: "Backend - Unit tests"
     needs: detect-changes
     if: needs.detect-changes.outputs.backend == 'true'
     runs-on: ubuntu-latest
@@ -78,28 +78,31 @@ jobs:
         working-directory: backend
 
     steps:
-      - name: Check out repository
+      - name: "Check out repository"
         uses: actions/checkout@v4
 
-      - name: Set up Python
+      - name: "Set up Python"
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
 
-      - name: Set up uv
+      - name: "Set up uv"
         uses: astral-sh/setup-uv@v6
         with:
           version: "0.11.21"
           enable-cache: true
 
-      - name: Install dependencies
+      - name: "Install dependencies"
         run: uv sync --frozen --all-groups
 
-      - name: Run unit tests
+      - name: "Run architecture tests"
+        run: uv run pytest tests/test_*_architecture.py -v
+
+      - name: "Run unit tests"
         run: uv run pytest -m "not integration"
 
   backend-integration:
-    name: Backend: PostgreSQL integration tests
+    name: "Backend - PostgreSQL integration tests"
     needs: detect-changes
     if: needs.detect-changes.outputs.backend == 'true'
     runs-on: ubuntu-latest
@@ -123,30 +126,30 @@ jobs:
         working-directory: backend
 
     steps:
-      - name: Check out repository
+      - name: "Check out repository"
         uses: actions/checkout@v4
 
-      - name: Set up Python
+      - name: "Set up Python"
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
 
-      - name: Set up uv
+      - name: "Set up uv"
         uses: astral-sh/setup-uv@v6
         with:
           version: "0.11.21"
           enable-cache: true
 
-      - name: Install dependencies
+      - name: "Install dependencies"
         run: uv sync --frozen --all-groups
 
-      - name: Run PostgreSQL integration tests
+      - name: "Run PostgreSQL integration tests"
         env:
           TEST_DATABASE_URL: postgresql+asyncpg://postgres:postgres@127.0.0.1:5432/guranovel_test
         run: uv run pytest -m integration -v
 
   frontend-quality:
-    name: Frontend: Quality gates
+    name: "Frontend - Quality gates"
     needs: detect-changes
     if: needs.detect-changes.outputs.frontend == 'true'
     runs-on: ubuntu-latest
@@ -158,45 +161,45 @@ jobs:
       VITE_API_BASE_URL: /api/v1
 
     steps:
-      - name: Check out repository
+      - name: "Check out repository"
         uses: actions/checkout@v4
 
-      - name: Set up Node.js
+      - name: "Set up Node.js"
         uses: actions/setup-node@v4
         with:
           node-version: '22.12.0'
           cache: npm
           cache-dependency-path: frontend/package-lock.json
 
-      - name: Install dependencies
+      - name: "Install dependencies"
         run: npm ci
 
-      - name: Run ESLint
+      - name: "Run ESLint"
         run: npm run lint
 
-      - name: Run Vitest
+      - name: "Run Vitest"
         run: npm run test -- --run
 
-      - name: Build frontend
+      - name: "Build frontend"
         run: npm run build
 
-      - name: Lint design document
+      - name: "Lint design document"
         run: npx --no-install @google/design.md lint DESIGN.md
 
-      - name: Cache Playwright browsers
+      - name: "Cache Playwright browsers"
         uses: actions/cache@v4
         with:
           path: ~/.cache/ms-playwright
           key: ${{ runner.os }}-playwright-${{ hashFiles('frontend/package-lock.json') }}
 
-      - name: Install Playwright Chromium
+      - name: "Install Playwright Chromium"
         run: npx playwright install --with-deps chromium
 
-      - name: Run Playwright smoke test
+      - name: "Run Playwright smoke test"
         run: npm run test:e2e
 
   all-checks-passed:
-    name: All Checks Passed
+    name: "All Checks Passed"
     needs:
       - detect-changes
       - backend-lint
@@ -207,7 +210,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - name: Verify job statuses
+      - name: "Verify job statuses"
         env:
           NEEDS_JSON: ${{ toJson(needs) }}
         run: |
