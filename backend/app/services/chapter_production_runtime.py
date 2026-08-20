@@ -45,7 +45,11 @@ def strict_runtime(value: object) -> dict[str, str]:
     """Return one of the two exact server-owned runtime namespaces, or fail closed."""
     if type(value) is not dict or not value:
         raise _invalid()
-    if set(value) != _RUNTIME_KEYS or any(type(item) is not str for item in value.values()):
+    if (
+        any(type(key) is not str for key in value)
+        or set(value) != _RUNTIME_KEYS
+        or any(type(item) is not str for item in value.values())
+    ):
         raise _invalid()
     if value not in (chapter_production_runtime_pin(), chapter_production_langgraph_pin()):
         raise _invalid()

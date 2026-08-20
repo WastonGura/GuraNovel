@@ -53,7 +53,7 @@ def build_chapter_production_graph(
     checkpointer: Any = None,
 ) -> Any:
     """Compile the exact 11-node server-owned topology with checked routing."""
-    if set(ports) != set(NODE_NAMES):
+    if set(ports) != set(NODE_NAMES) or any(not callable(port) for port in ports.values()):
         raise GraphError()
     ordered = ("reconstruct", *sorted(BUSINESS_NODES))
     nodes = tuple(
