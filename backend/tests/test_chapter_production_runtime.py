@@ -6,7 +6,9 @@ from pathlib import Path
 import pytest
 
 from app.services.chapter_production_runtime import (
+    SCHEDULER_KIND_LANGGRAPH,
     SCHEDULER_KIND_SERVICE_V2,
+    chapter_production_langgraph_pin,
     chapter_production_runtime_pin,
     strict_runtime,
 )
@@ -31,6 +33,27 @@ def test_pin_is_exact_and_server_owned() -> None:
     assert strict_runtime(pin) == pin
 
 
+def test_langgraph_pin_is_exact_server_owned_and_accepted() -> None:
+    pin = chapter_production_langgraph_pin()
+
+    assert pin == {
+        "scheduler_kind": SCHEDULER_KIND_LANGGRAPH,
+        "graph_id": "chapter-production-langgraph",
+        "graph_version": "0",
+    }
+    assert strict_runtime(pin) == pin
+
+
+def test_langgraph_pin_constants_match_app_graph_contracts() -> None:
+    from app.graph.contracts import GRAPH_ID, GRAPH_VERSION
+
+    assert chapter_production_langgraph_pin() == {
+        "scheduler_kind": "langgraph",
+        "graph_id": GRAPH_ID,
+        "graph_version": GRAPH_VERSION,
+    }
+
+
 @pytest.mark.parametrize(
     "payload",
     (
@@ -46,6 +69,22 @@ def test_pin_is_exact_and_server_owned() -> None:
 def test_malformed_or_noncanonical_runtime_fails_closed(payload: object) -> None:
     with pytest.raises(ChapterProductionV2ValidationError):
         strict_runtime(payload)
+
+
+def test_str_subclass_keys_fail_closed_and_result_uses_plain_str_keys() -> None:
+    class WeirdKey(str):
+        pass
+
+    payload = {
+        WeirdKey("scheduler_kind"): "service_v2",
+        WeirdKey("graph_id"): "chapter-production-v2",
+        WeirdKey("graph_version"): "0",
+    }
+    with pytest.raises(ChapterProductionV2ValidationError):
+        strict_runtime(payload)
+
+    canonical = strict_runtime(chapter_production_runtime_pin())
+    assert all(type(key) is str for key in canonical)
 
 
 def test_allocator_sql_has_no_aggregate_for_update() -> None:

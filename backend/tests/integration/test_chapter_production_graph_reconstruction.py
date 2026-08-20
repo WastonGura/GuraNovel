@@ -13,6 +13,10 @@ from app.models import WorkflowCheckpoint, WorkflowRun, WorkflowType
 from app.services.chapter_production_graph_reconstruction import (
     reconstruct_scheduler_input,
 )
+from app.services.chapter_production_runtime import (
+    chapter_production_langgraph_pin,
+    strict_runtime,
+)
 
 pytestmark = [pytest.mark.integration, pytest.mark.anyio]
 
@@ -85,6 +89,18 @@ async def test_reconstructs_scheduler_input_from_postgresql(
     assert state["claim_id"] is None
     assert state["action_request_id"] == action_request_id
     assert state["resume_reason"] == "new"
+
+
+async def test_postgresql_langgraph_pin_round_trips_through_strict_runtime(
+    async_session: object,
+) -> None:
+    run_id = uuid4()
+    pin = chapter_production_langgraph_pin()
+    await _insert_run_and_checkpoint(async_session, run_id=run_id)
+
+    row = await async_session.get(WorkflowRun, run_id)  # type: ignore[attr-defined]
+    assert row is not None  # type: ignore[union-attr]
+    assert strict_runtime(row.metadata_["chapter_production_runtime"]) == pin  # type: ignore[union-attr]
 
 
 async def test_reconstruction_is_read_only_and_stable_after_restart(
