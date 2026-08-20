@@ -22,11 +22,9 @@ LEGAL_EDGES: Mapping[str, frozenset[str]] = {
     "draft": frozenset({"await_author_action"}),
     "await_author_action": frozenset({"draft", "author_revision", "editor_review"}),
     "author_revision": frozenset({"editor_review"}),
-    "editor_review": frozenset(
-        {"chief_editor_review", "lore_review", "corrective_revision"}
-    ),
-    "chief_editor_review": frozenset({"lore_review", "corrective_revision"}),
-    "lore_review": frozenset({"mark_revision_ready", "corrective_revision"}),
+    "editor_review": frozenset({"chief_editor_review", "lore_review"}),
+    "chief_editor_review": frozenset({"lore_review"}),
+    "lore_review": frozenset({"mark_revision_ready"}),
     "corrective_revision": frozenset({"editor_review"}),
     "mark_revision_ready": frozenset({"finalize"}),
     "finalize": frozenset(),
@@ -53,7 +51,11 @@ def build_chapter_production_graph(
     checkpointer: Any = None,
 ) -> Any:
     """Compile the exact 11-node server-owned topology with checked routing."""
-    if set(ports) != set(NODE_NAMES) or any(not callable(port) for port in ports.values()):
+    if (
+        any(type(key) is not str for key in ports)
+        or set(ports) != set(NODE_NAMES)
+        or any(not callable(port) for port in ports.values())
+    ):
         raise GraphError()
     ordered = ("reconstruct", *sorted(BUSINESS_NODES))
     nodes = tuple(
