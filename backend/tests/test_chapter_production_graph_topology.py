@@ -29,11 +29,9 @@ def test_legal_continue_edges_are_exact() -> None:
         "draft": frozenset({"await_author_action"}),
         "await_author_action": frozenset({"draft", "author_revision", "editor_review"}),
         "author_revision": frozenset({"editor_review"}),
-        "editor_review": frozenset(
-            {"chief_editor_review", "lore_review", "corrective_revision"}
-        ),
-        "chief_editor_review": frozenset({"lore_review", "corrective_revision"}),
-        "lore_review": frozenset({"mark_revision_ready", "corrective_revision"}),
+        "editor_review": frozenset({"chief_editor_review", "lore_review"}),
+        "chief_editor_review": frozenset({"lore_review"}),
+        "lore_review": frozenset({"mark_revision_ready"}),
         "corrective_revision": frozenset({"editor_review"}),
         "mark_revision_ready": frozenset({"finalize"}),
         "finalize": frozenset(),
@@ -56,6 +54,11 @@ def test_route_for_outcome_accepts_only_legal_continue_edges() -> None:
         route_for_outcome(
             {"kind": "continue", "next_cursor": "unknown"}, "reconstruct"
         )
+    for node in ("editor_review", "chief_editor_review", "lore_review"):
+        with pytest.raises(GraphError):
+            route_for_outcome(
+                {"kind": "continue", "next_cursor": "corrective_revision"}, node
+            )
 
 
 @pytest.mark.parametrize(
@@ -86,6 +89,19 @@ def test_build_chapter_production_graph_compiles_all_frozen_nodes() -> None:
 def test_build_chapter_production_graph_rejects_non_callable_ports() -> None:
     ports = {name: (lambda state: None) for name in NODE_NAMES}
     ports["reconstruct"] = object()  # type: ignore[dict-item]
+
+    with pytest.raises(GraphError):
+        build_chapter_production_graph(ports)
+
+
+def test_build_chapter_production_graph_rejects_str_subclass_port_keys() -> None:
+    class WeirdKey(str):
+        pass
+
+    def fake(state: object) -> dict[str, str]:
+        return {"kind": "complete", "completion_code": "success"}
+
+    ports = {WeirdKey(name): fake for name in NODE_NAMES}
 
     with pytest.raises(GraphError):
         build_chapter_production_graph(ports)
