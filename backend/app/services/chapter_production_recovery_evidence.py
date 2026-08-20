@@ -34,6 +34,7 @@ from app.services.chapter_production_v2_contracts import (
     ChapterProductionV2Updated,
 )
 from app.services.chapter_review_validation import (
+    review_action_metadata,
     validated_persisted_review_report,
     validated_resolved_review_action,
 )
@@ -55,6 +56,7 @@ async def author_context(
     workflow_run_id: UUID,
     action_request_id: UUID,
     actor_user_id: UUID,
+    adopt_stale: bool = True,
 ) -> _AuthorContext:
     await service._require_project_owner(project_id, actor_user_id)
     chapter = await service._chapter(project_id, chapter_id, lock=True)
@@ -96,6 +98,8 @@ async def author_context(
         content_hash=metadata["content_hash"],
     )
     if document is None:
+        if not adopt_stale:
+            raise _invalid() from None
         return await _adopt_stale_author_context(
             service,
             run=run,
@@ -124,6 +128,81 @@ async def author_context(
     )
     binding = _build_author_binding(action, run, chapter, document, version)
     return _AuthorContext(run, state, checkpoint, action, binding, document, version)
+
+
+async def validate_scheduling_action(
+    service: object,
+    *,
+    project_id: UUID,
+    chapter_id: UUID,
+    workflow_run_id: UUID,
+    action_request_id: UUID,
+    actor_user_id: UUID,
+    action_kind: ChapterActionKind,
+) -> None:
+    """Fresh-lock and validate the exact live gate without resolving it."""
+
+    if action_kind is ChapterActionKind.AUTHOR_REVISION:
+        context = await author_context(
+            service,
+            project_id=project_id,
+            chapter_id=chapter_id,
+            workflow_run_id=workflow_run_id,
+            action_request_id=action_request_id,
+            actor_user_id=actor_user_id,
+            adopt_stale=False,
+        )
+        action = context.action
+    elif action_kind in {
+        ChapterActionKind.REVIEW_WARNING,
+        ChapterActionKind.REVIEW_REVISION,
+    }:
+        from app.services.chapter_review_persistence import (
+            _resolve_review_action_pending,
+            _resolve_review_action_report,
+            _validated_resolve_action_metadata,
+        )
+
+        await service._require_project_owner(project_id, actor_user_id)
+        chapter = await service._chapter(project_id, chapter_id, lock=True)
+        run = await service._run(project_id, chapter_id, workflow_run_id, lock=True)
+        state, _ = await locked_state(service, run)
+        if (
+            not state.awaiting_user
+            or state.action_request_id != str(action_request_id)
+            or state.action_kind is not action_kind
+        ):
+            raise _invalid() from None
+        action, pending_count = await _resolve_review_action_pending(
+            service,
+            project_id=project_id,
+            chapter_id=chapter_id,
+            run=run,
+            action_request_id=action_request_id,
+        )
+        metadata = review_action_metadata(action)
+        _validated_resolve_action_metadata(metadata, state)
+        await _resolve_review_action_report(
+            service,
+            project_id=project_id,
+            chapter_id=chapter_id,
+            run=run,
+            state=state,
+            chapter=chapter,
+            action=action,
+            metadata=metadata,
+            pending_count=pending_count,
+        )
+    else:
+        raise _invalid() from None
+    database_now = await service.session.scalar(select(func.clock_timestamp()))
+    try:
+        if database_now is None or (
+            action.expires_at is not None and database_now >= action.expires_at
+        ):
+            raise _invalid() from None
+    except Exception:
+        raise _invalid() from None
 
 
 async def _locked_author_action(

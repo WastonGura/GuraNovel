@@ -18,6 +18,7 @@ from app.services.chapter_production_recovery_shared import (
     _ATTEMPT_STATUS_CLAIMED,
     _invalid,
 )
+from app.services.chapter_production_runtime import chapter_production_langgraph_pin
 from app.services.chapter_production_v2_contracts import (
     ChapterProductionV2ReconciliationError,
     ChapterProductionV2ValidationError,
@@ -170,14 +171,22 @@ async def load_state(
     chapter_id: UUID,
     workflow_run_id: UUID,
     actor_user_id: UUID,
+    require_langgraph_runtime: bool = False,
 ) -> ChapterProductionState:
     """Load only the exact latest V2 checkpoint and validate its run projection."""
 
     try:
+        if type(require_langgraph_runtime) is not bool:
+            raise _invalid() from None
         service._validated_ids(project_id, chapter_id, workflow_run_id, actor_user_id)
         await service._require_project_owner(project_id, actor_user_id)
         await service._chapter(project_id, chapter_id, lock=False)
         run = await service._run(project_id, chapter_id, workflow_run_id, lock=False)
+        metadata = service._run_metadata(run)
+        if require_langgraph_runtime and metadata.get(
+            "chapter_production_runtime"
+        ) != chapter_production_langgraph_pin():
+            raise _invalid() from None
         state, _ = await locked_state(service, run)
         await service.session.commit()
         return state
