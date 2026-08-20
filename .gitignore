@@ -30,6 +30,7 @@ workspaces/*
 # Private design drafts / internal planning notes
 docs/design/
 .hermes/
+.codex/
 
 # Databases and local volumes
 *.db
