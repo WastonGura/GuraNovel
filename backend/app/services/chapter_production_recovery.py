@@ -29,6 +29,7 @@ from app.services.chapter_production_recovery_evidence import (
     locked_current_revision,
     locked_review_document,
     review_revision_context,
+    validate_scheduling_action,
 )
 from app.services.chapter_production_recovery_reconstruction import (
     load_state,
@@ -63,6 +64,7 @@ class ChapterProductionRecovery:
         chapter_id: UUID,
         workflow_run_id: UUID,
         actor_user_id: UUID,
+        require_langgraph_runtime: bool = False,
     ) -> ChapterProductionState:
         return await load_state(
             service,
@@ -70,6 +72,28 @@ class ChapterProductionRecovery:
             chapter_id=chapter_id,
             workflow_run_id=workflow_run_id,
             actor_user_id=actor_user_id,
+            require_langgraph_runtime=require_langgraph_runtime,
+        )
+
+    async def validate_scheduling_action(
+        self,
+        service: object,
+        *,
+        project_id: UUID,
+        chapter_id: UUID,
+        workflow_run_id: UUID,
+        action_request_id: UUID,
+        actor_user_id: UUID,
+        action_kind: object,
+    ) -> None:
+        await validate_scheduling_action(
+            service,
+            project_id=project_id,
+            chapter_id=chapter_id,
+            workflow_run_id=workflow_run_id,
+            action_request_id=action_request_id,
+            actor_user_id=actor_user_id,
+            action_kind=action_kind,  # type: ignore[arg-type]
         )
 
     async def reconcile_review_route(

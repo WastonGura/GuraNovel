@@ -610,6 +610,7 @@ class ChapterProductionV2Service:
         workflow_run_id: UUID,
         *,
         actor_user_id: UUID,
+        require_langgraph_runtime: bool = False,
     ) -> ChapterProductionState:
         """Load only the exact latest V2 checkpoint and validate its run projection."""
 
@@ -619,7 +620,50 @@ class ChapterProductionV2Service:
             chapter_id=chapter_id,
             workflow_run_id=workflow_run_id,
             actor_user_id=actor_user_id,
+            require_langgraph_runtime=require_langgraph_runtime,
         )
+
+    async def validate_scheduling_action(
+        self,
+        project_id: UUID,
+        chapter_id: UUID,
+        workflow_run_id: UUID,
+        action_request_id: UUID,
+        *,
+        actor_user_id: UUID,
+        action_kind: ChapterActionKind,
+    ) -> None:
+        """Freshly validate one exact pending gate without resolving it."""
+
+        self._validated_ids(
+            project_id,
+            chapter_id,
+            workflow_run_id,
+            action_request_id,
+            actor_user_id,
+        )
+        if not isinstance(action_kind, ChapterActionKind):
+            raise _invalid() from None
+        try:
+            await self._recovery.validate_scheduling_action(
+                self,
+                project_id=project_id,
+                chapter_id=chapter_id,
+                workflow_run_id=workflow_run_id,
+                action_request_id=action_request_id,
+                actor_user_id=actor_user_id,
+                action_kind=action_kind,
+            )
+            await self._commit()
+        except (
+            ChapterProductionV2ReconciliationError,
+            ChapterProductionV2ValidationError,
+        ):
+            await self._rollback()
+            raise
+        except Exception:
+            await self._rollback()
+            raise _invalid() from None
 
     async def reconcile_indeterminate(
         self,
