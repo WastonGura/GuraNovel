@@ -81,3 +81,11 @@ def test_build_chapter_production_graph_compiles_all_frozen_nodes() -> None:
     compiled = build_chapter_production_graph(ports)
 
     assert compiled is not None
+
+
+def test_build_chapter_production_graph_rejects_non_callable_ports() -> None:
+    ports = {name: (lambda state: None) for name in NODE_NAMES}
+    ports["reconstruct"] = object()  # type: ignore[dict-item]
+
+    with pytest.raises(GraphError):
+        build_chapter_production_graph(ports)

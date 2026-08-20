@@ -71,6 +71,22 @@ def test_malformed_or_noncanonical_runtime_fails_closed(payload: object) -> None
         strict_runtime(payload)
 
 
+def test_str_subclass_keys_fail_closed_and_result_uses_plain_str_keys() -> None:
+    class WeirdKey(str):
+        pass
+
+    payload = {
+        WeirdKey("scheduler_kind"): "service_v2",
+        WeirdKey("graph_id"): "chapter-production-v2",
+        WeirdKey("graph_version"): "0",
+    }
+    with pytest.raises(ChapterProductionV2ValidationError):
+        strict_runtime(payload)
+
+    canonical = strict_runtime(chapter_production_runtime_pin())
+    assert all(type(key) is str for key in canonical)
+
+
 def test_allocator_sql_has_no_aggregate_for_update() -> None:
     source = MODULE.read_text(encoding="utf-8")
     tree = ast.parse(source)
