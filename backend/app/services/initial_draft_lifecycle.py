@@ -5,7 +5,10 @@ from app.graph.contracts import GraphError
 from app.agents.chapter_writer_agents import WriterAgent
 from app.services.chapter_phase_session_lease import ChapterPhaseSessionLease
 import app.services.chapter_production_v2_contracts as contracts
-from app.services.chapter_production_graph_domain import ChapterProductionInvocationContext
+from app.services.chapter_production_graph_domain import (
+    ChapterProductionInvocationContext,
+    _canonical_uuid,
+)
 from app.services.chapter_production_graph_reconstruction import reconstruct_scheduler_input
 from app.services.chapter_production_runtime import (
     chapter_production_langgraph_pin,
@@ -35,6 +38,15 @@ def _raise_reconciliation() -> None:
         error.__context__ = None
 
 
+def _raise_validation() -> None:
+    error = contracts.ChapterProductionV2ValidationError()
+    try:
+        raise error from None
+    finally:
+        error.__cause__ = None
+        error.__context__ = None
+
+
 class InitialDraftLifecycle:
     def __init__(self, service: object, sessions: ChapterPhaseSessionLease, writer: WriterAgent, chief_editor_required: bool) -> None:
         self._service = service
@@ -55,6 +67,10 @@ class InitialDraftLifecycle:
     async def resume(self, project_id: UUID, chapter_id: UUID, workflow_run_id: UUID, *, actor_user_id: UUID) -> contracts.ChapterProductionV2Started:
         return await self._dispatch(project_id, chapter_id, workflow_run_id, actor_user_id)
     async def _dispatch(self, project_id: UUID, chapter_id: UUID, run_id: UUID, actor_id: UUID) -> contracts.ChapterProductionV2Started:
+        project_id, chapter_id, run_id, actor_id = (
+            _canonical_uuid(value)
+            for value in (project_id, chapter_id, run_id, actor_id)
+        )
         try:
             async with self.sessions.lease() as session:
                 runtime = await load_chapter_production_runtime(session, run_id)
@@ -94,7 +110,7 @@ class InitialDraftLifecycle:
                 project_id, chapter_id, run_id, actor_user_id=actor_id
             )
         except InitialCandidateNotApplicable:
-            raise contracts.ChapterProductionV2ValidationError() from None
+            _raise_validation()
     async def _run(self, project_id: UUID, chapter_id: UUID, run_id: UUID | None, actor_id: UUID) -> contracts.ChapterProductionV2Started:
         recovered = await self._replay(project_id, chapter_id, run_id, actor_id)
         if recovered is not None:

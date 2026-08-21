@@ -5,6 +5,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 from uuid import UUID
 
+import asyncpg
 import pytest
 
 import app.services.initial_draft_lifecycle as lifecycle_module
@@ -21,6 +22,7 @@ from app.services.chapter_production_v2_contracts import (
     ChapterProductionV2ProviderError,
     ChapterProductionV2ReconciliationError,
     ChapterProductionV2Started,
+    ChapterProductionV2ValidationError,
 )
 from app.services.initial_bootstrap_evidence import (
     InitialBootstrapBinding,
@@ -28,7 +30,10 @@ from app.services.initial_bootstrap_evidence import (
     pristine_run_metadata,
 )
 from app.services.initial_candidate_finalization import _Gate
-from app.services.initial_draft_lifecycle import InitialDraftLifecycle
+from app.services.initial_draft_lifecycle import (
+    InitialCandidateNotApplicable,
+    InitialDraftLifecycle,
+)
 from app.services.initial_provider_handoff import _InitialEvidencePhase
 from app.services.initial_run_bootstrap import _InitialRunPhase
 
@@ -435,3 +440,62 @@ async def test_resume_uses_existing_graph_pin_even_when_flag_is_false(
 
     assert result == started()
     graph.assert_awaited_once()
+
+
+@pytest.mark.anyio
+async def test_dispatch_canonicalizes_pg_uuid_before_runtime_load(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    value = lifecycle({"active": False})
+    load = AsyncMock(return_value=chapter_production_runtime_pin())
+    monkeypatch.setattr(lifecycle_module, "load_chapter_production_runtime", load)
+    pg_run_id = asyncpg.pgproto.pgproto.UUID(RUN_ID.hex)
+
+    result = await value.resume(
+        PROJECT_ID, CHAPTER_ID, pg_run_id, actor_user_id=ACTOR_ID  # type: ignore[arg-type]
+    )
+
+    assert result == started()
+    assert load.await_args.args[1] == RUN_ID
+    assert type(load.await_args.args[1]) is UUID
+    value._run.assert_awaited_once_with(PROJECT_ID, CHAPTER_ID, RUN_ID, ACTOR_ID)
+
+
+@pytest.mark.anyio
+async def test_dispatch_rejects_hostile_uuid_without_leaking_or_loading(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    value = lifecycle({"active": False})
+    load = AsyncMock(return_value=chapter_production_runtime_pin())
+    monkeypatch.setattr(lifecycle_module, "load_chapter_production_runtime", load)
+
+    class Hostile:
+        @property
+        def int(self) -> int:
+            raise RuntimeError("canary")
+
+        def __str__(self) -> str:
+            raise RuntimeError("canary")
+
+    with pytest.raises(ChapterProductionV2ValidationError) as captured:
+        await value.resume(
+            PROJECT_ID, CHAPTER_ID, Hostile(), actor_user_id=ACTOR_ID  # type: ignore[arg-type]
+        )
+
+    assert captured.value.__cause__ is None
+    assert captured.value.__context__ is None
+    assert "canary" not in repr(captured.value)
+    load.assert_not_awaited()
+
+
+@pytest.mark.anyio
+async def test_replay_maps_not_applicable_to_fixed_validation() -> None:
+    value = lifecycle({"active": False})
+    value.finalizer.resume.side_effect = InitialCandidateNotApplicable("canary")
+
+    with pytest.raises(ChapterProductionV2ValidationError) as captured:
+        await value._replay(PROJECT_ID, CHAPTER_ID, RUN_ID, ACTOR_ID)
+
+    assert captured.value.__cause__ is None
+    assert captured.value.__context__ is None
+    assert "canary" not in repr(captured.value)

@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Callable, Mapping
+
+from langgraph.errors import NodeCancelledError
 
 from app.graph.chapter_production_topology import build_chapter_production_graph
 from app.graph.contracts import GraphError, GraphState, parse_graph_outcome
@@ -26,6 +29,15 @@ def _outcome(result: ChapterProductionSchedulingResult) -> GraphOutcome:
         if value is not None:
             payload[field] = value
     return parse_graph_outcome(payload)
+
+
+def _raise_cancelled() -> None:
+    error = asyncio.CancelledError()
+    try:
+        raise error from None
+    finally:
+        error.__cause__ = None
+        error.__context__ = None
 
 
 def _ports(
@@ -72,7 +84,10 @@ async def invoke_chapter_production_graph(
 
     results: list[ChapterProductionSchedulingResult] = []
     graph = build_chapter_production_graph(_ports(service, context, results.append))
-    await graph.ainvoke(state)
+    try:
+        await graph.ainvoke(state)
+    except NodeCancelledError:
+        _raise_cancelled()
     if not results:
         raise GraphError() from None
     return results[-1]

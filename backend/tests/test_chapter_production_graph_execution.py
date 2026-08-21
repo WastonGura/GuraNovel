@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -102,3 +103,26 @@ async def test_compiled_graph_awaits_async_ports_and_returns_closed_result(
     )
 
     assert result == terminal
+
+
+@pytest.mark.anyio
+async def test_compiled_graph_preserves_sanitized_node_cancellation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "app.graph.chapter_production_execution.advance_chapter_production",
+        AsyncMock(side_effect=asyncio.CancelledError("canary")),
+    )
+    service = SimpleNamespace(
+        _phase_sessions=SimpleNamespace(lease=lambda: scheduling_facade(object())),
+        _new_scheduling_facade=lambda _session: SimpleNamespace(),
+    )
+
+    with pytest.raises(asyncio.CancelledError) as captured:
+        await invoke_chapter_production_graph(
+            service, context=CONTEXT, state=graph_state("reconstruct")
+        )
+
+    assert captured.value.__cause__ is None
+    assert captured.value.__context__ is None
+    assert "canary" not in repr(captured.value)

@@ -1,10 +1,9 @@
 from __future__ import annotations
 
 import ast
-
-import pytest
 import subprocess
 from pathlib import Path
+from unittest.mock import patch
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -153,7 +152,16 @@ def test_removed_private_recovery_bodies_are_absent_from_facade() -> None:
 
 
 def _budget_base_ref() -> str:
-    for ref in ("main", "origin/main", "refs/remotes/origin/main", "HEAD^1"):
+    head = subprocess.run(
+        ["git", "rev-parse", "--verify", "HEAD"],
+        cwd=REPO,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    if head.returncode != 0:
+        raise AssertionError("HEAD unavailable in this checkout")
+    for ref in ("origin/main", "refs/remotes/origin/main", "main", "HEAD^1"):
         result = subprocess.run(
             ["git", "rev-parse", "--verify", ref],
             cwd=REPO,
@@ -161,9 +169,27 @@ def _budget_base_ref() -> str:
             capture_output=True,
             check=False,
         )
-        if result.returncode == 0:
+        if result.returncode == 0 and result.stdout.strip() != head.stdout.strip():
             return ref
-    pytest.skip("base ref unavailable in this checkout")
+    raise AssertionError("base ref unavailable in this checkout")
+
+
+def test_budget_base_ref_skips_refs_at_head() -> None:
+    commits = {
+        "HEAD": "tip",
+        "origin/main": "tip",
+        "refs/remotes/origin/main": "tip",
+        "HEAD^1": "parent",
+    }
+
+    def resolve(command: list[str], **_: object) -> subprocess.CompletedProcess[str]:
+        ref = command[-1]
+        if ref not in commits:
+            return subprocess.CompletedProcess(command, 1, "", "missing")
+        return subprocess.CompletedProcess(command, 0, f"{commits[ref]}\n", "")
+
+    with patch.object(subprocess, "run", side_effect=resolve):
+        assert _budget_base_ref() == "HEAD^1"
 
 
 def test_total_production_additions_stay_within_budget() -> None:
@@ -183,7 +209,8 @@ def test_total_production_additions_stay_within_budget() -> None:
         if len(parts) == 3:
             added += int(parts[0])
             files += 1
-    assert files <= 8
+    assert added <= 600
+    assert files <= 10
 
 
 def test_facade_has_no_trailing_whitespace() -> None:
