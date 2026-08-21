@@ -28,6 +28,7 @@ import {
 import ConceptGate from './ConceptGate'
 import ProjectCreationForm from './ProjectCreationForm'
 import ProjectMaintenancePage from './ProjectMaintenancePage'
+import { ChapterProductionV2Workbench } from './ChapterProductionV2Workbench'
 
 const requestError = 'This workspace could not be loaded. Try again.'
 
@@ -279,6 +280,7 @@ function ChapterWorkspaceContent({ projectId, chapterId }: { projectId: string, 
       <h1 id="route-title">{chapter.title || 'Untitled chapter'}</h1>
       <p className="muted">Status: {chapter.status}</p>
       <ChapterDocuments chapter={chapter} />
+      <ChapterProductionV2Workbench projectId={projectId} chapterId={chapterId} />
       <section className="production-workspace" aria-labelledby="production-title">
         <h2 id="production-title">Chapter production</h2>
         {!run && <p className="muted">Chapter production has not started yet.</p>}
