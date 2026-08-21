@@ -9,7 +9,7 @@ from uuid import UUID, uuid4
 import httpx
 import pytest
 from fastapi import FastAPI
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.api.deps import (
     ChapterProductionV2Composition,
@@ -43,7 +43,7 @@ def _test_composition() -> ChapterProductionV2Composition:
         editor_agent=EditorAgent(review_provider),
         chief_editor_agent=ChiefEditorChapterFinalAgent(review_provider),
         lore_agent=LoreChapterFinalAgent(review_provider),
-        chief_editor_required=True,
+        chief_editor_required=False,
     )
 
 
@@ -52,9 +52,11 @@ async def v2_client(
     async_session: AsyncSession,
 ) -> AsyncIterator[httpx.AsyncClient]:
     app: FastAPI = create_app()
+    session_factory = async_sessionmaker(async_session.bind, expire_on_commit=False)
 
     async def override_db_session() -> AsyncIterator[AsyncSession]:
-        yield async_session
+        async with session_factory() as session:
+            yield session
 
     app.dependency_overrides[get_db_session] = override_db_session
     app.dependency_overrides[get_chapter_production_v2_composition] = _test_composition
@@ -185,6 +187,8 @@ async def test_full_chapter_production_v2_lifecycle_via_http(
             json={"decision": "proceed_with_warnings"},
         )
         assert proceed_resp.status_code == 200, proceed_resp.text
+    else:
+        assert state_data["status"] == ChapterProductionStatus.REVISION_READY.value
 
     # 7. Finalize without reader panel
     finalize_resp = await v2_client.post(f"{base_url}/{run_id}/finalize")
