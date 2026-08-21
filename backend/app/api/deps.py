@@ -2,7 +2,7 @@ from uuid import UUID
 
 from fastapi import Depends
 from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
 from app.agents import (
     ArchivistAgent,
@@ -126,10 +126,18 @@ class ChapterProductionV2Composition:
     def create_service(self, session: AsyncSession) -> ChapterProductionV2Service:
         phase_source = self.phase_session_source
         if phase_source is None:
-            bind = session.bind
-            if bind is not None:
+            bind = getattr(session, "bind", None)
+            if isinstance(bind, AsyncEngine):
                 try:
                     phase_source = ChapterPhaseSessionSource(bind)
+                except Exception:
+                    phase_source = None
+            if phase_source is None:
+                try:
+                    from app.db.session import engine as default_engine
+
+                    if isinstance(default_engine, AsyncEngine):
+                        phase_source = ChapterPhaseSessionSource(default_engine)
                 except Exception:
                     phase_source = None
         return ChapterProductionV2Service(
@@ -148,6 +156,12 @@ def get_chapter_production_v2_composition() -> ChapterProductionV2Composition:
     """Server-owned deterministic composition for V2 chapter production."""
     writer_provider = DeterministicChapterWriterProvider()
     review_provider = DeterministicChapterReviewProvider()
+    try:
+        from app.db.session import engine as default_engine
+
+        phase_source = ChapterPhaseSessionSource(default_engine)
+    except Exception:
+        phase_source = None
     return ChapterProductionV2Composition(
         writer_agent=WriterAgent(writer_provider),
         revision_agent=RevisionAgent(writer_provider),
@@ -155,6 +169,7 @@ def get_chapter_production_v2_composition() -> ChapterProductionV2Composition:
         chief_editor_agent=ChiefEditorChapterFinalAgent(review_provider),
         lore_agent=LoreChapterFinalAgent(review_provider),
         chief_editor_required=True,
+        phase_session_source=phase_source,
     )
 
 

@@ -27,6 +27,7 @@ from app.agents import (
     RevisionAgent,
     WriterAgent,
 )
+from app.services.chapter_phase_session_source import ChapterPhaseSessionSource
 from app.services.document_service import DocumentService
 from app.workflows.chapter_production import ChapterProductionStatus
 
@@ -34,32 +35,33 @@ from app.workflows.chapter_production import ChapterProductionStatus
 pytestmark = [pytest.mark.integration, pytest.mark.anyio]
 
 
-def _test_composition() -> ChapterProductionV2Composition:
-    writer_provider = DeterministicChapterWriterProvider()
-    review_provider = DeterministicChapterReviewProvider()
-    return ChapterProductionV2Composition(
-        writer_agent=WriterAgent(writer_provider),
-        revision_agent=RevisionAgent(writer_provider),
-        editor_agent=EditorAgent(review_provider),
-        chief_editor_agent=ChiefEditorChapterFinalAgent(review_provider),
-        lore_agent=LoreChapterFinalAgent(review_provider),
-        chief_editor_required=False,
-    )
-
-
 @pytest.fixture
 async def v2_client(
     async_session: AsyncSession,
 ) -> AsyncIterator[httpx.AsyncClient]:
     app: FastAPI = create_app()
-    session_factory = async_sessionmaker(async_session.bind, expire_on_commit=False)
+    engine = async_session.bind
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
 
     async def override_db_session() -> AsyncIterator[AsyncSession]:
         async with session_factory() as session:
             yield session
 
+    def override_composition() -> ChapterProductionV2Composition:
+        writer_provider = DeterministicChapterWriterProvider()
+        review_provider = DeterministicChapterReviewProvider()
+        return ChapterProductionV2Composition(
+            writer_agent=WriterAgent(writer_provider),
+            revision_agent=RevisionAgent(writer_provider),
+            editor_agent=EditorAgent(review_provider),
+            chief_editor_agent=ChiefEditorChapterFinalAgent(review_provider),
+            lore_agent=LoreChapterFinalAgent(review_provider),
+            chief_editor_required=False,
+            phase_session_source=ChapterPhaseSessionSource(engine),
+        )
+
     app.dependency_overrides[get_db_session] = override_db_session
-    app.dependency_overrides[get_chapter_production_v2_composition] = _test_composition
+    app.dependency_overrides[get_chapter_production_v2_composition] = override_composition
 
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
