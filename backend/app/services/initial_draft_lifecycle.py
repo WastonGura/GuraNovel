@@ -103,6 +103,9 @@ class InitialDraftLifecycle:
             _raise_reconciliation()
         if result.kind != "await-user":
             _raise_reconciliation()
+        recovered = await self._replay(project_id, chapter_id, run_id, actor_id)
+        if recovered is not None:
+            return recovered
         return await self._run(project_id, chapter_id, run_id, actor_id)
     async def _replay(self, project_id: UUID, chapter_id: UUID, run_id: UUID | None, actor_id: UUID) -> contracts.ChapterProductionV2Started | None:
         try:

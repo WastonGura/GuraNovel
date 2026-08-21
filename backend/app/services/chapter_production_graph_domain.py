@@ -218,8 +218,18 @@ async def advance_chapter_production(
         # the existing reconcile facade instead of retrying a provider here.
         return _continue("reconcile")
     if cursor == "reconcile" and state.status is ChapterProductionStatus.FAILED:
-        recovered = await service.reconcile_indeterminate(**scope)  # type: ignore[attr-defined]
-        return _result_for_state(recovered)
+        try:
+            recovered = await service.reconcile_indeterminate(**scope)  # type: ignore[attr-defined]
+            return _result_for_state(recovered)
+        except ChapterProductionV2ReconciliationError:
+            if getattr(state, "document_id", None) is None:
+                await service._schedule_drafting(**scope)  # type: ignore[attr-defined]
+                return _result_for_state(
+                    await service.load_state(  # type: ignore[attr-defined]
+                        **scope, require_langgraph_runtime=True
+                    )
+                )
+            raise
     current = _result_for_state(state)
     if current.kind == "await-user":
         await service.validate_scheduling_action(  # type: ignore[attr-defined]

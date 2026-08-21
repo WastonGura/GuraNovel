@@ -643,11 +643,7 @@ async def test_start_from_approved_outline_persists_exact_v2_draft_gate_and_repl
         "operation_key": run.metadata_["operation_key"],
         "provider_attempt": None,
         "reviewer_claim": None,
-        "chapter_production_runtime": {
-            "scheduler_kind": "service_v2",
-            "graph_id": "chapter-production-v2",
-            "graph_version": "0",
-        },
+        "chapter_production_runtime": chapter_production_langgraph_pin(),
     }
     assert draft.project_id == project.id and draft.chapter_id == chapter.id
     assert draft.type == DocumentType.CHAPTER_DRAFT.value
