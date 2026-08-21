@@ -57,6 +57,7 @@ def safe_cancelled_error(_: BaseException) -> asyncio.CancelledError:
 class ChapterProductionV2ValidationError(AppError):
     """A fixed, content-free failure at the V2 orchestration boundary."""
 
+    status_code = 422
     code = "chapter_production_v2_invalid"
     default_message = "Chapter production input is invalid."
 
