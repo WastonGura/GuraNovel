@@ -16,6 +16,10 @@ from app.services.initial_bootstrap_evidence import (
     pristine_run_metadata,
     validate_pristine_initial_evidence,
 )
+from app.services.chapter_production_runtime import (
+    chapter_production_langgraph_pin,
+    persisted_runtime_pin,
+)
 
 
 MODULE = (
@@ -100,6 +104,21 @@ def test_builds_exact_pristine_metadata_and_checkpoint() -> None:
         "failure_code",
     ):
         assert checkpoint[field] is None
+
+
+def test_langgraph_runtime_is_explicit_and_preserved_during_validation() -> None:
+    binding = _binding()
+    pin = chapter_production_langgraph_pin()
+    metadata = pristine_run_metadata(binding)
+    metadata["chapter_production_runtime"] = pin
+
+    assert persisted_runtime_pin(metadata) == pin
+    assert _validate(binding, metadata=metadata) == metadata
+    assert pristine_run_metadata(binding)["chapter_production_runtime"] == {
+        "scheduler_kind": "service_v2",
+        "graph_id": "chapter-production-v2",
+        "graph_version": "0",
+    }
 
 
 def test_validates_current_and_normalizes_only_documented_legacy_metadata() -> None:

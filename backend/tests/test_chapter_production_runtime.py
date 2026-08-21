@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import ast
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
+from uuid import uuid4
 
 import pytest
 
@@ -10,6 +13,9 @@ from app.services.chapter_production_runtime import (
     SCHEDULER_KIND_SERVICE_V2,
     chapter_production_langgraph_pin,
     chapter_production_runtime_pin,
+    initial_runtime_marker,
+    load_chapter_production_runtime,
+    persisted_runtime_pin,
     strict_runtime,
 )
 from app.services.chapter_production_v2_contracts import (
@@ -52,6 +58,32 @@ def test_langgraph_pin_constants_match_app_graph_contracts() -> None:
         "graph_id": GRAPH_ID,
         "graph_version": GRAPH_VERSION,
     }
+
+
+def test_historical_absence_is_only_a_marker_and_strict_pin_still_fails() -> None:
+    metadata = {"historical": "evidence-must-validate-this-shape"}
+
+    assert initial_runtime_marker(metadata) is None
+    with pytest.raises(ChapterProductionV2ValidationError):
+        persisted_runtime_pin(metadata)
+
+    metadata["chapter_production_runtime"] = {"scheduler_kind": "service_v2"}
+    with pytest.raises(ChapterProductionV2ValidationError):
+        initial_runtime_marker(metadata)
+
+
+@pytest.mark.anyio
+async def test_persisted_runtime_loader_is_exact_and_fails_closed() -> None:
+    pin = chapter_production_langgraph_pin()
+    session = SimpleNamespace(scalar=AsyncMock(return_value={"chapter_production_runtime": pin}))
+
+    assert await load_chapter_production_runtime(session, uuid4()) == pin
+
+    session.scalar.return_value = {
+        "chapter_production_runtime": {**pin, "graph_version": "missing"}
+    }
+    with pytest.raises(ChapterProductionV2ValidationError):
+        await load_chapter_production_runtime(session, uuid4())
 
 
 @pytest.mark.parametrize(

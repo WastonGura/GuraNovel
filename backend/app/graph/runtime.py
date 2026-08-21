@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+from inspect import isawaitable, iscoroutinefunction
 from typing import Any, Protocol
 from uuid import UUID
 
@@ -45,9 +46,9 @@ _CURSOR_ORDER = tuple(cursor.value for cursor in Cursor)
 
 
 class NodePort(Protocol):
-    """A node port receives typed state and returns a closed typed outcome."""
+    """A sync function or introspectable async callable returning a closed outcome."""
 
-    def __call__(self, state: GraphState) -> GraphOutcome: ...
+    def __call__(self, state: GraphState) -> GraphOutcome | Awaitable[GraphOutcome]: ...
 
 
 def checked_node(
@@ -55,12 +56,10 @@ def checked_node(
     route: Callable[[GraphOutcome], str],
     *,
     allowed_targets: frozenset[str],
-) -> Callable[[GraphState], Command]:
+) -> Callable[[GraphState], Command | Awaitable[Command]]:
     """Wrap a node port so state and outcome are strictly validated before routing."""
 
-    def wrapper(state: GraphState) -> Command:
-        parsed_state = parse_graph_state(state)
-        outcome = parse_graph_outcome(port(parsed_state))
+    def command(outcome: GraphOutcome) -> Command:
         goto = route(outcome)
         if goto not in allowed_targets:
             raise GraphError()
@@ -70,6 +69,26 @@ def checked_node(
             else {}
         )
         return Command(goto=goto, update=update)
+
+    async_port = iscoroutinefunction(port) or iscoroutinefunction(
+        getattr(port, "__call__", None)
+    )
+    if async_port:
+        async def async_wrapper(state: GraphState) -> Command:
+            parsed_state = parse_graph_state(state)
+            return command(parse_graph_outcome(await port(parsed_state)))
+
+        return async_wrapper
+
+    def wrapper(state: GraphState) -> Command:
+        parsed_state = parse_graph_state(state)
+        result = port(parsed_state)
+        if isawaitable(result):
+            close = getattr(result, "close", None)
+            if callable(close):
+                close()
+            raise GraphError() from None
+        return command(parse_graph_outcome(result))
 
     return wrapper
 

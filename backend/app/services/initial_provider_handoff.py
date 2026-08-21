@@ -42,6 +42,7 @@ from app.services.initial_bootstrap_evidence import (
     pristine_checkpoint,
     pristine_run_metadata,
 )
+from app.services.chapter_production_runtime import initial_runtime_marker
 from app.services.initial_generation_snapshot import (
     InitialGenerationScope,
     InitialGenerationSnapshot,
@@ -205,6 +206,13 @@ class _InitialEvidencePhase:
     ) -> ProviderAttempt | None:
         if type(run.metadata_) is not dict:
             raise _reconcile() from None
+        runtime, expected = initial_runtime_marker(run.metadata_), dict(expected)
+        if "chapter_production_runtime" in run.metadata_:
+            if runtime is None:
+                raise _reconcile() from None
+            expected["chapter_production_runtime"] = runtime
+        else:
+            expected.pop("chapter_production_runtime", None)
         payload = run.metadata_.get("provider_attempt")
         attempt = None if payload is None else ProviderAttempt.from_payload(payload)
         if (

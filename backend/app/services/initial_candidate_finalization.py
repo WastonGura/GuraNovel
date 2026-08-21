@@ -12,6 +12,7 @@ import app.services.initial_provider_handoff as handoff
 from app.documents.chapter_segments import (CURRENT_CHAPTER_SEGMENTER_VERSION, MAX_CHAPTER_CONTENT_BYTES, normalize_chapter_content)
 from app.services.chapter_phase_session_lease import ChapterPhaseSessionLease
 from app.services.chapter_production_repository import _ChapterProductionRepositoryValidationError
+from app.services.chapter_production_runtime import initial_runtime_marker, persisted_runtime_pin
 from app.services.initial_candidate_persistence import (InitialCandidateIdentity, InitialCandidatePersistence)
 from app.services.provider_attempt_contracts import (CONTRACT_VERSION, ProviderAttemptKind, ProviderAttemptStatus, initial_operation_key)
 from app.workspace.markdown_store import MarkdownStore
@@ -332,7 +333,15 @@ class _Gate:
             document_id=str(self.document.id), document_version_id=str(self.version.id),
             content_hash=self.version.content_hash, action=_action_binding(action, self.document, self.version))
         chapter.current_draft_document_id = self.document.id
+        pinned = "chapter_production_runtime" in run.metadata_
+        runtime = initial_runtime_marker(run.metadata_)
         run.metadata_ = bootstrap.pristine_run_metadata(self.binding)
+        if pinned:
+            if runtime is None:
+                raise _Reconcile() from None
+            run.metadata_["chapter_production_runtime"] = runtime
+        else:
+            run.metadata_.pop("chapter_production_runtime")
         run.status, run.current_node = state.status.value, state.current_node
         run.awaiting_user, run.next_node = state.awaiting_user, None
         session.add(db.WorkflowCheckpoint(
@@ -340,9 +349,17 @@ class _Gate:
             node_name=state.current_node, state_json=state.to_checkpoint()))
         return self._started(action.id), state
     def replay(self, run: object, chapter: object, checkpoints: tuple[db.WorkflowCheckpoint, ...], actions: tuple[db.ActionRequest, ...], parent_hash: str | None = None) -> tuple[contracts.ChapterProductionV2Started, ChapterProductionState]:
+        expected_metadata = bootstrap.pristine_run_metadata(self.binding)
+        if "chapter_production_runtime" in run.metadata_:
+            expected_metadata["chapter_production_runtime"] = persisted_runtime_pin(run.metadata_)
+        else:
+            expected_metadata.pop("chapter_production_runtime")
         if (len(checkpoints) < 2 or len(actions) != 1
                 or chapter.current_draft_document_id != self.document.id
-                or not handoff._exact_json(run.metadata_, bootstrap.pristine_run_metadata(self.binding))):
+                or not handoff._exact_json(
+                    run.metadata_,
+                    expected_metadata,
+                )):
             raise _Reconcile() from None
         action = actions[0]
         self._validate_action(action)

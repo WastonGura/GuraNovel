@@ -291,12 +291,13 @@ class ChapterProductionV2Service:
         self.chief_editor_agent = chief_editor_agent
         self.lore_agent = lore_agent
         self.chief_editor_required = chief_editor_required
+        self._phase_session_source = phase_session_source
         self._phase_sessions = (
             ChapterPhaseSessionLease(phase_session_source)
             if phase_session_source is not None
             else None
         )
-        self._initial_drafts = None if self._phase_sessions is None else InitialDraftLifecycle(self._phase_sessions, writer_agent, chief_editor_required)
+        self._initial_drafts = None if self._phase_sessions is None else InitialDraftLifecycle(self, self._phase_sessions, writer_agent, chief_editor_required)
         self._author_accept = AuthorAcceptCoordinator(self)
         self._manual_edit = ManualEditCoordinator(self)
         self._feedback_handoff = FeedbackRevisionHandoff(self, self._phase_sessions, self.revision_agent)
@@ -353,6 +354,40 @@ class ChapterProductionV2Service:
         if self._initial_drafts is None:
             raise _invalid() from None
         return await self._initial_drafts.resume(project_id, chapter_id, workflow_run_id, actor_user_id=actor_user_id)
+
+    async def _schedule_drafting(
+        self,
+        project_id: UUID,
+        chapter_id: UUID,
+        workflow_run_id: UUID,
+        *,
+        actor_user_id: UUID,
+    ) -> ChapterProductionV2Started:
+        """Run the existing draft coordinator after graph runtime dispatch."""
+
+        if self._initial_drafts is None:
+            raise _invalid() from None
+        return await self._initial_drafts._run(
+            project_id, chapter_id, workflow_run_id, actor_user_id
+        )
+
+    def _new_scheduling_facade(
+        self, session: AsyncSession
+    ) -> ChapterProductionV2Service:
+        """Compose a graph-domain facade from a source-owned fresh session."""
+
+        if self._phase_session_source is None or type(session) is not AsyncSession:
+            raise _invalid() from None
+        return ChapterProductionV2Service(
+            session,
+            writer_agent=self.writer_agent,
+            revision_agent=self.revision_agent,
+            editor_agent=self.editor_agent,
+            chief_editor_agent=self.chief_editor_agent,
+            lore_agent=self.lore_agent,
+            chief_editor_required=self.chief_editor_required,
+            phase_session_source=self._phase_session_source,
+        )
 
     async def resolve_author_action(
         self,

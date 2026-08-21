@@ -9,6 +9,9 @@ import pytest
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
+import app.graph.chapter_production_execution as graph_execution
+from app.graph import chapter_production_topology
+
 from app.agents import (
     DeterministicChapterWriterProvider,
     RevisionAgent,
@@ -42,6 +45,7 @@ from app.services.chapter_production_v2_service import (
     ChapterProductionV2Updated,
     ChapterProductionV2ValidationError,
 )
+from app.services.chapter_production_runtime import chapter_production_langgraph_pin
 from app.services.chapter_phase_session_lease import ChapterPhaseSessionLease
 from app.services.chapter_phase_session_source import ChapterPhaseSessionSource
 from app.services.document_service import DocumentService
@@ -689,6 +693,130 @@ async def test_start_from_approved_outline_persists_exact_v2_draft_gate_and_repl
         )
         == 1
     )
+
+
+@pytest.mark.integration
+@pytest.mark.anyio
+async def test_langgraph_start_and_flag_off_restart_preserve_exact_draft_gate(
+    async_session: AsyncSession, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project, chapter, outline, outline_version = await approved_chapter(
+        async_session, tmp_path
+    )
+    pending = User(username=f"pending-{uuid4().hex}", display_name="Pending")
+    async_session.add(pending)
+    provider = CallerStateCheckingProvider(async_session, pending)
+    source = phase_source(async_session)
+    cursors: list[str] = []
+    real_advance = graph_execution.advance_chapter_production
+
+    async def observed_advance(*args: object, **kwargs: object) -> object:
+        cursors.append(kwargs["cursor"])  # type: ignore[arg-type]
+        return await real_advance(*args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(graph_execution, "advance_chapter_production", observed_advance)
+    monkeypatch.setattr(chapter_production_topology, "GRAPH_ENABLED", True)
+    service = ChapterProductionV2Service(
+        async_session,
+        writer_agent=WriterAgent(provider),
+        phase_session_source=source,
+    )
+    assert project.owner_id is not None
+
+    started = await service.start_from_approved_outline(
+        project.id, chapter.id, actor_user_id=project.owner_id
+    )
+
+    assert cursors == ["reconstruct", "draft"]
+    assert provider.calls == 1
+    assert pending in async_session.new
+    monkeypatch.setattr(chapter_production_topology, "GRAPH_ENABLED", False)
+    restarted = ChapterProductionV2Service(
+        async_session,
+        writer_agent=WriterAgent(provider),
+        phase_session_source=source,
+    )
+    replayed = await restarted.resume_drafting(
+        project.id,
+        chapter.id,
+        started.workflow_run_id,
+        actor_user_id=project.owner_id,
+    )
+
+    assert replayed == started
+    assert cursors == ["reconstruct", "draft", "reconstruct"]
+    assert provider.calls == 1
+    assert pending in async_session.new
+    async with ChapterPhaseSessionLease(source).lease() as probe:
+        assert await probe.scalar(
+            select(func.count()).select_from(User).where(User.username == pending.username)
+        ) == 0
+        run = await probe.get(WorkflowRun, started.workflow_run_id)
+        persisted_chapter = await probe.get(Chapter, chapter.id)
+        draft = await probe.get(Document, started.draft_document_id)
+        version = await probe.get(DocumentVersion, started.draft_version_id)
+        action = await probe.get(ActionRequest, started.action_request_id)
+        checkpoints = list(
+            await probe.scalars(
+                select(WorkflowCheckpoint)
+                .where(WorkflowCheckpoint.workflow_run_id == started.workflow_run_id)
+                .order_by(WorkflowCheckpoint.checkpoint_index)
+            )
+        )
+        assert run is not None and run.metadata_["chapter_production_runtime"] == chapter_production_langgraph_pin()
+        assert (run.status, run.current_node, run.awaiting_user) == (
+            ChapterProductionStatus.AUTHOR_REVISION.value,
+            "author_revision",
+            True,
+        )
+        assert persisted_chapter is not None and persisted_chapter.current_draft_document_id == started.draft_document_id
+        assert draft is not None and draft.current_version_id == started.draft_version_id
+        assert version is not None and version.workflow_run_id == started.workflow_run_id
+        assert action is not None and action.status == ActionRequestStatus.PENDING.value
+        assert [item.checkpoint_index for item in checkpoints] == [0, 1]
+        assert checkpoints[-1].state_json["action_request_id"] == str(action.id)
+        assert "Arrival" not in str(checkpoints)
+
+
+@pytest.mark.integration
+@pytest.mark.anyio
+@pytest.mark.parametrize("cancelled", (False, True))
+async def test_langgraph_node_failure_never_finishes_caller_pending_row(
+    async_session: AsyncSession,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    cancelled: bool,
+) -> None:
+    project, chapter, _, _ = await approved_chapter(async_session, tmp_path)
+    pending = User(username=f"pending-{uuid4().hex}", display_name="Pending")
+    async_session.add(pending)
+
+    class AbortProvider(DeterministicChapterWriterProvider):
+        async def draft_initial(self, request: object, profile: object) -> object:
+            if cancelled:
+                raise asyncio.CancelledError()
+            raise RuntimeError("canary")
+
+    source = phase_source(async_session)
+    monkeypatch.setattr(chapter_production_topology, "GRAPH_ENABLED", True)
+    service = ChapterProductionV2Service(
+        async_session,
+        writer_agent=WriterAgent(AbortProvider()),
+        phase_session_source=source,
+    )
+    assert project.owner_id is not None
+
+    expected = asyncio.CancelledError if cancelled else ChapterProductionV2ProviderError
+    with pytest.raises(expected):
+        await service.start_from_approved_outline(
+            project.id, chapter.id, actor_user_id=project.owner_id
+        )
+
+    assert pending in async_session.new
+    async with ChapterPhaseSessionLease(source).lease() as probe:
+        assert await probe.scalar(
+            select(func.count()).select_from(User).where(User.username == pending.username)
+        ) == 0
 
 
 @pytest.mark.integration

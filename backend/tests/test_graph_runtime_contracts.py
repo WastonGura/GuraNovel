@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from functools import partial
 from uuid import UUID, uuid4
 
 import pytest
@@ -263,6 +264,62 @@ def test_checked_node_validates_state_and_outcome_and_returns_command() -> None:
         checked_node(
             bad_port, lambda outcome: "review", allowed_targets=frozenset({"review"})
         )(_valid_state())
+
+
+@pytest.mark.anyio
+async def test_checked_node_awaits_async_port_without_breaking_sync_ports() -> None:
+    async def port(state: dict[str, object]) -> dict[str, object]:
+        assert state["cursor"] == "draft"
+        return {"kind": "continue", "next_cursor": "editor_review"}
+
+    wrapper = checked_node(
+        port, lambda outcome: "review", allowed_targets=frozenset({"review"})
+    )
+
+    result = await wrapper(_valid_state())
+    assert isinstance(result, Command)
+    assert result.goto == "review"
+    assert result.update == {"cursor": "editor_review"}
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("callable_object", (False, True))
+async def test_checked_node_awaits_every_protocol_allowed_awaitable_port(
+    callable_object: bool,
+) -> None:
+    async def outcome(state: dict[str, object]) -> dict[str, object]:
+        assert state["cursor"] == "draft"
+        return {"kind": "continue", "next_cursor": "editor_review"}
+
+    class Port:
+        async def __call__(self, state: dict[str, object]) -> dict[str, object]:
+            return await outcome(state)
+
+    wrapper = checked_node(
+        Port() if callable_object else partial(outcome),  # type: ignore[arg-type]
+        lambda value: "review",
+        allowed_targets=frozenset({"review"}),
+    )
+
+    result = await wrapper(_valid_state())
+    assert isinstance(result, Command)
+    assert result.goto == "review"
+
+
+def test_checked_node_rejects_non_async_callable_returning_awaitable() -> None:
+    async def outcome(_: dict[str, object]) -> dict[str, object]:
+        return {"kind": "continue", "next_cursor": "editor_review"}
+
+    def deceptive_port(state: dict[str, object]) -> object:
+        return outcome(state)
+
+    wrapper = checked_node(
+        deceptive_port,  # type: ignore[arg-type]
+        lambda value: "review",
+        allowed_targets=frozenset({"review"}),
+    )
+    with pytest.raises(GraphError):
+        wrapper(_valid_state())
 
 
 def test_checked_graph_rejects_extra_state_before_checkpoint_persistence() -> None:
