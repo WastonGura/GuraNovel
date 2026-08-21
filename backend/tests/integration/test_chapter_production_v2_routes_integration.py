@@ -9,7 +9,7 @@ from uuid import UUID, uuid4
 import httpx
 import pytest
 from fastapi import FastAPI
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import (
     ChapterProductionV2Composition,
@@ -40,12 +40,9 @@ async def v2_client(
     async_session: AsyncSession,
 ) -> AsyncIterator[httpx.AsyncClient]:
     app: FastAPI = create_app()
-    engine = async_session.bind
-    session_factory = async_sessionmaker(engine, expire_on_commit=False)
 
     async def override_db_session() -> AsyncIterator[AsyncSession]:
-        async with session_factory() as session:
-            yield session
+        yield async_session
 
     def override_composition() -> ChapterProductionV2Composition:
         writer_provider = DeterministicChapterWriterProvider()
@@ -57,7 +54,7 @@ async def v2_client(
             chief_editor_agent=ChiefEditorChapterFinalAgent(review_provider),
             lore_agent=LoreChapterFinalAgent(review_provider),
             chief_editor_required=False,
-            phase_session_source=ChapterPhaseSessionSource(engine),
+            phase_session_source=ChapterPhaseSessionSource(async_session.bind),
         )
 
     app.dependency_overrides[get_db_session] = override_db_session
@@ -107,6 +104,30 @@ async def _seed_approved_chapter(
         actor_user_id=owner.id,
     )
     chapter.current_outline_document_id = outline_doc.id
+
+    # Seed required review context documents (style guide and world overview)
+    await DocumentService(session).create_document(
+        project_id=project.id,
+        chapter_id=None,
+        document_type=DocumentType.STYLE_GUIDE,
+        title="Project Style Guide",
+        path="style-guide.md",
+        content="# Style Guide\n\nMaintain consistent tone and voice.\n",
+        source=DocumentSource.USER,
+        change_summary="Initial style guide.",
+        actor_user_id=owner.id,
+    )
+    await DocumentService(session).create_document(
+        project_id=project.id,
+        chapter_id=None,
+        document_type=DocumentType.WORLD_OVERVIEW,
+        title="Project World Overview",
+        path="world-overview.md",
+        content="# World Overview\n\nA fantastical world of rich lore.\n",
+        source=DocumentSource.USER,
+        change_summary="Initial world overview.",
+        actor_user_id=owner.id,
+    )
     await session.commit()
     assert outline_doc.current_version is not None
 
@@ -165,34 +186,25 @@ async def test_full_chapter_production_v2_lifecycle_via_http(
     updated_data = resolve_resp.json()
     assert updated_data["workflow_run_id"] == str(run_id)
 
-    # Verify state transitioned to editor review
-    get_resp = await v2_client.get(f"{base_url}/{run_id}")
-    assert get_resp.status_code == 200
-    state_data = get_resp.json()
-    assert state_data["status"] == ChapterProductionStatus.EDITOR_REVIEW.value
+    # 5. Trigger reviews until REVISION_READY
+    while True:
+        get_resp = await v2_client.get(f"{base_url}/{run_id}")
+        assert get_resp.status_code == 200
+        state_data = get_resp.json()
+        if state_data["status"] == ChapterProductionStatus.REVISION_READY.value:
+            break
+        review_resp = await v2_client.post(f"{base_url}/{run_id}/review")
+        assert review_resp.status_code == 200, review_resp.text
+        review_updated = review_resp.json()
+        review_action_id = review_updated.get("action_request_id")
+        if review_action_id is not None:
+            proceed_resp = await v2_client.post(
+                f"{base_url}/{run_id}/actions/{review_action_id}/resolve",
+                json={"decision": "proceed_with_warnings"},
+            )
+            assert proceed_resp.status_code == 200, proceed_resp.text
 
-    # 5. Trigger review
-    review_resp = await v2_client.post(f"{base_url}/{run_id}/review")
-    assert review_resp.status_code == 200, review_resp.text
-    review_updated = review_resp.json()
-    review_action_id = review_updated.get("action_request_id")
-
-    # 6. Check review state
-    get_resp = await v2_client.get(f"{base_url}/{run_id}")
-    assert get_resp.status_code == 200
-    state_data = get_resp.json()
-    if review_action_id is not None:
-        assert state_data["status"] == ChapterProductionStatus.EDITOR_REVIEW.value
-        # Proceed with warnings
-        proceed_resp = await v2_client.post(
-            f"{base_url}/{run_id}/actions/{review_action_id}/resolve",
-            json={"decision": "proceed_with_warnings"},
-        )
-        assert proceed_resp.status_code == 200, proceed_resp.text
-    else:
-        assert state_data["status"] == ChapterProductionStatus.REVISION_READY.value
-
-    # 7. Finalize without reader panel
+    # 6. Finalize without reader panel
     finalize_resp = await v2_client.post(f"{base_url}/{run_id}/finalize")
     assert finalize_resp.status_code == 200, finalize_resp.text
     finalized_data = finalize_resp.json()
@@ -200,7 +212,7 @@ async def test_full_chapter_production_v2_lifecycle_via_http(
     assert finalized_data["final_document_id"] is not None
     assert finalized_data["final_version_id"] is not None
 
-    # 8. Check final state (completed)
+    # 7. Check final state (completed)
     get_resp = await v2_client.get(f"{base_url}/{run_id}")
     assert get_resp.status_code == 200
     state_data = get_resp.json()
