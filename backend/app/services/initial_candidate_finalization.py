@@ -226,7 +226,7 @@ class _FinalizationPhase:
             raise _Reconcile() from None
         if selected[0][1].parent_version_id is not None:
             return await self._feedback_replay(phase, binding, run, chapter, checkpoints, selected[0], candidates)
-        if len(candidates) != 1 or checkpoints[-1].checkpoint_index != 1:
+        if len(candidates) != 1 or checkpoints[-1].checkpoint_index != len(checkpoints) - 1:
             raise _Reconcile() from None
         identity = self._identity(UUID(str(run.project_id)), binding.chapter_id, run.id, candidates[0], binding.operation_key)
         if (current.document_id, current.document_version_id) != (str(identity.document_id), str(identity.version_id)):
