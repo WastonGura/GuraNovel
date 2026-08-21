@@ -112,6 +112,8 @@ function FocusedError({ error, onRetry }: { error: WorkbenchError; onRetry?: () 
   )
 }
 
+const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+
 function parseUuidList(input: string): string[] {
   const matches = input.match(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi)
   return matches ? matches.map((id) => id.toLowerCase()) : []
@@ -168,14 +170,25 @@ export function ChapterProductionV2Workbench({
     controllerRef.current = controller
 
     async function loadInitial() {
+      if (!UUID_REGEX.test(projectId) || !UUID_REGEX.test(chapterId)) {
+        setLoading(false)
+        setState(null)
+        return
+      }
+
       setLoading(true)
       setError(null)
       try {
         let runIdToFetch = initialWorkflowRunId ?? null
         if (!runIdToFetch) {
-          const runs = await listChapterProductionRuns(projectId, chapterId, { limit: 1 }, controller.signal)
-          if (runs.length > 0) {
-            runIdToFetch = runs[0].workflow_run_id
+          try {
+            const runs = await listChapterProductionRuns(projectId, chapterId, { limit: 1 }, controller.signal)
+            if (runs.length > 0) {
+              runIdToFetch = runs[0].workflow_run_id
+            }
+          } catch {
+            // Initial run discovery fallback
+            runIdToFetch = null
           }
         }
 

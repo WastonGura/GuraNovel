@@ -113,7 +113,7 @@ describe('ChapterProductionV2Workbench', () => {
     )
 
     expect(await screen.findByRole('region', { name: 'Author revision required' })).toBeInTheDocument()
-    expect(screen.getByText(ids.version)).toBeInTheDocument()
+    expect(screen.getAllByText(ids.version)[0]).toBeInTheDocument()
 
     const acceptButton = screen.getByRole('button', { name: 'Confirm accept draft' })
     fireEvent.click(acceptButton)
