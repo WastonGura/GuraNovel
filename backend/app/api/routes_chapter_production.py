@@ -1,4 +1,4 @@
-"""Thin HTTP routes for chapter-production workflows."""
+"""Thin HTTP routes for legacy chapter-production workflows."""
 
 from uuid import UUID
 
