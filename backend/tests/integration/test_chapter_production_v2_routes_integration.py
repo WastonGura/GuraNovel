@@ -17,7 +17,7 @@ from app.api.deps import (
     get_db_session,
 )
 from app.main import create_app
-from app.models import Chapter, Document, DocumentType, DocumentVersion, Project, User
+from app.models import Chapter, Document, DocumentSource, DocumentType, DocumentVersion, Project, User
 from app.agents import (
     ChiefEditorChapterFinalAgent,
     DeterministicChapterReviewProvider,
@@ -27,7 +27,6 @@ from app.agents import (
     RevisionAgent,
     WriterAgent,
 )
-from app.workspace import ProjectWorkspace
 from app.services.document_service import DocumentService
 
 
@@ -85,27 +84,28 @@ async def _seed_approved_chapter(
         project_id=project.id,
         chapter_number=1,
         title="Chapter 1",
+        status="OUTLINE_APPROVED",
     )
     session.add(chapter)
-    await session.flush()
+    await session.commit()
 
-    doc_service = DocumentService(session, ProjectWorkspace(workspace_root))
-    outline_doc = await doc_service.create_document(
+    outline_doc = await DocumentService(session).create_document(
         project_id=project.id,
-        document_type=DocumentType.OUTLINE,
-        path="outlines/chapter_1.md",
+        chapter_id=chapter.id,
+        document_type=DocumentType.CHAPTER_SELECTED_OUTLINE,
         title="Chapter 1 Outline",
-        actor_user_id=owner.id,
-    )
-    outline_version = await doc_service.write_document(
-        document_id=outline_doc.id,
+        path=f"chapters/{chapter.id}-selected-outline.md",
         content="## Chapter 1: The First Dawn\n\nOutline content describing key plot points.\n",
+        source=DocumentSource.OUTLINE_AGENT,
+        agent_role="outline_agent",
+        change_summary="Approved chapter outline.",
         actor_user_id=owner.id,
     )
     chapter.current_outline_document_id = outline_doc.id
     await session.commit()
+    assert outline_doc.current_version is not None
 
-    return project, chapter, outline_doc, outline_version, owner
+    return project, chapter, outline_doc, outline_doc.current_version, owner
 
 
 def _routes_url(project_id: UUID, chapter_id: UUID) -> str:
