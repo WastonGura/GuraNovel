@@ -7,6 +7,7 @@ from uuid import UUID, uuid4
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.graph import chapter_production_topology
 from app.documents.chapter_segments import CURRENT_CHAPTER_SEGMENTER_VERSION
 from app.models import WorkflowCheckpoint, WorkflowRun, WorkflowType
 from app.services.chapter_phase_session_lease import ChapterPhaseSessionLease
@@ -14,6 +15,10 @@ from app.services.chapter_production_repository import ChapterProductionReposito
 from app.services.chapter_production_v2_contracts import (
     ChapterProductionV2CommitIndeterminateError,
     ChapterProductionV2ValidationError,
+)
+from app.services.chapter_production_runtime import (
+    chapter_production_langgraph_pin,
+    chapter_production_runtime_pin,
 )
 from app.services.document_service import DocumentService
 from app.services.initial_bootstrap_evidence import (
@@ -151,7 +156,14 @@ class _InitialRunPhase:
             current_node="drafting",
             next_node=None,
             awaiting_user=False,
-            metadata_=pristine_run_metadata(binding),
+            metadata_={
+                **pristine_run_metadata(binding),
+                "chapter_production_runtime": (
+                    chapter_production_langgraph_pin()
+                    if chapter_production_topology.GRAPH_ENABLED
+                    else chapter_production_runtime_pin()
+                ),
+            },
         )
         self.session.add(run)
         await self.session.flush()

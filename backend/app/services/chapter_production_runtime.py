@@ -7,7 +7,7 @@ from uuid import UUID
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models import WorkflowEvent
+from app.models import WorkflowEvent, WorkflowRun, WorkflowType
 from app.services.chapter_production_v2_contracts import (
     ChapterProductionV2ValidationError,
 )
@@ -56,6 +56,42 @@ def strict_runtime(value: object) -> dict[str, str]:
     return dict(value)
 
 
+def persisted_runtime_pin(metadata: object) -> dict[str, str]:
+    if type(metadata) is not dict:
+        raise _invalid() from None
+    try:
+        return strict_runtime(metadata["chapter_production_runtime"])
+    except (KeyError, ChapterProductionV2ValidationError):
+        raise _invalid() from None
+
+
+def initial_runtime_marker(metadata: object) -> dict[str, str] | None:
+    """Read a pin or mark historical absence; this does not authorize service dispatch."""
+
+    if type(metadata) is not dict:
+        raise _invalid() from None
+    if "chapter_production_runtime" not in metadata:
+        return None
+    return persisted_runtime_pin(metadata)
+
+
+async def load_chapter_production_runtime(
+    session: AsyncSession,
+    workflow_run_id: UUID,
+) -> dict[str, str] | None:
+    """Freshly load one persisted scheduler pin for dispatch."""
+
+    if type(workflow_run_id) is not UUID or workflow_run_id.int == 0:
+        raise _invalid() from None
+    metadata = await session.scalar(
+        select(WorkflowRun.metadata_).where(
+            WorkflowRun.id == workflow_run_id,
+            WorkflowRun.workflow_type == WorkflowType.CHAPTER_PRODUCTION.value,
+        )
+    )
+    return initial_runtime_marker(metadata)
+
+
 async def next_event_sequence(
     session: AsyncSession, workflow_run_id: UUID
 ) -> int:
@@ -81,6 +117,9 @@ __all__ = [
     "SCHEDULER_KIND_SERVICE_V2",
     "chapter_production_langgraph_pin",
     "chapter_production_runtime_pin",
+    "initial_runtime_marker",
+    "load_chapter_production_runtime",
     "next_event_sequence",
+    "persisted_runtime_pin",
     "strict_runtime",
 ]

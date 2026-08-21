@@ -10,6 +10,8 @@ import asyncpg
 import pytest
 
 import app.services.chapter_production_recovery_evidence as recovery_evidence
+import app.services.chapter_production_recovery_reconstruction as reconstruction
+from app.services.chapter_production_runtime import chapter_production_langgraph_pin
 from app.services.chapter_production_graph_domain import (
     ChapterProductionInvocationContext,
     ChapterProductionSchedulingResult,
@@ -64,7 +66,7 @@ def state(
 def service(*states: object) -> SimpleNamespace:
     return SimpleNamespace(
         load_state=AsyncMock(side_effect=states),
-        resume_drafting=AsyncMock(),
+        _schedule_drafting=AsyncMock(),
         execute_current_review=AsyncMock(),
         finalize_without_reader_panel=AsyncMock(),
         reconcile_indeterminate=AsyncMock(),
@@ -186,7 +188,7 @@ def test_scheduling_result_rejects_mixed_or_extended_shapes() -> None:
 @pytest.mark.parametrize(
     ("cursor", "before", "after", "method", "next_cursor"),
     (
-        ("draft", ChapterProductionStatus.DRAFTING, ChapterProductionStatus.AUTHOR_REVISION, "resume_drafting", None),
+        ("draft", ChapterProductionStatus.DRAFTING, ChapterProductionStatus.AUTHOR_REVISION, "_schedule_drafting", None),
         ("editor_review", ChapterProductionStatus.EDITOR_REVIEW, ChapterProductionStatus.CHIEF_FINAL_REVIEW, "execute_current_review", "chief_editor_review"),
         ("chief_editor_review", ChapterProductionStatus.CHIEF_FINAL_REVIEW, ChapterProductionStatus.LORE_FINAL_REVIEW, "execute_current_review", "lore_review"),
         ("lore_review", ChapterProductionStatus.LORE_FINAL_REVIEW, ChapterProductionStatus.REVISION_READY, "execute_current_review", "mark_revision_ready"),
@@ -224,7 +226,7 @@ async def test_cursor_calls_only_its_existing_facade_entry(
 
     getattr(facade, method).assert_awaited_once_with(**scope_kwargs())
     for other in (
-        "resume_drafting",
+        "_schedule_drafting",
         "execute_current_review",
         "finalize_without_reader_panel",
         "reconcile_indeterminate",
@@ -248,7 +250,7 @@ async def test_fresh_state_mismatch_routes_without_calling_wrong_facade_entry() 
     )
 
     assert (result.kind, result.next_cursor) == ("continue", "editor_review")
-    facade.resume_drafting.assert_not_awaited()
+    facade._schedule_drafting.assert_not_awaited()
     facade.execute_current_review.assert_not_awaited()
 
 
@@ -279,7 +281,7 @@ async def test_gate_await_and_ready_reuse_are_read_only_scheduling_entries() -> 
         **scope_kwargs(), require_langgraph_runtime=True
     )
     for facade in (gate, ready):
-        facade.resume_drafting.assert_not_awaited()
+        facade._schedule_drafting.assert_not_awaited()
         facade.execute_current_review.assert_not_awaited()
         facade.finalize_without_reader_panel.assert_not_awaited()
         facade.reconcile_indeterminate.assert_not_awaited()
@@ -390,7 +392,72 @@ async def test_exact_langgraph_pin_is_required_before_any_domain_entry() -> None
     facade.load_state.assert_awaited_once_with(
         **scope_kwargs(), require_langgraph_runtime=True
     )
-    facade.resume_drafting.assert_not_awaited()
+    facade._schedule_drafting.assert_not_awaited()
+
+
+@pytest.mark.anyio
+async def test_real_graph_state_load_closes_read_transaction(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session = SimpleNamespace(commit=AsyncMock())
+    facade = SimpleNamespace(
+        session=session,
+        _validated_ids=lambda *_args: None,
+        _require_project_owner=AsyncMock(),
+        _chapter=AsyncMock(),
+        _run=AsyncMock(return_value=SimpleNamespace()),
+        _run_metadata=lambda _run: {
+            "chapter_production_runtime": chapter_production_langgraph_pin()
+        },
+        _rollback=AsyncMock(),
+    )
+    expected = state(ChapterProductionStatus.DRAFTING)
+    monkeypatch.setattr(
+        reconstruction, "locked_state", AsyncMock(return_value=(expected, object()))
+    )
+
+    loaded = await reconstruction.load_state(
+        facade,
+        **scope_kwargs(),
+        require_langgraph_runtime=True,
+    )
+
+    assert loaded is expected
+    session.commit.assert_awaited_once()
+    facade._rollback.assert_not_awaited()
+
+
+@pytest.mark.anyio
+async def test_real_graph_state_load_rolls_back_validation_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session = SimpleNamespace(commit=AsyncMock())
+    facade = SimpleNamespace(
+        session=session,
+        _validated_ids=lambda *_args: None,
+        _require_project_owner=AsyncMock(),
+        _chapter=AsyncMock(),
+        _run=AsyncMock(return_value=SimpleNamespace()),
+        _run_metadata=lambda _run: {
+            "chapter_production_runtime": chapter_production_langgraph_pin()
+        },
+        _rollback=AsyncMock(),
+    )
+    monkeypatch.setattr(
+        reconstruction,
+        "locked_state",
+        AsyncMock(side_effect=ChapterProductionV2ValidationError()),
+    )
+
+    with pytest.raises(ChapterProductionV2ValidationError):
+        await reconstruction.load_state(
+            facade,
+            **scope_kwargs(),
+            require_langgraph_runtime=True,
+        )
+
+    session.commit.assert_not_awaited()
+    facade._rollback.assert_awaited_once()
 
 
 @pytest.mark.anyio
@@ -404,7 +471,7 @@ async def test_scope_or_actor_failure_is_fixed_and_precedes_domain_entry() -> No
         )
 
     assert captured.value.__cause__ is None
-    facade.resume_drafting.assert_not_awaited()
+    facade._schedule_drafting.assert_not_awaited()
 
 
 def test_domain_seam_has_no_graph_session_provider_or_persistence_authority() -> None:

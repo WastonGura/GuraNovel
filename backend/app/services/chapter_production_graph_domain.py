@@ -236,7 +236,7 @@ async def advance_chapter_production(
         return current
 
     if cursor == "draft":
-        await service.resume_drafting(**scope)  # type: ignore[attr-defined]
+        await service._schedule_drafting(**scope)  # type: ignore[attr-defined]
     elif cursor in _REVIEW_CURSORS:
         await service.execute_current_review(**scope)  # type: ignore[attr-defined]
     elif cursor == "finalize":
