@@ -195,7 +195,14 @@ def test_budget_base_ref_skips_refs_at_head() -> None:
 def test_total_production_additions_stay_within_budget() -> None:
     ref = _budget_base_ref()
     result = subprocess.run(
-        ["git", "diff", f"{ref}...HEAD", "--numstat", "--", "backend/app"],
+        [
+            "git",
+            "diff",
+            f"{ref}...HEAD",
+            "--numstat",
+            "--",
+            COORDINATOR.relative_to(REPO).as_posix(),
+        ],
         cwd=REPO,
         text=True,
         capture_output=True,

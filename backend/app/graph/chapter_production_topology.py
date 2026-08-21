@@ -10,7 +10,7 @@ from langgraph.graph import END
 from app.graph.contracts import GRAPH_ID, GRAPH_VERSION, GraphError, OutcomeKind, parse_graph_outcome
 from app.graph.runtime import GraphDefinition, NODE_NAMES, NodePort
 
-GRAPH_ENABLED = False
+GRAPH_ENABLED = True
 
 BUSINESS_NODES = frozenset(NODE_NAMES - {"reconstruct"})
 

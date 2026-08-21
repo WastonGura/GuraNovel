@@ -14,8 +14,8 @@ from app.graph.contracts import GraphError
 from app.graph.runtime import NODE_NAMES
 
 
-def test_server_owned_graph_switch_defaults_off() -> None:
-    assert GRAPH_ENABLED is False
+def test_server_owned_graph_switch_defaults_on() -> None:
+    assert GRAPH_ENABLED is True
 
 
 def test_topology_node_set_is_exactly_the_frozen_eleven_nodes() -> None:
