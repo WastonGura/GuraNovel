@@ -28,6 +28,7 @@ from app.agents import (
     WriterAgent,
 )
 from app.services.document_service import DocumentService
+from app.workflows.chapter_production import ChapterProductionStatus
 
 
 pytestmark = [pytest.mark.integration, pytest.mark.anyio]
@@ -146,7 +147,7 @@ async def test_full_chapter_production_v2_lifecycle_via_http(
     assert get_resp.status_code == 200, get_resp.text
     state_data = get_resp.json()
     assert state_data["chapter_workflow_run_id"] == str(run_id)
-    assert state_data["status"] == "author_revision"
+    assert state_data["status"] == ChapterProductionStatus.AUTHOR_REVISION.value
     assert state_data["awaiting_user"] is True
     assert state_data["document_id"] == str(draft_doc_id)
     assert state_data["document_version_id"] == str(draft_ver_id)
@@ -160,11 +161,11 @@ async def test_full_chapter_production_v2_lifecycle_via_http(
     updated_data = resolve_resp.json()
     assert updated_data["workflow_run_id"] == str(run_id)
 
-    # Verify state transitioned to review_in_progress
+    # Verify state transitioned to editor review
     get_resp = await v2_client.get(f"{base_url}/{run_id}")
     assert get_resp.status_code == 200
     state_data = get_resp.json()
-    assert state_data["status"] == "review_in_progress"
+    assert state_data["status"] == ChapterProductionStatus.EDITOR_REVIEW.value
 
     # 5. Trigger review
     review_resp = await v2_client.post(f"{base_url}/{run_id}/review")
@@ -176,8 +177,8 @@ async def test_full_chapter_production_v2_lifecycle_via_http(
     get_resp = await v2_client.get(f"{base_url}/{run_id}")
     assert get_resp.status_code == 200
     state_data = get_resp.json()
-    assert state_data["status"] == "author_revision"
     if review_action_id is not None:
+        assert state_data["status"] == ChapterProductionStatus.EDITOR_REVIEW.value
         # Proceed with warnings
         proceed_resp = await v2_client.post(
             f"{base_url}/{run_id}/actions/{review_action_id}/resolve",
@@ -193,11 +194,11 @@ async def test_full_chapter_production_v2_lifecycle_via_http(
     assert finalized_data["final_document_id"] is not None
     assert finalized_data["final_version_id"] is not None
 
-    # 8. Check final state (archived / completed)
+    # 8. Check final state (completed)
     get_resp = await v2_client.get(f"{base_url}/{run_id}")
     assert get_resp.status_code == 200
     state_data = get_resp.json()
-    assert state_data["status"] == "archived"
+    assert state_data["status"] == ChapterProductionStatus.COMPLETED.value
 
 
 async def test_extra_forbidden_and_cross_scope_isolation_via_http(
