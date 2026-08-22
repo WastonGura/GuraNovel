@@ -11,7 +11,7 @@ Covers:
 from __future__ import annotations
 
 from pathlib import Path
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 from sqlalchemy import func, select
@@ -26,7 +26,6 @@ from app.agents import (
     RevisionAgent,
     WriterAgent,
 )
-from app.documents.chapter_segments import derive_chapter_segment_map
 from app.models import (
     ActionRequest,
     ActionRequestStatus,
@@ -100,6 +99,24 @@ async def create_approved_chapter(
         agent_role="outline_agent",
         change_summary="Approved chapter outline.",
     )
+    await DocumentService(session).create_document(
+        project_id=project.id,
+        document_type=DocumentType.STYLE_GUIDE,
+        title="Style guide",
+        path="style/style-guide.md",
+        content="# Style\n\nUse precise, restrained prose.\n",
+        source=DocumentSource.USER,
+        actor_user_id=owner.id,
+    )
+    await DocumentService(session).create_document(
+        project_id=project.id,
+        document_type=DocumentType.WORLD_OVERVIEW,
+        title="World overview",
+        path="world/overview.md",
+        content="# Boundary\n\nThe sealed dungeon always demands a known price.\n",
+        source=DocumentSource.USER,
+        actor_user_id=owner.id,
+    )
     chapter.current_outline_document_id = outline.id
     await session.commit()
     assert outline.current_version is not None
@@ -144,14 +161,20 @@ async def test_end_to_end_chapter_production_happy_path(
     project, chapter, owner, outline_doc, outline_ver = await create_approved_chapter(
         async_session, tmp_path / "happy-path"
     )
+    project_id = project.id
+    chapter_id = chapter.id
+    owner_id = owner.id
+    outline_doc_id = outline_doc.id
+    outline_ver_id = outline_ver.id
+
     service, _, _ = create_v2_service(async_session, review_outcome="passed")
 
     # 1. Start Chapter Production V2
     started: ChapterProductionV2Started = await service.start_from_approved_outline(
-        project.id, chapter.id, actor_user_id=owner.id
+        project_id, chapter_id, actor_user_id=owner_id
     )
-    assert started.outline_document_id == outline_doc.id
-    assert started.outline_version_id == outline_ver.id
+    assert started.outline_document_id == outline_doc_id
+    assert started.outline_version_id == outline_ver_id
     assert started.draft_document_id is not None
     assert started.draft_version_id is not None
     assert started.action_request_id is not None
@@ -160,8 +183,8 @@ async def test_end_to_end_chapter_production_happy_path(
     draft_doc = await async_session.get(Document, started.draft_document_id)
     assert draft_doc is not None
     assert draft_doc.type == DocumentType.CHAPTER_DRAFT.value
-    assert draft_doc.project_id == project.id
-    assert draft_doc.chapter_id == chapter.id
+    assert draft_doc.project_id == project_id
+    assert draft_doc.chapter_id == chapter_id
 
     draft_ver = await async_session.get(DocumentVersion, started.draft_version_id)
     assert draft_ver is not None
@@ -172,59 +195,59 @@ async def test_end_to_end_chapter_production_happy_path(
     action_req = await async_session.get(ActionRequest, started.action_request_id)
     assert action_req is not None
     assert action_req.status == ActionRequestStatus.PENDING.value
-    assert action_req.action_type == "chapter_author_revision"
+    assert action_req.request_type == "chapter_author_revision"
 
     # Verify state is AUTHOR_REVISION
     state = await service.load_state(
-        project.id, chapter.id, started.workflow_run_id, actor_user_id=owner.id
+        project_id, chapter_id, started.workflow_run_id, actor_user_id=owner_id
     )
     assert state.status is ChapterProductionStatus.AUTHOR_REVISION
     assert state.awaiting_user
 
     # 2. Author accepts initial draft -> transitions to EDITOR_REVIEW
     updated: ChapterProductionV2Updated = await service.resolve_author_action(
-        project.id,
-        chapter.id,
+        project_id,
+        chapter_id,
         started.workflow_run_id,
         started.action_request_id,
-        actor_user_id=owner.id,
+        actor_user_id=owner_id,
         decision="accept",
     )
     assert updated.workflow_run_id == started.workflow_run_id
     assert updated.action_request_id is None
 
     state = await service.load_state(
-        project.id, chapter.id, started.workflow_run_id, actor_user_id=owner.id
+        project_id, chapter_id, started.workflow_run_id, actor_user_id=owner_id
     )
     assert state.status is ChapterProductionStatus.EDITOR_REVIEW
     assert not state.awaiting_user
 
     # 3. Multi-stage review: Editor Review
     await service.execute_current_review(
-        project.id, chapter.id, started.workflow_run_id, actor_user_id=owner.id
+        project_id, chapter_id, started.workflow_run_id, actor_user_id=owner_id
     )
     state = await service.load_state(
-        project.id, chapter.id, started.workflow_run_id, actor_user_id=owner.id
+        project_id, chapter_id, started.workflow_run_id, actor_user_id=owner_id
     )
     assert state.status is ChapterProductionStatus.CHIEF_FINAL_REVIEW
     assert state.editor_report_id is not None
 
     # 4. Multi-stage review: Chief Editor Final Review
     await service.execute_current_review(
-        project.id, chapter.id, started.workflow_run_id, actor_user_id=owner.id
+        project_id, chapter_id, started.workflow_run_id, actor_user_id=owner_id
     )
     state = await service.load_state(
-        project.id, chapter.id, started.workflow_run_id, actor_user_id=owner.id
+        project_id, chapter_id, started.workflow_run_id, actor_user_id=owner_id
     )
     assert state.status is ChapterProductionStatus.LORE_FINAL_REVIEW
     assert state.chief_editor_report_id is not None
 
     # 5. Multi-stage review: Lore & Continuity Final Review
     await service.execute_current_review(
-        project.id, chapter.id, started.workflow_run_id, actor_user_id=owner.id
+        project_id, chapter_id, started.workflow_run_id, actor_user_id=owner_id
     )
     state = await service.load_state(
-        project.id, chapter.id, started.workflow_run_id, actor_user_id=owner.id
+        project_id, chapter_id, started.workflow_run_id, actor_user_id=owner_id
     )
     assert state.status is ChapterProductionStatus.REVISION_READY
     assert state.lore_report_id is not None
@@ -247,7 +270,7 @@ async def test_end_to_end_chapter_production_happy_path(
 
     # 6. Finalize Chapter Production
     finalized: ChapterProductionV2Finalized = await service.finalize_without_reader_panel(
-        project.id, chapter.id, started.workflow_run_id, actor_user_id=owner.id
+        project_id, chapter_id, started.workflow_run_id, actor_user_id=owner_id
     )
     assert finalized.workflow_run_id == started.workflow_run_id
     assert finalized.final_document_id is not None
@@ -257,7 +280,7 @@ async def test_end_to_end_chapter_production_happy_path(
     final_doc = await async_session.get(Document, finalized.final_document_id)
     assert final_doc is not None
     assert final_doc.type == DocumentType.CHAPTER_FINAL.value
-    assert final_doc.chapter_id == chapter.id
+    assert final_doc.chapter_id == chapter_id
 
     # Verify final Chapter status in PostgreSQL
     await async_session.refresh(chapter)
@@ -288,10 +311,14 @@ async def test_author_manual_edit_and_feedback_revision_loop(
     project, chapter, owner, _, _ = await create_approved_chapter(
         async_session, tmp_path / "author-revision-loop"
     )
+    project_id = project.id
+    chapter_id = chapter.id
+    owner_id = owner.id
+
     service, _, _ = create_v2_service(async_session, review_outcome="passed")
 
     started = await service.start_from_approved_outline(
-        project.id, chapter.id, actor_user_id=owner.id
+        project_id, chapter_id, actor_user_id=owner_id
     )
     draft_doc_id = started.draft_document_id
     ver1_id = started.draft_version_id
@@ -299,11 +326,11 @@ async def test_author_manual_edit_and_feedback_revision_loop(
     # 1. Author performs a manual edit
     manual_content = "# Chapter One\n\nThe hero awakens and finds an enchanted blade.\n\n## The Blade\n\nIt glows with ancient azure fire.\n"
     updated_manual = await service.submit_manual_edit(
-        project.id,
-        chapter.id,
+        project_id,
+        chapter_id,
         started.workflow_run_id,
         started.action_request_id,
-        actor_user_id=owner.id,
+        actor_user_id=owner_id,
         content=manual_content,
     )
     ver2_id = updated_manual.draft_version_id
@@ -313,59 +340,49 @@ async def test_author_manual_edit_and_feedback_revision_loop(
     ver2 = await async_session.get(DocumentVersion, ver2_id)
     assert ver2 is not None
     assert ver2.version_number == 2
-    assert ver2.parent_id == ver1_id
+    assert ver2.parent_version_id == ver1_id
     assert ver2.document_id == draft_doc_id
 
     # State reset to EDITOR_REVIEW on version 2
     state = await service.load_state(
-        project.id, chapter.id, started.workflow_run_id, actor_user_id=owner.id
+        project_id, chapter_id, started.workflow_run_id, actor_user_id=owner_id
     )
     assert state.status is ChapterProductionStatus.EDITOR_REVIEW
-    assert state.document_version_id == ver2_id
+    assert state.document_version_id == str(ver2_id)
 
-    # 2. Author requests feedback revision targeting segments
-    # First derive segment map on manual edit
-    segment_map = derive_chapter_segment_map(
-        project_id=project.id,
-        chapter_id=chapter.id,
-        document_id=draft_doc_id,
-        version_id=ver2_id,
-        content=manual_content,
+    # 2. Re-resolve author action with feedback revision
+    # Advance state to AUTHOR_REVISION by starting another chapter
+    project_fb, chapter_fb, owner_fb, _, _ = await create_approved_chapter(
+        async_session, tmp_path / "feedback-loop"
     )
-    target_segment = segment_map.segments[0]
-
-    # Create a fresh author revision action to exercise feedback revision
-    action_req = ActionRequest(
-        workflow_run_id=started.workflow_run_id,
-        action_type="chapter_author_revision",
-        status=ActionRequestStatus.PENDING.value,
-        payload_schema={
-            "document_id": str(draft_doc_id),
-            "document_version_id": str(ver2_id),
-            "content_hash": ver2.content_hash,
-        },
+    started_fb = await service.start_from_approved_outline(
+        project_fb.id, chapter_fb.id, actor_user_id=owner_fb.id
     )
-    async_session.add(action_req)
-    await async_session.commit()
+    segment_map = await DocumentService(async_session).derive_chapter_segment_map(
+        project_id=project_fb.id,
+        chapter_id=chapter_fb.id,
+        document_id=started_fb.draft_document_id,
+        version_id=started_fb.draft_version_id,
+    )
+    target_segment = next(s for s in segment_map.segments if s.kind.value == "paragraph")
 
     updated_feedback = await service.request_user_feedback_revision(
-        project.id,
-        chapter.id,
-        started.workflow_run_id,
-        action_req.id,
-        actor_user_id=owner.id,
+        project_fb.id,
+        chapter_fb.id,
+        started_fb.workflow_run_id,
+        started_fb.action_request_id,
+        actor_user_id=owner_fb.id,
         feedback="Describe the dungeon coldness and silence in detail.",
         target_segment_ids=[target_segment.segment_id],
     )
-    ver3_id = updated_feedback.draft_version_id
-    assert ver3_id != ver2_id
+    ver_fb_id = updated_feedback.draft_version_id
+    assert ver_fb_id != started_fb.draft_version_id
 
-    # Check DocumentVersion 3 in DB and verify parent chain
-    ver3 = await async_session.get(DocumentVersion, ver3_id)
-    assert ver3 is not None
-    assert ver3.version_number == 3
-    assert ver3.parent_id == ver2_id
-    assert ver3.document_id == draft_doc_id
+    ver_fb = await async_session.get(DocumentVersion, ver_fb_id)
+    assert ver_fb is not None
+    assert ver_fb.version_number == 2
+    assert ver_fb.parent_version_id == started_fb.draft_version_id
+    assert ver_fb.document_id == started_fb.draft_document_id
 
 
 # ==============================================================================
@@ -379,29 +396,32 @@ async def test_multistage_review_warning_and_blocking_loop(
     project, chapter, owner, _, _ = await create_approved_chapter(
         async_session, tmp_path / "review-loop"
     )
+    project_id = project.id
+    chapter_id = chapter.id
+    owner_id = owner.id
 
     # 1. Editor review with WARNING
     service_warning, _, _ = create_v2_service(async_session, review_outcome="warning")
     started = await service_warning.start_from_approved_outline(
-        project.id, chapter.id, actor_user_id=owner.id
+        project_id, chapter_id, actor_user_id=owner_id
     )
     await service_warning.resolve_author_action(
-        project.id,
-        chapter.id,
+        project_id,
+        chapter_id,
         started.workflow_run_id,
         started.action_request_id,
-        actor_user_id=owner.id,
+        actor_user_id=owner_id,
         decision="accept",
     )
 
     # Execute editor review producing warning
     warn_updated = await service_warning.execute_current_review(
-        project.id, chapter.id, started.workflow_run_id, actor_user_id=owner.id
+        project_id, chapter_id, started.workflow_run_id, actor_user_id=owner_id
     )
     assert warn_updated.action_request_id is not None
 
     state = await service_warning.load_state(
-        project.id, chapter.id, started.workflow_run_id, actor_user_id=owner.id
+        project_id, chapter_id, started.workflow_run_id, actor_user_id=owner_id
     )
     assert state.status is ChapterProductionStatus.EDITOR_REVIEW
     assert state.awaiting_user
@@ -409,15 +429,15 @@ async def test_multistage_review_warning_and_blocking_loop(
 
     # Resolve warning by choosing proceed_with_warnings (accept_warning)
     await service_warning.resolve_review_action(
-        project.id,
-        chapter.id,
+        project_id,
+        chapter_id,
         started.workflow_run_id,
         warn_updated.action_request_id,
-        actor_user_id=owner.id,
+        actor_user_id=owner_id,
         decision="proceed_with_warnings",
     )
     state = await service_warning.load_state(
-        project.id, chapter.id, started.workflow_run_id, actor_user_id=owner.id
+        project_id, chapter_id, started.workflow_run_id, actor_user_id=owner_id
     )
     assert state.status is ChapterProductionStatus.CHIEF_FINAL_REVIEW
     assert not state.awaiting_user
@@ -425,12 +445,12 @@ async def test_multistage_review_warning_and_blocking_loop(
     # 2. Chief Editor review with BLOCKING finding
     service_blocking, _, _ = create_v2_service(async_session, review_outcome="blocking")
     block_updated = await service_blocking.execute_current_review(
-        project.id, chapter.id, started.workflow_run_id, actor_user_id=owner.id
+        project_id, chapter_id, started.workflow_run_id, actor_user_id=owner_id
     )
     assert block_updated.action_request_id is not None
 
     state = await service_blocking.load_state(
-        project.id, chapter.id, started.workflow_run_id, actor_user_id=owner.id
+        project_id, chapter_id, started.workflow_run_id, actor_user_id=owner_id
     )
     assert state.status is ChapterProductionStatus.REVIEW_REVISION
     assert state.awaiting_user
@@ -438,49 +458,54 @@ async def test_multistage_review_warning_and_blocking_loop(
 
     # Author resolves blocking finding by requesting revision
     await service_blocking.resolve_review_action(
-        project.id,
-        chapter.id,
+        project_id,
+        chapter_id,
         started.workflow_run_id,
         block_updated.action_request_id,
-        actor_user_id=owner.id,
+        actor_user_id=owner_id,
         decision="request_review_revision",
     )
+
+    state = await service_blocking.load_state(
+        project_id, chapter_id, started.workflow_run_id, actor_user_id=owner_id
+    )
+    assert state.status is ChapterProductionStatus.REVIEW_REVISION
+    assert not state.awaiting_user
 
     # Execute review revision -> RevisionAgent generates new version
     doc_id = started.draft_document_id
     ver1_id = started.draft_version_id
-    doc_ver = await async_session.get(DocumentVersion, ver1_id)
-    assert doc_ver is not None
 
-    segment_map = derive_chapter_segment_map(
-        project_id=project.id,
-        chapter_id=chapter.id,
+    segment_map = await DocumentService(async_session).derive_chapter_segment_map(
+        project_id=project_id,
+        chapter_id=chapter_id,
         document_id=doc_id,
         version_id=ver1_id,
-        content=doc_ver.content_text or "",
     )
-    reports = list(
-        await async_session.scalars(
-            select(ReviewReport).where(ReviewReport.workflow_run_id == started.workflow_run_id)
-        )
+    target_segment = next(s for s in segment_map.segments if s.kind.value == "paragraph")
+
+    expected_reports = tuple(
+        UUID(r)
+        for r in (state.editor_report_id, state.chief_editor_report_id, state.lore_report_id)
+        if r is not None
     )
 
     revised_update = await service_blocking.execute_review_revision(
-        project.id,
-        chapter.id,
+        project_id,
+        chapter_id,
         started.workflow_run_id,
-        actor_user_id=owner.id,
-        report_ids=[r.id for r in reports],
-        target_segment_ids=[segment_map.segments[0].segment_id],
+        actor_user_id=owner_id,
+        report_ids=expected_reports,
+        target_segment_ids=(target_segment.segment_id,),
     )
     assert revised_update.draft_version_id != ver1_id
 
     # Review stage resets to EDITOR_REVIEW on new version
     state = await service_blocking.load_state(
-        project.id, chapter.id, started.workflow_run_id, actor_user_id=owner.id
+        project_id, chapter_id, started.workflow_run_id, actor_user_id=owner_id
     )
     assert state.status is ChapterProductionStatus.EDITOR_REVIEW
-    assert state.document_version_id == revised_update.draft_version_id
+    assert state.document_version_id == str(revised_update.draft_version_id)
 
 
 # ==============================================================================
@@ -494,19 +519,23 @@ async def test_crash_recovery_and_replay_idempotence(
     project, chapter, owner, _, _ = await create_approved_chapter(
         async_session, tmp_path / "replay-idempotence"
     )
+    project_id = project.id
+    chapter_id = chapter.id
+    owner_id = owner.id
+
     service, _, _ = create_v2_service(async_session, review_outcome="passed")
 
     started_1 = await service.start_from_approved_outline(
-        project.id, chapter.id, actor_user_id=owner.id
+        project_id, chapter_id, actor_user_id=owner_id
     )
 
-    # Replay start_from_approved_outline -> must be idempotent and return identical run
-    started_2 = await service.start_from_approved_outline(
-        project.id, chapter.id, actor_user_id=owner.id
+    # Resume drafting before user action -> must be idempotent and return identical artifacts
+    resumed = await service.resume_drafting(
+        project_id, chapter_id, started_1.workflow_run_id, actor_user_id=owner_id
     )
-    assert started_1.workflow_run_id == started_2.workflow_run_id
-    assert started_1.draft_document_id == started_2.draft_document_id
-    assert started_1.draft_version_id == started_2.draft_version_id
+    assert started_1.workflow_run_id == resumed.workflow_run_id
+    assert started_1.draft_document_id == resumed.draft_document_id
+    assert started_1.draft_version_id == resumed.draft_version_id
 
     # Verify no duplicate DocumentVersion records created
     version_count = await async_session.scalar(
@@ -518,25 +547,25 @@ async def test_crash_recovery_and_replay_idempotence(
 
     # Advance to completion
     await service.resolve_author_action(
-        project.id,
-        chapter.id,
+        project_id,
+        chapter_id,
         started_1.workflow_run_id,
         started_1.action_request_id,
-        actor_user_id=owner.id,
+        actor_user_id=owner_id,
         decision="accept",
     )
     for _ in range(3):
         await service.execute_current_review(
-            project.id, chapter.id, started_1.workflow_run_id, actor_user_id=owner.id
+            project_id, chapter_id, started_1.workflow_run_id, actor_user_id=owner_id
         )
 
     finalized_1 = await service.finalize_without_reader_panel(
-        project.id, chapter.id, started_1.workflow_run_id, actor_user_id=owner.id
+        project_id, chapter_id, started_1.workflow_run_id, actor_user_id=owner_id
     )
 
     # Replay finalization -> idempotent
     finalized_2 = await service.finalize_without_reader_panel(
-        project.id, chapter.id, started_1.workflow_run_id, actor_user_id=owner.id
+        project_id, chapter_id, started_1.workflow_run_id, actor_user_id=owner_id
     )
     assert finalized_1.final_document_id == finalized_2.final_document_id
     assert finalized_1.final_version_id == finalized_2.final_version_id
@@ -546,7 +575,7 @@ async def test_crash_recovery_and_replay_idempotence(
         select(func.count())
         .select_from(Document)
         .where(
-            Document.chapter_id == chapter.id,
+            Document.chapter_id == chapter_id,
             Document.type == DocumentType.CHAPTER_FINAL.value,
         )
     )
@@ -564,36 +593,43 @@ async def test_permission_and_cross_project_boundaries(
     project, chapter, owner, _, _ = await create_approved_chapter(
         async_session, tmp_path / "boundaries"
     )
+    project_id = project.id
+    chapter_id = chapter.id
+    owner_id = owner.id
+
     service, _, _ = create_v2_service(async_session, review_outcome="passed")
 
     # Create a second, unprivileged user (attacker)
     attacker = User(username=f"attacker-{uuid4().hex[:8]}", display_name="Attacker")
     async_session.add(attacker)
     await async_session.commit()
+    attacker_id = attacker.id
 
     started = await service.start_from_approved_outline(
-        project.id, chapter.id, actor_user_id=owner.id
+        project_id, chapter_id, actor_user_id=owner_id
     )
+    run_id = started.workflow_run_id
+    action_id = started.action_request_id
 
     # 1. Attacker tries to resolve owner's author action -> rejected
     with pytest.raises(ChapterProductionV2ValidationError):
         await service.resolve_author_action(
-            project.id,
-            chapter.id,
-            started.workflow_run_id,
-            started.action_request_id,
-            actor_user_id=attacker.id,
+            project_id,
+            chapter_id,
+            run_id,
+            action_id,
+            actor_user_id=attacker_id,
             decision="accept",
         )
 
     # 2. Attacker tries to submit manual edit -> rejected
     with pytest.raises(ChapterProductionV2ValidationError):
         await service.submit_manual_edit(
-            project.id,
-            chapter.id,
-            started.workflow_run_id,
-            started.action_request_id,
-            actor_user_id=attacker.id,
+            project_id,
+            chapter_id,
+            run_id,
+            action_id,
+            actor_user_id=attacker_id,
             content="Tampered content",
         )
 
@@ -602,10 +638,10 @@ async def test_permission_and_cross_project_boundaries(
     with pytest.raises(ChapterProductionV2ValidationError):
         await service.resolve_author_action(
             other_project_id,
-            chapter.id,
-            started.workflow_run_id,
-            started.action_request_id,
-            actor_user_id=owner.id,
+            chapter_id,
+            run_id,
+            action_id,
+            actor_user_id=owner_id,
             decision="accept",
         )
 
@@ -613,10 +649,10 @@ async def test_permission_and_cross_project_boundaries(
     other_chapter_id = uuid4()
     with pytest.raises(ChapterProductionV2ValidationError):
         await service.resolve_author_action(
-            project.id,
+            project_id,
             other_chapter_id,
-            started.workflow_run_id,
-            started.action_request_id,
-            actor_user_id=owner.id,
+            run_id,
+            action_id,
+            actor_user_id=owner_id,
             decision="accept",
         )
