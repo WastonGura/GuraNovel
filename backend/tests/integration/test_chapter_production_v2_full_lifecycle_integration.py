@@ -427,14 +427,14 @@ async def test_multistage_review_warning_and_blocking_loop(
     assert state.awaiting_user
     assert state.action_kind is ChapterActionKind.REVIEW_WARNING
 
-    # Resolve warning by choosing proceed_with_warnings (accept_warning)
+    # Resolve warning by choosing accept_warning
     await service_warning.resolve_review_action(
         project_id,
         chapter_id,
         started.workflow_run_id,
         warn_updated.action_request_id,
         actor_user_id=owner_id,
-        decision="proceed_with_warnings",
+        decision="accept_warning",
     )
     state = await service_warning.load_state(
         project_id, chapter_id, started.workflow_run_id, actor_user_id=owner_id
@@ -463,7 +463,7 @@ async def test_multistage_review_warning_and_blocking_loop(
         started.workflow_run_id,
         block_updated.action_request_id,
         actor_user_id=owner_id,
-        decision="request_review_revision",
+        decision="request_revision",
     )
 
     state = await service_blocking.load_state(
