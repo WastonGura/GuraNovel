@@ -16,6 +16,7 @@ from app.models.enums import ActionRequestStatus
 
 if TYPE_CHECKING:
     from app.models.maintenance import MaintenanceChange
+    from app.models.reader_panel import ReaderPanelSession
 
 
 class TimestampMixin:
@@ -76,6 +77,9 @@ class Project(TimestampMixin, Base):
     maintenance_changes: Mapped[list[MaintenanceChange]] = relationship(
         back_populates="project", cascade="all, delete", passive_deletes=True
     )
+    reader_panel_sessions: Mapped[list[ReaderPanelSession]] = relationship(
+        back_populates="project", cascade="all, delete", passive_deletes=True
+    )
 
 
 class Chapter(TimestampMixin, Base):
@@ -106,6 +110,7 @@ class Chapter(TimestampMixin, Base):
     action_requests: Mapped[list[ActionRequest]] = relationship(back_populates="chapter")
     conversations: Mapped[list[AgentConversation]] = relationship(back_populates="chapter")
     review_reports: Mapped[list[ReviewReport]] = relationship(back_populates="chapter")
+    reader_panel_sessions: Mapped[list[ReaderPanelSession]] = relationship(back_populates="chapter")
 
 
 class WorkflowRun(Base):
@@ -146,6 +151,13 @@ class WorkflowRun(Base):
         uselist=False,
         passive_deletes=True,
         overlaps="maintenance_changes,project",
+    )
+    reader_panel_session: Mapped[ReaderPanelSession | None] = relationship(
+        back_populates="workflow_run",
+        cascade="all, delete",
+        uselist=False,
+        passive_deletes=True,
+        overlaps="reader_panel_sessions,project",
     )
 
 

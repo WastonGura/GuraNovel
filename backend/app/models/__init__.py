@@ -27,6 +27,14 @@ from app.models.enums import (
     WorkflowType,
 )
 from app.models.maintenance import MaintenanceAffectedItem, MaintenanceChange
+from app.models.reader_panel import (
+    ReaderInitialReport,
+    ReaderPanelBallot,
+    ReaderPanelIssue,
+    ReaderPanelMessage,
+    ReaderPanelSession,
+    ReaderRun,
+)
 
 __all__ = [
     "ActionRequest",
@@ -42,6 +50,12 @@ __all__ = [
     "MaintenanceAffectedItem",
     "MaintenanceChange",
     "Project",
+    "ReaderInitialReport",
+    "ReaderPanelBallot",
+    "ReaderPanelIssue",
+    "ReaderPanelMessage",
+    "ReaderPanelSession",
+    "ReaderRun",
     "ReviewMode",
     "ReviewReport",
     "User",

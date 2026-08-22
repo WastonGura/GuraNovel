@@ -60,3 +60,33 @@ def test_runtime_pin_migration_downgrades_in_dependency_order() -> None:
     assert "DROP INDEX uq_workflow_events_run_sequence" in sql
     assert "DROP COLUMN event_sequence" in sql
 
+
+def test_reader_panel_migration_generates_upgrade_sql() -> None:
+    sql = run_alembic("upgrade", "0003_runtime_pin_event_sequence:0004_reader_panel_persistence", "--sql")
+
+    assert "CREATE TABLE reader_panel_sessions" in sql
+    assert "CREATE TABLE reader_runs" in sql
+    assert "CREATE TABLE reader_initial_reports" in sql
+    assert "CREATE TABLE reader_panel_issues" in sql
+    assert "CREATE TABLE reader_panel_ballots" in sql
+    assert "CREATE TABLE reader_panel_messages" in sql
+    assert "uq_reader_panel_sessions_run_id" in sql
+    assert "uq_reader_runs_session_profile" in sql
+    assert "uq_reader_initial_reports_run_id" in sql
+    assert "uq_reader_panel_issues_session_number" in sql
+    assert "uq_reader_panel_ballots_run_issue_phase" in sql
+    assert "uq_reader_panel_messages_issue_round_turn" in sql
+
+
+def test_reader_panel_migration_downgrades_in_dependency_order() -> None:
+    sql = run_alembic("downgrade", "0004_reader_panel_persistence:0003_runtime_pin_event_sequence", "--sql")
+
+    msg = sql.index("DROP TABLE reader_panel_messages")
+    ballot = sql.index("DROP TABLE reader_panel_ballots")
+    issue = sql.index("DROP TABLE reader_panel_issues")
+    report = sql.index("DROP TABLE reader_initial_reports")
+    run = sql.index("DROP TABLE reader_runs")
+    session = sql.index("DROP TABLE reader_panel_sessions")
+
+    assert msg < ballot < issue < report < run < session
+
