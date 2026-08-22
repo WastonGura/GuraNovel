@@ -16,6 +16,7 @@ class WorkflowType(StrEnum):
     PROJECT_CREATION = "project_creation"
     CHAPTER_PRODUCTION = "chapter_production"
     PROJECT_MAINTENANCE = "project_maintenance"
+    READER_PANEL = "reader_panel"
 
 
 class DocumentType(StrEnum):
@@ -45,6 +46,8 @@ class DocumentType(StrEnum):
     GLOSSARY = "glossary"
     MAINTENANCE_PLAN = "maintenance_plan"
     MAINTENANCE_REPORT = "maintenance_report"
+    READER_PANEL_REPORT = "reader_panel_report"
+    READER_PANEL_SUMMARY = "reader_panel_summary"
 
 
 class DocumentSource(StrEnum):
@@ -60,6 +63,8 @@ class DocumentSource(StrEnum):
     EDITOR_AGENT = "editor_agent"
     LORE_AGENT = "lore_agent"
     ARCHIVIST_AGENT = "archivist_agent"
+    READER_AGENT = "reader_agent"
+    MODERATOR_AGENT = "moderator_agent"
     SYSTEM = "system"
 
 
@@ -74,6 +79,7 @@ class ReviewMode(StrEnum):
     MAINTENANCE_LORE_IMPACT = "maintenance_lore_impact"
     MAINTENANCE_CHIEF_IMPACT = "maintenance_chief_impact"
     MAINTENANCE_CONSISTENCY = "maintenance_consistency"
+    READER_PANEL = "reader_panel"
 
 
 class IssueSeverity(StrEnum):
