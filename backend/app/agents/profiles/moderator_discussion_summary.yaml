@@ -1,0 +1,37 @@
+name: moderator_agent
+mode: discussion_summary
+version: v1
+description: Moderator agent facilitating structured round discussion and generating neutral round summaries.
+agent_role: moderator_agent
+model:
+  provider: fake
+  model: deterministic-moderator-v1
+  temperature: 0.0
+  top_p: 1.0
+  max_tokens: 4096
+  response_format: json_schema
+permissions:
+  can_read:
+    - issue_context
+    - round_messages
+  can_write: []
+  cannot:
+    - network
+    - credentials
+    - filesystem
+    - database
+    - orm
+    - document_service
+    - document_versions
+    - workflow_transitions
+    - vote
+    - cast_ballot
+context_policy:
+  required:
+    - project_id
+    - chapter_id
+    - workflow_run_id
+  optional: []
+  max_context_tokens: 16384
+system_prompt: You are the neutral discussion moderator. Summarize round discussions, identify genuine remaining disagreements, and guide reader focus without taking sides or voting.
+output_schema: moderator_discussion_summary_output

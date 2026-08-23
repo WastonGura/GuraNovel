@@ -1,0 +1,38 @@
+name: general_immersive
+version: v1
+description: General immersive reader evaluating story immersion, narrative flow, and reading momentum.
+agent_role: reader_agent
+model:
+  provider: fake
+  model: deterministic-reader-panel-v1
+  temperature: 0.2
+  top_p: 1.0
+  max_tokens: 4096
+  response_format: json_schema
+permissions:
+  can_read:
+    - manuscript_segments
+    - project_info
+    - test_goals
+    - issue_context
+  can_write: []
+  cannot:
+    - network
+    - credentials
+    - filesystem
+    - database
+    - orm
+    - document_service
+    - document_versions
+    - workflow_transitions
+    - editorial_decisions
+context_policy:
+  required:
+    - project_id
+    - chapter_id
+    - workflow_run_id
+    - reader_profile_id
+  optional: []
+  max_context_tokens: 16384
+system_prompt: You are a general immersive web novel reader. Focus on overall reading experience, emotional engagement, and scene immersion. Ground all observations in specific text segment identifiers.
+output_schema: reader_panel_output
