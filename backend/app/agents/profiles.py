@@ -81,6 +81,13 @@ class AgentProfile(_StrictProfileModel):
         "writer_agent",
         "revision_agent",
         "editor_agent",
+        "general_immersive",
+        "low_patience",
+        "genre_experienced",
+        "character_emotion",
+        "style_sensitive",
+        "newcomer",
+        "moderator_agent",
     ]
     mode: (
         Literal[
@@ -93,6 +100,9 @@ class AgentProfile(_StrictProfileModel):
             "user_feedback_revision",
             "review_driven_revision",
             "chapter_final",
+            "issue_extraction",
+            "discussion_summary",
+            "report_synthesis",
         ]
         | None
     ) = Field(default=None, exclude=True)
@@ -108,6 +118,8 @@ class AgentProfile(_StrictProfileModel):
         "writer_agent",
         "revision_agent",
         "editor_agent",
+        "reader_agent",
+        "moderator_agent",
     ]
     model: ModelProfile
     permissions: PermissionsProfile
@@ -123,6 +135,10 @@ class AgentProfile(_StrictProfileModel):
         "consistency_review_output",
         "candidate_chapter_output",
         "chapter_review_report",
+        "reader_panel_output",
+        "moderator_issue_extraction_output",
+        "moderator_discussion_summary_output",
+        "moderator_report_synthesis_output",
     ]
 
     @field_validator("version")
@@ -481,6 +497,207 @@ class ProfileRegistry:
                     "review_report_refs",
                 }
             ),
+            frozenset(),
+        ),
+        ("general_immersive", None): _ProfileManifest(
+            "reader_general_immersive.yaml",
+            "reader_agent",
+            "reader_panel_output",
+            frozenset({"manuscript_segments", "project_info", "test_goals", "issue_context"}),
+            frozenset(),
+            frozenset(
+                {
+                    "network",
+                    "credentials",
+                    "filesystem",
+                    "database",
+                    "orm",
+                    "document_service",
+                    "document_versions",
+                    "workflow_transitions",
+                    "editorial_decisions",
+                }
+            ),
+            frozenset({"project_id", "chapter_id", "workflow_run_id", "reader_profile_id"}),
+            frozenset(),
+        ),
+        ("low_patience", None): _ProfileManifest(
+            "reader_low_patience.yaml",
+            "reader_agent",
+            "reader_panel_output",
+            frozenset({"manuscript_segments", "project_info", "test_goals", "issue_context"}),
+            frozenset(),
+            frozenset(
+                {
+                    "network",
+                    "credentials",
+                    "filesystem",
+                    "database",
+                    "orm",
+                    "document_service",
+                    "document_versions",
+                    "workflow_transitions",
+                    "editorial_decisions",
+                }
+            ),
+            frozenset({"project_id", "chapter_id", "workflow_run_id", "reader_profile_id"}),
+            frozenset(),
+        ),
+        ("genre_experienced", None): _ProfileManifest(
+            "reader_genre_experienced.yaml",
+            "reader_agent",
+            "reader_panel_output",
+            frozenset({"manuscript_segments", "project_info", "test_goals", "issue_context"}),
+            frozenset(),
+            frozenset(
+                {
+                    "network",
+                    "credentials",
+                    "filesystem",
+                    "database",
+                    "orm",
+                    "document_service",
+                    "document_versions",
+                    "workflow_transitions",
+                    "editorial_decisions",
+                }
+            ),
+            frozenset({"project_id", "chapter_id", "workflow_run_id", "reader_profile_id"}),
+            frozenset(),
+        ),
+        ("character_emotion", None): _ProfileManifest(
+            "reader_character_emotion.yaml",
+            "reader_agent",
+            "reader_panel_output",
+            frozenset({"manuscript_segments", "project_info", "test_goals", "issue_context"}),
+            frozenset(),
+            frozenset(
+                {
+                    "network",
+                    "credentials",
+                    "filesystem",
+                    "database",
+                    "orm",
+                    "document_service",
+                    "document_versions",
+                    "workflow_transitions",
+                    "editorial_decisions",
+                }
+            ),
+            frozenset({"project_id", "chapter_id", "workflow_run_id", "reader_profile_id"}),
+            frozenset(),
+        ),
+        ("style_sensitive", None): _ProfileManifest(
+            "reader_style_sensitive.yaml",
+            "reader_agent",
+            "reader_panel_output",
+            frozenset({"manuscript_segments", "project_info", "test_goals", "issue_context"}),
+            frozenset(),
+            frozenset(
+                {
+                    "network",
+                    "credentials",
+                    "filesystem",
+                    "database",
+                    "orm",
+                    "document_service",
+                    "document_versions",
+                    "workflow_transitions",
+                    "editorial_decisions",
+                }
+            ),
+            frozenset({"project_id", "chapter_id", "workflow_run_id", "reader_profile_id"}),
+            frozenset(),
+        ),
+        ("newcomer", None): _ProfileManifest(
+            "reader_newcomer.yaml",
+            "reader_agent",
+            "reader_panel_output",
+            frozenset({"manuscript_segments", "project_info", "test_goals", "issue_context"}),
+            frozenset(),
+            frozenset(
+                {
+                    "network",
+                    "credentials",
+                    "filesystem",
+                    "database",
+                    "orm",
+                    "document_service",
+                    "document_versions",
+                    "workflow_transitions",
+                    "editorial_decisions",
+                }
+            ),
+            frozenset({"project_id", "chapter_id", "workflow_run_id", "reader_profile_id"}),
+            frozenset(),
+        ),
+        ("moderator_agent", "issue_extraction"): _ProfileManifest(
+            "moderator_issue_extraction.yaml",
+            "moderator_agent",
+            "moderator_issue_extraction_output",
+            frozenset({"reader_initial_reports", "manuscript_segments"}),
+            frozenset(),
+            frozenset(
+                {
+                    "network",
+                    "credentials",
+                    "filesystem",
+                    "database",
+                    "orm",
+                    "document_service",
+                    "document_versions",
+                    "workflow_transitions",
+                    "vote",
+                    "cast_ballot",
+                }
+            ),
+            frozenset({"project_id", "chapter_id", "workflow_run_id"}),
+            frozenset(),
+        ),
+        ("moderator_agent", "discussion_summary"): _ProfileManifest(
+            "moderator_discussion_summary.yaml",
+            "moderator_agent",
+            "moderator_discussion_summary_output",
+            frozenset({"issue_context", "round_messages"}),
+            frozenset(),
+            frozenset(
+                {
+                    "network",
+                    "credentials",
+                    "filesystem",
+                    "database",
+                    "orm",
+                    "document_service",
+                    "document_versions",
+                    "workflow_transitions",
+                    "vote",
+                    "cast_ballot",
+                }
+            ),
+            frozenset({"project_id", "chapter_id", "workflow_run_id"}),
+            frozenset(),
+        ),
+        ("moderator_agent", "report_synthesis"): _ProfileManifest(
+            "moderator_report_synthesis.yaml",
+            "moderator_agent",
+            "moderator_report_synthesis_output",
+            frozenset({"initial_reports", "extracted_issues", "final_consensus_results", "minority_risk_issues"}),
+            frozenset(),
+            frozenset(
+                {
+                    "network",
+                    "credentials",
+                    "filesystem",
+                    "database",
+                    "orm",
+                    "document_service",
+                    "document_versions",
+                    "workflow_transitions",
+                    "vote",
+                    "cast_ballot",
+                }
+            ),
+            frozenset({"project_id", "chapter_id", "workflow_run_id"}),
             frozenset(),
         ),
     }

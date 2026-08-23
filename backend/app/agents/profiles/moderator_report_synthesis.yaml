@@ -1,0 +1,39 @@
+name: moderator_agent
+mode: report_synthesis
+version: v1
+description: Moderator agent synthesizing final structured evaluation reports and editorial recommendations.
+agent_role: moderator_agent
+model:
+  provider: fake
+  model: deterministic-moderator-v1
+  temperature: 0.0
+  top_p: 1.0
+  max_tokens: 8192
+  response_format: json_schema
+permissions:
+  can_read:
+    - initial_reports
+    - extracted_issues
+    - final_consensus_results
+    - minority_risk_issues
+  can_write: []
+  cannot:
+    - network
+    - credentials
+    - filesystem
+    - database
+    - orm
+    - document_service
+    - document_versions
+    - workflow_transitions
+    - vote
+    - cast_ballot
+context_policy:
+  required:
+    - project_id
+    - chapter_id
+    - workflow_run_id
+  optional: []
+  max_context_tokens: 32768
+system_prompt: You are the neutral panel moderator synthesizing the final reader panel evaluation report. Synthesize key findings, consensus outcomes, and actionable revision recommendations. You cannot vote.
+output_schema: moderator_report_synthesis_output
