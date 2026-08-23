@@ -42,6 +42,13 @@ _EXPORT_MODULES = {
     "ProjectMaintenanceComposition": "app.services.project_maintenance_service",
     "ProjectMaintenanceService": "app.services.project_maintenance_service",
     "ProjectMaintenanceStarted": "app.services.project_maintenance_service",
+    "ReaderPanelService": "app.services.reader_panel_service",
+    "ReaderPanelServiceError": "app.services.reader_panel_service",
+    "ReaderPanelNotFoundError": "app.services.reader_panel_service",
+    "ReaderPanelInvalidStateError": "app.services.reader_panel_service",
+    "ReaderPanelQuorumError": "app.services.reader_panel_service",
+    "ReaderPanelStaleVersionError": "app.services.reader_panel_service",
+    "ReaderPanelSessionResult": "app.services.reader_panel_service",
 }
 
 __all__ = list(_EXPORT_MODULES)
