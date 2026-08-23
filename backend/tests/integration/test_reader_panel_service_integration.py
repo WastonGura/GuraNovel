@@ -65,9 +65,10 @@ class TestReaderPanelServiceIntegration:
             type="chapter_draft",
             title="Chapter 1 Draft",
             path="chapters/001.md",
-            current_version_id=version_id,
+            current_version_id=None,
         )
         async_session.add(doc)
+        await async_session.flush()
 
         doc_version = DocumentVersion(
             id=version_id,
@@ -81,6 +82,9 @@ class TestReaderPanelServiceIntegration:
             metadata_={"segments": segments},
         )
         async_session.add(doc_version)
+        await async_session.flush()
+
+        doc.current_version_id = version_id
         await async_session.commit()
 
         # 1. Initialize session in standard mode
