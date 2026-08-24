@@ -1131,31 +1131,48 @@ class ReaderPanelService:
                 panel_session.degradation_reason = "reader_sample_degraded"
             await self._db.commit()
 
+            refreshed_session = (
+                (
+                    await self._db.execute(
+                        select(ReaderPanelSession)
+                        .options(
+                            selectinload(ReaderPanelSession.reader_runs).selectinload(
+                                ReaderRun.initial_report
+                            )
+                        )
+                        .where(ReaderPanelSession.id == session_id)
+                        .execution_options(populate_existing=True)
+                    )
+                )
+                .scalars()
+                .first()
+            )
+            if refreshed_session is None:
+                raise ReaderPanelNotFoundError()
+            refreshed_runs = list(refreshed_session.reader_runs)
             reports_data = [
                 {
                     "reader_profile_id": r.reader_profile_id,
-                    "overall_reaction": r.initial_report.overall_reaction
-                    if r.initial_report
-                    else "",
-                    "continue_reading": r.initial_report.continue_reading
-                    if r.initial_report
-                    else "maybe",
-                    "confidence": r.initial_report.confidence if r.initial_report else "medium",
+                    "overall_reaction": r.initial_report.overall_reaction,
+                    "continue_reading": r.initial_report.continue_reading,
+                    "confidence": r.initial_report.confidence,
                 }
-                for r in reader_runs
+                for r in refreshed_runs
                 if r.initial_report is not None
+                and r.initial_report.session_id == refreshed_session.id
+                and r.initial_report.reader_run_id == r.id
             ]
             return ReaderPanelSessionResult(
-                session_id=panel_session.id,
-                workflow_run_id=panel_session.workflow_run_id,
-                status=panel_session.status,
-                mode=panel_session.mode,
+                session_id=refreshed_session.id,
+                workflow_run_id=refreshed_session.workflow_run_id,
+                status=refreshed_session.status,
+                mode=refreshed_session.mode,
                 is_noop=False,
                 planned_readers=planned_count,
                 completed_readers=valid_count,
                 initial_reports_locked=True,
-                stale=panel_session.stale,
-                degradation_reason=panel_session.degradation_reason,
+                stale=refreshed_session.stale,
+                degradation_reason=refreshed_session.degradation_reason,
                 reports=reports_data,
             )
         else:

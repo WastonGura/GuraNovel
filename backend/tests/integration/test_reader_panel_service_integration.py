@@ -402,7 +402,24 @@ class TestReaderPanelServiceIntegration:
         assert dup_result.session_id == init_result.session_id
 
         # 3. Collect cold-read reports
-        provider = DeterministicReaderPanelProvider(scenario=ReaderPanelFakeScenario.CLEAN)
+        loop = asyncio.get_running_loop()
+
+        class ExpiringNestedRelationshipProvider(DeterministicReaderPanelProvider):
+            def generate_initial_reading(self, request):
+                output = super().generate_initial_reading(request)
+                expired = Event()
+
+                def expire_nested_relationships() -> None:
+                    for instance in list(async_session.identity_map.values()):
+                        if isinstance(instance, ReaderRun):
+                            async_session.expire(instance, ["initial_report"])
+                    expired.set()
+
+                loop.call_soon_threadsafe(expire_nested_relationships)
+                assert expired.wait(timeout=5)
+                return output
+
+        provider = ExpiringNestedRelationshipProvider(scenario=ReaderPanelFakeScenario.CLEAN)
         report_result = await service.collect_initial_reports(
             session_id=init_result.session_id,
             provider=provider,
