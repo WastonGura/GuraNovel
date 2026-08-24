@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections import defaultdict
+from datetime import datetime, timedelta, timezone
 import hashlib
+from threading import Event
 from typing import Any
 from uuid import UUID, uuid4
 import pytest
@@ -35,6 +38,7 @@ from app.models.reader_panel import (
     ReaderInitialReport,
     ReaderPanelBallot,
     ReaderPanelIssue,
+    ReaderPanelInvocation,
     ReaderPanelMessage,
     ReaderPanelSession,
     ReaderRun,
@@ -45,7 +49,13 @@ from app.services.reader_panel_service import (
     ReaderPanelQuorumError,
     ReaderPanelService,
 )
-from app.workflows.reader_panel import PanelMode, ReaderPanelStatus
+from app.workflows.reader_panel import PanelMode, ReaderPanelConfig, ReaderPanelStatus
+from app.llm.errors import (
+    ProviderConfigurationError,
+    ProviderRateLimitedError,
+    ProviderTimeoutError,
+    ProviderUnavailableError,
+)
 
 
 class FakeExecuteResult:
@@ -111,6 +121,8 @@ class FakeAsyncSession:
             return FakeExecuteResult(list(self.storage[ReaderPanelBallot].values()))
         elif "reader_panel_messages" in stmt_str:
             return FakeExecuteResult(list(self.storage[ReaderPanelMessage].values()))
+        elif "reader_panel_invocations" in stmt_str:
+            return FakeExecuteResult(list(self.storage[ReaderPanelInvocation].values()))
         elif "documents" in stmt_str:
             docs = list(self.storage[Document].values())
             return FakeExecuteResult(docs)
@@ -331,6 +343,986 @@ class TestReaderPanelServiceInitialization:
 
 @pytest.mark.anyio
 class TestReaderPanelColdReadingCollection:
+    async def test_elapsed_budget_stops_without_provider_call(
+        self,
+        fake_db_session: FakeAsyncSession,
+        test_project_id: UUID,
+        test_chapter_id: UUID,
+        test_document_id: UUID,
+        test_version_id: UUID,
+        sample_hash: str,
+        sample_segments: dict[str, str],
+    ) -> None:
+        setup_test_entities(
+            fake_db_session,
+            project_id=test_project_id,
+            chapter_id=test_chapter_id,
+            document_id=test_document_id,
+            version_id=test_version_id,
+            content_hash=sample_hash,
+            segments=sample_segments,
+        )
+        service = ReaderPanelService(fake_db_session)  # type: ignore[arg-type]
+        init = await service.initialize_session(
+            project_id=test_project_id, chapter_id=test_chapter_id, mode=PanelMode.QUICK
+        )
+        panel = await fake_db_session.get(ReaderPanelSession, init.session_id)
+        panel.reader_runs = list(fake_db_session.storage[ReaderRun].values())
+        panel.document = await fake_db_session.get(Document, test_document_id)
+        snapshot = dict(panel.config_snapshot)
+        snapshot["max_execution_seconds"] = 1
+        panel.config_snapshot = snapshot
+        panel.created_at = datetime.now(timezone.utc) - timedelta(seconds=2)
+
+        class MustNotRun:
+            calls = 0
+
+            def generate_initial_reading(self, request):
+                self.calls += 1
+
+        provider = MustNotRun()
+        with pytest.raises(ReaderPanelQuorumError):
+            await service.collect_initial_reports(session_id=panel.id, provider=provider)
+
+        assert provider.calls == 0
+        assert panel.failure_reason == "reader_sample_below_minimum"
+        assert not fake_db_session.storage[ReaderPanelInvocation]
+
+    async def test_version_change_during_provider_call_marks_stale_without_rebase(
+        self,
+        fake_db_session: FakeAsyncSession,
+        test_project_id: UUID,
+        test_chapter_id: UUID,
+        test_document_id: UUID,
+        test_version_id: UUID,
+        sample_hash: str,
+        sample_segments: dict[str, str],
+    ) -> None:
+        setup_test_entities(
+            fake_db_session,
+            project_id=test_project_id,
+            chapter_id=test_chapter_id,
+            document_id=test_document_id,
+            version_id=test_version_id,
+            content_hash=sample_hash,
+            segments=sample_segments,
+        )
+        service = ReaderPanelService(fake_db_session)  # type: ignore[arg-type]
+        init = await service.initialize_session(
+            project_id=test_project_id, chapter_id=test_chapter_id, mode=PanelMode.QUICK
+        )
+        panel = await fake_db_session.get(ReaderPanelSession, init.session_id)
+        panel.reader_runs = list(fake_db_session.storage[ReaderRun].values())
+        document = await fake_db_session.get(Document, test_document_id)
+        panel.document = document
+        later_version_id = uuid4()
+
+        class VersionRace(DeterministicReaderPanelProvider):
+            calls = 0
+
+            def generate_initial_reading(self, request):
+                self.calls += 1
+                if self.calls == 1:
+                    document.current_version_id = later_version_id
+                return super().generate_initial_reading(request)
+
+        result = await service.collect_initial_reports(
+            session_id=panel.id,
+            provider=VersionRace(scenario=ReaderPanelFakeScenario.CLEAN),
+        )
+
+        assert result.stale is True
+        assert panel.document_version_id == test_version_id
+        assert panel.source_hash == sample_hash
+
+    @pytest.mark.parametrize("error_type", [ProviderRateLimitedError, ProviderUnavailableError])
+    async def test_other_transient_failures_retry_once(
+        self,
+        error_type: type[Exception],
+        fake_db_session: FakeAsyncSession,
+        test_project_id: UUID,
+        test_chapter_id: UUID,
+        test_document_id: UUID,
+        test_version_id: UUID,
+        sample_hash: str,
+        sample_segments: dict[str, str],
+    ) -> None:
+        setup_test_entities(
+            fake_db_session,
+            project_id=test_project_id,
+            chapter_id=test_chapter_id,
+            document_id=test_document_id,
+            version_id=test_version_id,
+            content_hash=sample_hash,
+            segments=sample_segments,
+        )
+        service = ReaderPanelService(fake_db_session)  # type: ignore[arg-type]
+        init = await service.initialize_session(
+            project_id=test_project_id, chapter_id=test_chapter_id, mode=PanelMode.QUICK
+        )
+        panel = await fake_db_session.get(ReaderPanelSession, init.session_id)
+        panel.reader_runs = list(fake_db_session.storage[ReaderRun].values())
+        panel.document = await fake_db_session.get(Document, test_document_id)
+
+        class OnceTransient(DeterministicReaderPanelProvider):
+            calls = 0
+
+            def generate_initial_reading(self, request):
+                self.calls += 1
+                if self.calls == 1:
+                    raise error_type()
+                return super().generate_initial_reading(request)
+
+        provider = OnceTransient(scenario=ReaderPanelFakeScenario.CLEAN)
+        result = await service.collect_initial_reports(session_id=panel.id, provider=provider)
+
+        assert result.initial_reports_locked is True
+        attempts = list(fake_db_session.storage[ReaderPanelInvocation].values())
+        assert attempts[0].error_code in {"rate_limited", "unavailable"}
+
+    async def test_cancelled_error_propagates_and_settles_workflow(
+        self,
+        fake_db_session: FakeAsyncSession,
+        test_project_id: UUID,
+        test_chapter_id: UUID,
+        test_document_id: UUID,
+        test_version_id: UUID,
+        sample_hash: str,
+        sample_segments: dict[str, str],
+    ) -> None:
+        setup_test_entities(
+            fake_db_session,
+            project_id=test_project_id,
+            chapter_id=test_chapter_id,
+            document_id=test_document_id,
+            version_id=test_version_id,
+            content_hash=sample_hash,
+            segments=sample_segments,
+        )
+        service = ReaderPanelService(fake_db_session)  # type: ignore[arg-type]
+        init = await service.initialize_session(
+            project_id=test_project_id, chapter_id=test_chapter_id, mode=PanelMode.QUICK
+        )
+        panel = await fake_db_session.get(ReaderPanelSession, init.session_id)
+        panel.reader_runs = list(fake_db_session.storage[ReaderRun].values())
+        panel.document = await fake_db_session.get(Document, test_document_id)
+
+        class CancelledProvider:
+            def generate_initial_reading(self, request):
+                raise asyncio.CancelledError
+
+        with pytest.raises(asyncio.CancelledError):
+            await service.collect_initial_reports(session_id=panel.id, provider=CancelledProvider())
+
+        workflow = await fake_db_session.get(WorkflowRun, panel.workflow_run_id)
+        assert panel.status == ReaderPanelStatus.CANCELLED.value
+        assert workflow.status == ReaderPanelStatus.CANCELLED.value
+        attempt = next(iter(fake_db_session.storage[ReaderPanelInvocation].values()))
+        assert attempt.status == "cancelled"
+        assert attempt.error_code == "cancelled"
+
+    async def test_exact_call_budget_completes_minimum_sample_then_degrades(
+        self,
+        fake_db_session: FakeAsyncSession,
+        test_project_id: UUID,
+        test_chapter_id: UUID,
+        test_document_id: UUID,
+        test_version_id: UUID,
+        sample_hash: str,
+        sample_segments: dict[str, str],
+    ) -> None:
+        setup_test_entities(
+            fake_db_session,
+            project_id=test_project_id,
+            chapter_id=test_chapter_id,
+            document_id=test_document_id,
+            version_id=test_version_id,
+            content_hash=sample_hash,
+            segments=sample_segments,
+        )
+        config = ReaderPanelConfig(
+            mode=PanelMode.STANDARD,
+            reader_count=3,
+            reader_profile_ids=["general_immersive", "low_patience", "character_emotion"],
+            max_ballot_issues=1,
+            max_discussion_issues=0,
+            max_rounds_per_issue=0,
+            min_valid_readers=2,
+            max_total_model_calls=2,
+            max_model_calls_per_phase=2,
+            max_total_output_tokens=8192,
+        )
+        service = ReaderPanelService(fake_db_session)  # type: ignore[arg-type]
+        init = await service.initialize_session(
+            project_id=test_project_id,
+            chapter_id=test_chapter_id,
+            mode=PanelMode.STANDARD,
+            config=config,
+        )
+        panel = await fake_db_session.get(ReaderPanelSession, init.session_id)
+        panel.reader_runs = list(fake_db_session.storage[ReaderRun].values())
+        panel.document = await fake_db_session.get(Document, test_document_id)
+
+        result = await service.collect_initial_reports(
+            session_id=init.session_id,
+            provider=DeterministicReaderPanelProvider(scenario=ReaderPanelFakeScenario.CLEAN),
+        )
+
+        assert result.completed_readers == 2
+        assert result.degradation_reason == "reader_sample_degraded"
+        assert len(fake_db_session.storage[ReaderPanelInvocation]) == 2
+        assert (
+            sum(
+                item.output_tokens
+                for item in fake_db_session.storage[ReaderPanelInvocation].values()
+            )
+            == 8192
+        )
+
+    async def test_unknown_output_usage_is_reserved_and_oversize_fails_closed(
+        self,
+        fake_db_session: FakeAsyncSession,
+        test_project_id: UUID,
+        test_chapter_id: UUID,
+        test_document_id: UUID,
+        test_version_id: UUID,
+        sample_hash: str,
+        sample_segments: dict[str, str],
+    ) -> None:
+        setup_test_entities(
+            fake_db_session,
+            project_id=test_project_id,
+            chapter_id=test_chapter_id,
+            document_id=test_document_id,
+            version_id=test_version_id,
+            content_hash=sample_hash,
+            segments=sample_segments,
+        )
+        config = ReaderPanelConfig(
+            mode=PanelMode.QUICK,
+            reader_count=1,
+            reader_profile_ids=["general_immersive"],
+            max_ballot_issues=1,
+            max_discussion_issues=0,
+            max_rounds_per_issue=0,
+            min_valid_readers=1,
+            max_total_output_tokens=64,
+            max_output_tokens_per_call=64,
+        )
+        service = ReaderPanelService(fake_db_session)  # type: ignore[arg-type]
+        initialized = await service.initialize_session(
+            project_id=test_project_id,
+            chapter_id=test_chapter_id,
+            mode=PanelMode.QUICK,
+            config=config,
+        )
+        panel = await fake_db_session.get(ReaderPanelSession, initialized.session_id)
+        panel.reader_runs = list(fake_db_session.storage[ReaderRun].values())
+        panel.document = await fake_db_session.get(Document, test_document_id)
+
+        with pytest.raises(ReaderPanelQuorumError):
+            await service.collect_initial_reports(
+                session_id=panel.id,
+                provider=DeterministicReaderPanelProvider(scenario=ReaderPanelFakeScenario.CLEAN),
+            )
+
+        attempt = next(iter(fake_db_session.storage[ReaderPanelInvocation].values()))
+        assert attempt.status == "failed"
+        assert attempt.error_code == "budget_exhausted"
+        assert attempt.output_tokens == 64
+
+    async def test_started_attempt_becomes_unknown_commit_without_replay(
+        self,
+        fake_db_session: FakeAsyncSession,
+        test_project_id: UUID,
+        test_chapter_id: UUID,
+        test_document_id: UUID,
+        test_version_id: UUID,
+        sample_hash: str,
+        sample_segments: dict[str, str],
+    ) -> None:
+        setup_test_entities(
+            fake_db_session,
+            project_id=test_project_id,
+            chapter_id=test_chapter_id,
+            document_id=test_document_id,
+            version_id=test_version_id,
+            content_hash=sample_hash,
+            segments=sample_segments,
+        )
+        service = ReaderPanelService(fake_db_session)  # type: ignore[arg-type]
+        init = await service.initialize_session(
+            project_id=test_project_id, chapter_id=test_chapter_id, mode=PanelMode.QUICK
+        )
+        panel = await fake_db_session.get(ReaderPanelSession, init.session_id)
+        panel.reader_runs = list(fake_db_session.storage[ReaderRun].values())
+        panel.document = await fake_db_session.get(Document, test_document_id)
+        first_run = panel.reader_runs[0]
+        attempt = ReaderPanelInvocation(
+            id=uuid4(),
+            session_id=panel.id,
+            phase="initial_reading",
+            work_key=f"reader:{first_run.id}",
+            attempt=1,
+            status="started",
+            provider_calls=1,
+            input_tokens=1,
+            output_tokens=4096,
+        )
+        fake_db_session.add(attempt)
+
+        class MustNotRun:
+            calls = 0
+
+            def generate_initial_reading(self, request):
+                self.calls += 1
+                raise AssertionError("unknown outcome must not be replayed")
+
+        provider = MustNotRun()
+        with pytest.raises(ReaderPanelInvalidStateError):
+            await service.collect_initial_reports(session_id=panel.id, provider=provider)
+        with pytest.raises(ReaderPanelInvalidStateError):
+            await service.collect_initial_reports(session_id=panel.id, provider=provider)
+
+        assert provider.calls == 0
+        assert attempt.status == "unknown_commit"
+        assert attempt.error_code == "unknown_commit"
+
+    async def test_live_started_attempt_is_not_misclassified_or_replayed(
+        self,
+        fake_db_session: FakeAsyncSession,
+        test_project_id: UUID,
+        test_chapter_id: UUID,
+        test_document_id: UUID,
+        test_version_id: UUID,
+        sample_hash: str,
+        sample_segments: dict[str, str],
+    ) -> None:
+        setup_test_entities(
+            fake_db_session,
+            project_id=test_project_id,
+            chapter_id=test_chapter_id,
+            document_id=test_document_id,
+            version_id=test_version_id,
+            content_hash=sample_hash,
+            segments=sample_segments,
+        )
+        service = ReaderPanelService(fake_db_session)  # type: ignore[arg-type]
+        initialized = await service.initialize_session(
+            project_id=test_project_id, chapter_id=test_chapter_id, mode=PanelMode.QUICK
+        )
+        panel = await fake_db_session.get(ReaderPanelSession, initialized.session_id)
+        panel.reader_runs = list(fake_db_session.storage[ReaderRun].values())
+        panel.document = await fake_db_session.get(Document, test_document_id)
+        attempt = ReaderPanelInvocation(
+            id=uuid4(),
+            session_id=panel.id,
+            phase="initial_reading",
+            work_key=f"reader:{panel.reader_runs[0].id}",
+            attempt=1,
+            status="started",
+            provider_calls=1,
+            input_tokens=1,
+            output_tokens=4096,
+            started_at=datetime.now(timezone.utc),
+        )
+        fake_db_session.add(attempt)
+
+        class MustNotRun:
+            calls = 0
+
+            def generate_initial_reading(self, request):
+                self.calls += 1
+
+        provider = MustNotRun()
+        with pytest.raises(ReaderPanelInvalidStateError):
+            await service.collect_initial_reports(session_id=panel.id, provider=provider)
+
+        assert provider.calls == 0
+        assert attempt.status == "started"
+        assert attempt.error_code is None
+
+    async def test_late_provider_result_cannot_overwrite_attempt_status(
+        self,
+        fake_db_session: FakeAsyncSession,
+        test_project_id: UUID,
+        test_chapter_id: UUID,
+        test_document_id: UUID,
+        test_version_id: UUID,
+        sample_hash: str,
+        sample_segments: dict[str, str],
+    ) -> None:
+        setup_test_entities(
+            fake_db_session,
+            project_id=test_project_id,
+            chapter_id=test_chapter_id,
+            document_id=test_document_id,
+            version_id=test_version_id,
+            content_hash=sample_hash,
+            segments=sample_segments,
+        )
+        service = ReaderPanelService(fake_db_session)  # type: ignore[arg-type]
+        initialized = await service.initialize_session(
+            project_id=test_project_id, chapter_id=test_chapter_id, mode=PanelMode.QUICK
+        )
+        panel = await fake_db_session.get(ReaderPanelSession, initialized.session_id)
+        panel.reader_runs = list(fake_db_session.storage[ReaderRun].values())
+        panel.document = await fake_db_session.get(Document, test_document_id)
+
+        class LateResult(DeterministicReaderPanelProvider):
+            def generate_initial_reading(self, request):
+                attempt = next(iter(fake_db_session.storage[ReaderPanelInvocation].values()))
+                attempt.status = "cancelled"
+                attempt.error_code = "cancelled"
+                return super().generate_initial_reading(request)
+
+        with pytest.raises(ReaderPanelInvalidStateError):
+            await service.collect_initial_reports(
+                session_id=panel.id,
+                provider=LateResult(scenario=ReaderPanelFakeScenario.CLEAN),
+            )
+
+        attempt = next(iter(fake_db_session.storage[ReaderPanelInvocation].values()))
+        assert attempt.status == "cancelled"
+        assert not fake_db_session.storage[ReaderInitialReport]
+
+    async def test_failed_settlement_terminates_every_started_invocation(
+        self,
+        fake_db_session: FakeAsyncSession,
+        test_project_id: UUID,
+        test_chapter_id: UUID,
+        test_document_id: UUID,
+        test_version_id: UUID,
+        sample_hash: str,
+        sample_segments: dict[str, str],
+    ) -> None:
+        setup_test_entities(
+            fake_db_session,
+            project_id=test_project_id,
+            chapter_id=test_chapter_id,
+            document_id=test_document_id,
+            version_id=test_version_id,
+            content_hash=sample_hash,
+            segments=sample_segments,
+        )
+        service = ReaderPanelService(fake_db_session)  # type: ignore[arg-type]
+        initialized = await service.initialize_session(
+            project_id=test_project_id, chapter_id=test_chapter_id, mode=PanelMode.QUICK
+        )
+        panel = await fake_db_session.get(ReaderPanelSession, initialized.session_id)
+        panel.reader_runs = list(fake_db_session.storage[ReaderRun].values())
+        for run in panel.reader_runs:
+            fake_db_session.add(
+                ReaderPanelInvocation(
+                    id=uuid4(),
+                    session_id=panel.id,
+                    phase="initial_reading",
+                    work_key=f"reader:{run.id}",
+                    attempt=1,
+                    status="started",
+                    provider_calls=1,
+                    input_tokens=1,
+                    output_tokens=1,
+                )
+            )
+
+        locked = await service._locked_session(panel.id)
+        await service._settle_failed(locked, "reader_sample_below_minimum")
+        await fake_db_session.commit()
+
+        attempts = list(fake_db_session.storage[ReaderPanelInvocation].values())
+        assert attempts
+        assert all(item.status == "cancelled" for item in attempts)
+        assert all(item.error_code == "cancelled" for item in attempts)
+
+    async def test_provider_result_after_failed_session_is_discarded(
+        self,
+        fake_db_session: FakeAsyncSession,
+        test_project_id: UUID,
+        test_chapter_id: UUID,
+        test_document_id: UUID,
+        test_version_id: UUID,
+        sample_hash: str,
+        sample_segments: dict[str, str],
+    ) -> None:
+        setup_test_entities(
+            fake_db_session,
+            project_id=test_project_id,
+            chapter_id=test_chapter_id,
+            document_id=test_document_id,
+            version_id=test_version_id,
+            content_hash=sample_hash,
+            segments=sample_segments,
+        )
+        service = ReaderPanelService(fake_db_session)  # type: ignore[arg-type]
+        initialized = await service.initialize_session(
+            project_id=test_project_id, chapter_id=test_chapter_id, mode=PanelMode.QUICK
+        )
+        panel = await fake_db_session.get(ReaderPanelSession, initialized.session_id)
+        panel.reader_runs = list(fake_db_session.storage[ReaderRun].values())
+        panel.document = await fake_db_session.get(Document, test_document_id)
+        workflow = await fake_db_session.get(WorkflowRun, panel.workflow_run_id)
+
+        class FailWhileProviderRuns(DeterministicReaderPanelProvider):
+            def generate_initial_reading(self, request):
+                panel.status = ReaderPanelStatus.FAILED.value
+                workflow.status = ReaderPanelStatus.FAILED.value
+                return super().generate_initial_reading(request)
+
+        with pytest.raises(ReaderPanelInvalidStateError):
+            await service.collect_initial_reports(
+                session_id=panel.id,
+                provider=FailWhileProviderRuns(scenario=ReaderPanelFakeScenario.CLEAN),
+            )
+
+        attempt = next(iter(fake_db_session.storage[ReaderPanelInvocation].values()))
+        assert attempt.status == "cancelled"
+        assert attempt.error_code == "cancelled"
+        assert not fake_db_session.storage[ReaderInitialReport]
+
+    async def test_provider_return_after_elapsed_deadline_is_discarded(
+        self,
+        fake_db_session: FakeAsyncSession,
+        test_project_id: UUID,
+        test_chapter_id: UUID,
+        test_document_id: UUID,
+        test_version_id: UUID,
+        sample_hash: str,
+        sample_segments: dict[str, str],
+    ) -> None:
+        setup_test_entities(
+            fake_db_session,
+            project_id=test_project_id,
+            chapter_id=test_chapter_id,
+            document_id=test_document_id,
+            version_id=test_version_id,
+            content_hash=sample_hash,
+            segments=sample_segments,
+        )
+        service = ReaderPanelService(fake_db_session)  # type: ignore[arg-type]
+        initialized = await service.initialize_session(
+            project_id=test_project_id, chapter_id=test_chapter_id, mode=PanelMode.QUICK
+        )
+        panel = await fake_db_session.get(ReaderPanelSession, initialized.session_id)
+        panel.reader_runs = list(fake_db_session.storage[ReaderRun].values())
+        panel.document = await fake_db_session.get(Document, test_document_id)
+        snapshot = dict(panel.config_snapshot)
+        snapshot["max_execution_seconds"] = 1
+        panel.config_snapshot = snapshot
+
+        class CrossDeadline(DeterministicReaderPanelProvider):
+            def generate_initial_reading(self, request):
+                panel.created_at = datetime.now(timezone.utc) - timedelta(seconds=2)
+                return super().generate_initial_reading(request)
+
+        with pytest.raises(ReaderPanelQuorumError):
+            await service.collect_initial_reports(
+                session_id=panel.id,
+                provider=CrossDeadline(scenario=ReaderPanelFakeScenario.CLEAN),
+            )
+
+        assert not fake_db_session.storage[ReaderInitialReport]
+        attempt = next(iter(fake_db_session.storage[ReaderPanelInvocation].values()))
+        assert attempt.status == "failed"
+        assert attempt.error_code == "budget_exhausted"
+
+    async def test_task_cancel_during_sync_provider_settles_attempt(
+        self,
+        fake_db_session: FakeAsyncSession,
+        test_project_id: UUID,
+        test_chapter_id: UUID,
+        test_document_id: UUID,
+        test_version_id: UUID,
+        sample_hash: str,
+        sample_segments: dict[str, str],
+    ) -> None:
+        setup_test_entities(
+            fake_db_session,
+            project_id=test_project_id,
+            chapter_id=test_chapter_id,
+            document_id=test_document_id,
+            version_id=test_version_id,
+            content_hash=sample_hash,
+            segments=sample_segments,
+        )
+        service = ReaderPanelService(fake_db_session)  # type: ignore[arg-type]
+        initialized = await service.initialize_session(
+            project_id=test_project_id, chapter_id=test_chapter_id, mode=PanelMode.QUICK
+        )
+        panel = await fake_db_session.get(ReaderPanelSession, initialized.session_id)
+        panel.reader_runs = list(fake_db_session.storage[ReaderRun].values())
+        panel.document = await fake_db_session.get(Document, test_document_id)
+
+        started = Event()
+        release = Event()
+
+        class BlockingProvider(DeterministicReaderPanelProvider):
+            def generate_initial_reading(self, request):
+                started.set()
+                assert release.wait(timeout=5)
+                return super().generate_initial_reading(request)
+
+        task = asyncio.create_task(
+            service.collect_initial_reports(
+                session_id=panel.id,
+                provider=BlockingProvider(scenario=ReaderPanelFakeScenario.CLEAN),
+            )
+        )
+        assert await asyncio.to_thread(started.wait, 5)
+        task.cancel()
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        attempt = next(iter(fake_db_session.storage[ReaderPanelInvocation].values()))
+        assert attempt.status == "cancelled"
+        assert panel.status == ReaderPanelStatus.CANCELLED.value
+        assert not fake_db_session.storage[ReaderInitialReport]
+
+    async def test_timeout_retries_are_bounded_and_safely_accounted(
+        self,
+        fake_db_session: FakeAsyncSession,
+        test_project_id: UUID,
+        test_chapter_id: UUID,
+        test_document_id: UUID,
+        test_version_id: UUID,
+        sample_hash: str,
+        sample_segments: dict[str, str],
+    ) -> None:
+        setup_test_entities(
+            fake_db_session,
+            project_id=test_project_id,
+            chapter_id=test_chapter_id,
+            document_id=test_document_id,
+            version_id=test_version_id,
+            content_hash=sample_hash,
+            segments=sample_segments,
+        )
+        service = ReaderPanelService(fake_db_session)  # type: ignore[arg-type]
+        init = await service.initialize_session(
+            project_id=test_project_id, chapter_id=test_chapter_id, mode=PanelMode.QUICK
+        )
+        panel = await fake_db_session.get(ReaderPanelSession, init.session_id)
+        panel.reader_runs = list(fake_db_session.storage[ReaderRun].values())
+        panel.document = await fake_db_session.get(Document, test_document_id)
+
+        class OnceTimeout(DeterministicReaderPanelProvider):
+            calls = 0
+
+            def generate_initial_reading(self, request):
+                self.calls += 1
+                if self.calls == 1:
+                    raise ProviderTimeoutError()
+                return super().generate_initial_reading(request)
+
+        provider = OnceTimeout(scenario=ReaderPanelFakeScenario.CLEAN)
+        result = await service.collect_initial_reports(
+            session_id=init.session_id, provider=provider
+        )
+
+        assert result.initial_reports_locked is True
+        invocations = list(fake_db_session.storage[ReaderPanelInvocation].values())
+        assert [item.status for item in invocations].count("failed") == 1
+        assert [item.status for item in invocations].count("succeeded") == 2
+        assert invocations[0].error_code == "timeout"
+        assert all(item.input_tokens > 0 and item.output_tokens > 0 for item in invocations)
+
+    async def test_configuration_error_is_not_retried_or_leaked(
+        self,
+        fake_db_session: FakeAsyncSession,
+        test_project_id: UUID,
+        test_chapter_id: UUID,
+        test_document_id: UUID,
+        test_version_id: UUID,
+        sample_hash: str,
+        sample_segments: dict[str, str],
+    ) -> None:
+        setup_test_entities(
+            fake_db_session,
+            project_id=test_project_id,
+            chapter_id=test_chapter_id,
+            document_id=test_document_id,
+            version_id=test_version_id,
+            content_hash=sample_hash,
+            segments=sample_segments,
+        )
+        config = ReaderPanelConfig(
+            mode=PanelMode.QUICK,
+            reader_count=1,
+            reader_profile_ids=["general_immersive"],
+            max_ballot_issues=1,
+            max_discussion_issues=1,
+            max_rounds_per_issue=1,
+            min_valid_readers=1,
+        )
+        service = ReaderPanelService(fake_db_session)  # type: ignore[arg-type]
+        init = await service.initialize_session(
+            project_id=test_project_id,
+            chapter_id=test_chapter_id,
+            mode=PanelMode.QUICK,
+            config=config,
+        )
+        panel = await fake_db_session.get(ReaderPanelSession, init.session_id)
+        panel.reader_runs = list(fake_db_session.storage[ReaderRun].values())
+        panel.document = await fake_db_session.get(Document, test_document_id)
+
+        class Misconfigured:
+            calls = 0
+
+            def generate_initial_reading(self, request):
+                self.calls += 1
+                raise ProviderConfigurationError()
+
+        provider = Misconfigured()
+        with pytest.raises(ReaderPanelQuorumError):
+            await service.collect_initial_reports(session_id=init.session_id, provider=provider)
+
+        assert provider.calls == 1
+        attempt = next(iter(fake_db_session.storage[ReaderPanelInvocation].values()))
+        assert attempt.error_code == "configuration"
+        assert panel.failure_reason == "reader_sample_below_minimum"
+        run = next(iter(fake_db_session.storage[ReaderRun].values()))
+        assert run.error_code == "configuration"
+        assert run.error_message is None
+
+        replay = await service.resume_session(session_id=panel.id, provider=provider)
+
+        assert replay.status == ReaderPanelStatus.FAILED.value
+        assert provider.calls == 1
+        assert len(fake_db_session.storage[ReaderPanelInvocation]) == 1
+
+    @pytest.mark.parametrize("error_code", ["configuration", "unknown"])
+    async def test_persisted_nonretryable_work_is_not_reinvoked_while_nonterminal(
+        self,
+        fake_db_session: FakeAsyncSession,
+        test_project_id: UUID,
+        test_chapter_id: UUID,
+        test_document_id: UUID,
+        test_version_id: UUID,
+        sample_hash: str,
+        sample_segments: dict[str, str],
+        error_code: str,
+    ) -> None:
+        setup_test_entities(
+            fake_db_session,
+            project_id=test_project_id,
+            chapter_id=test_chapter_id,
+            document_id=test_document_id,
+            version_id=test_version_id,
+            content_hash=sample_hash,
+            segments=sample_segments,
+        )
+        config = ReaderPanelConfig(
+            mode=PanelMode.QUICK,
+            reader_count=1,
+            reader_profile_ids=["general_immersive"],
+            max_ballot_issues=1,
+            max_discussion_issues=0,
+            max_rounds_per_issue=0,
+            min_valid_readers=1,
+        )
+        service = ReaderPanelService(fake_db_session)  # type: ignore[arg-type]
+        initialized = await service.initialize_session(
+            project_id=test_project_id,
+            chapter_id=test_chapter_id,
+            mode=PanelMode.QUICK,
+            config=config,
+        )
+        panel = await fake_db_session.get(ReaderPanelSession, initialized.session_id)
+        panel.reader_runs = list(fake_db_session.storage[ReaderRun].values())
+        panel.document = await fake_db_session.get(Document, test_document_id)
+        run = panel.reader_runs[0]
+        fake_db_session.add(
+            ReaderPanelInvocation(
+                id=uuid4(),
+                session_id=panel.id,
+                phase="initial_reading",
+                work_key=f"reader:{run.id}",
+                attempt=1,
+                status="failed",
+                error_code=error_code,
+                provider_calls=1,
+                input_tokens=1,
+                output_tokens=1,
+                completed_at=datetime.now(timezone.utc),
+            )
+        )
+
+        class MustNotRun:
+            calls = 0
+
+            def generate_initial_reading(self, request):
+                self.calls += 1
+                raise AssertionError("persisted non-retryable work must not be invoked")
+
+        provider = MustNotRun()
+        with pytest.raises(ReaderPanelQuorumError):
+            await service.collect_initial_reports(session_id=panel.id, provider=provider)
+
+        assert provider.calls == 0
+        assert len(fake_db_session.storage[ReaderPanelInvocation]) == 1
+        assert run.error_code == error_code
+
+    async def test_provider_result_after_cancel_is_not_persisted(
+        self,
+        fake_db_session: FakeAsyncSession,
+        test_project_id: UUID,
+        test_chapter_id: UUID,
+        test_document_id: UUID,
+        test_version_id: UUID,
+        sample_hash: str,
+        sample_segments: dict[str, str],
+    ) -> None:
+        setup_test_entities(
+            fake_db_session,
+            project_id=test_project_id,
+            chapter_id=test_chapter_id,
+            document_id=test_document_id,
+            version_id=test_version_id,
+            content_hash=sample_hash,
+            segments=sample_segments,
+        )
+        service = ReaderPanelService(fake_db_session)  # type: ignore[arg-type]
+        init = await service.initialize_session(
+            project_id=test_project_id, chapter_id=test_chapter_id, mode=PanelMode.QUICK
+        )
+        panel = await fake_db_session.get(ReaderPanelSession, init.session_id)
+        panel.reader_runs = list(fake_db_session.storage[ReaderRun].values())
+        panel.document = await fake_db_session.get(Document, test_document_id)
+
+        class CancelDuringCall(DeterministicReaderPanelProvider):
+            def generate_initial_reading(self, request):
+                panel.status = ReaderPanelStatus.CANCELLED.value
+                return super().generate_initial_reading(request)
+
+        with pytest.raises(ReaderPanelInvalidStateError):
+            await service.collect_initial_reports(
+                session_id=init.session_id,
+                provider=CancelDuringCall(scenario=ReaderPanelFakeScenario.CLEAN),
+            )
+
+        assert not fake_db_session.storage[ReaderInitialReport]
+        attempt = next(iter(fake_db_session.storage[ReaderPanelInvocation].values()))
+        assert attempt.status == "cancelled"
+
+
+@pytest.mark.anyio
+class TestReaderPanelRecoveryControls:
+    async def test_cancel_is_idempotent_and_content_light(
+        self, fake_db_session: FakeAsyncSession
+    ) -> None:
+        session = ReaderPanelSession(
+            id=uuid4(),
+            project_id=uuid4(),
+            chapter_id=uuid4(),
+            workflow_run_id=uuid4(),
+            document_id=uuid4(),
+            document_version_id=uuid4(),
+            source_hash="a" * 64,
+            mode="quick",
+            status=ReaderPanelStatus.INDEPENDENT_READING.value,
+            config_snapshot={},
+            model_snapshot={},
+            prompt_snapshot={},
+            target_audience=[],
+            test_goals=[],
+        )
+        fake_db_session.add(session)
+        service = ReaderPanelService(fake_db_session)  # type: ignore[arg-type]
+
+        first = await service.cancel_session(session_id=session.id)
+        second = await service.cancel_session(session_id=session.id)
+
+        assert first.status == second.status == ReaderPanelStatus.CANCELLED.value
+        events = list(fake_db_session.storage[WorkflowEvent].values())
+        assert len(events) == 1
+        assert set(events[0].payload) == {"session_id", "status", "reason_code"}
+
+    async def test_resume_dispatches_from_each_persisted_phase(
+        self, fake_db_session: FakeAsyncSession, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        session = ReaderPanelSession(
+            id=uuid4(),
+            project_id=uuid4(),
+            chapter_id=uuid4(),
+            workflow_run_id=uuid4(),
+            document_id=uuid4(),
+            document_version_id=uuid4(),
+            source_hash="a" * 64,
+            mode="quick",
+            status=ReaderPanelStatus.ISSUE_EXTRACTION.value,
+            config_snapshot={},
+            model_snapshot={},
+            prompt_snapshot={},
+            target_audience=[],
+            test_goals=[],
+        )
+        fake_db_session.add(session)
+        service = ReaderPanelService(fake_db_session)  # type: ignore[arg-type]
+        called: list[str] = []
+
+        async def reports(**kwargs):
+            called.append("reports")
+            return ReaderPanelSessionResult(
+                session_id=session.id,
+                workflow_run_id=session.workflow_run_id,
+                status=session.status,
+                mode=session.mode,
+            )
+
+        async def ballots(**kwargs):
+            called.append("ballots")
+            return ReaderPanelSessionResult(
+                session_id=session.id,
+                workflow_run_id=session.workflow_run_id,
+                status=session.status,
+                mode=session.mode,
+            )
+
+        async def discussion(**kwargs):
+            called.append("discussion")
+            return ReaderPanelSessionResult(
+                session_id=session.id,
+                workflow_run_id=session.workflow_run_id,
+                status=session.status,
+                mode=session.mode,
+            )
+
+        async def report(**kwargs):
+            called.append("report")
+            return ReaderPanelSessionResult(
+                session_id=session.id,
+                workflow_run_id=session.workflow_run_id,
+                status=session.status,
+                mode=session.mode,
+            )
+
+        from app.services.reader_panel_service import ReaderPanelSessionResult
+
+        monkeypatch.setattr(service, "collect_initial_reports", reports)
+        monkeypatch.setattr(service, "collect_initial_ballots", ballots)
+        monkeypatch.setattr(service, "run_discussion_and_final_ballots", discussion)
+        monkeypatch.setattr(service, "generate_editor_handoff_report", report)
+
+        expected = {
+            ReaderPanelStatus.CREATED.value: "reports",
+            ReaderPanelStatus.PREPARING.value: "reports",
+            ReaderPanelStatus.INDEPENDENT_READING.value: "reports",
+            ReaderPanelStatus.INITIAL_REPORTS_LOCKED.value: "ballots",
+            ReaderPanelStatus.ISSUE_EXTRACTION.value: "ballots",
+            ReaderPanelStatus.INITIAL_BALLOTING.value: "ballots",
+            ReaderPanelStatus.INITIAL_BALLOTS_LOCKED.value: "discussion",
+            ReaderPanelStatus.DISCUSSING.value: "discussion",
+            ReaderPanelStatus.FINAL_BALLOTING.value: "discussion",
+            ReaderPanelStatus.FINAL_BALLOTS_LOCKED.value: "report",
+            ReaderPanelStatus.REPORT_GENERATING.value: "report",
+        }
+        for persisted_status, target in expected.items():
+            session.status = persisted_status
+            called.clear()
+            await service.resume_session(session_id=session.id, provider=object())
+            assert called == [target]
+
     async def test_collect_initial_reports_locks_valid_quorum(
         self,
         fake_db_session: FakeAsyncSession,
@@ -479,6 +1471,12 @@ class TestReaderPanelColdReadingCollection:
         db_session_obj = await fake_db_session.get(ReaderPanelSession, init_res.session_id)
         assert db_session_obj.status == ReaderPanelStatus.FAILED.value
         assert db_session_obj.failure_reason is not None
+        assert db_session_obj.current_step == ReaderPanelStatus.FAILED.value
+        assert db_session_obj.completed_at is not None
+        workflow = await fake_db_session.get(WorkflowRun, db_session_obj.workflow_run_id)
+        assert workflow.status == ReaderPanelStatus.FAILED.value
+        assert workflow.current_node == ReaderPanelStatus.FAILED.value
+        assert workflow.completed_at == db_session_obj.completed_at
 
     async def test_staleness_reconciled_when_chapter_version_changes(
         self,
@@ -575,6 +1573,7 @@ async def setup_locked_panel(
     version_id: UUID,
     content_hash: str,
     segments: dict[str, str],
+    mode: PanelMode = PanelMode.QUICK,
 ) -> tuple[ReaderPanelService, ReaderPanelSession]:
     setup_test_entities(
         db,
@@ -589,7 +1588,7 @@ async def setup_locked_panel(
     initialized = await service.initialize_session(
         project_id=project_id,
         chapter_id=chapter_id,
-        mode=PanelMode.QUICK,
+        mode=mode,
     )
     panel_session = await db.get(ReaderPanelSession, initialized.session_id)
     panel_session.reader_runs = list(db.storage[ReaderRun].values())
@@ -604,6 +1603,114 @@ async def setup_locked_panel(
 
 @pytest.mark.anyio
 class TestReaderPanelInitialBallots:
+    async def test_permanent_reader_failure_degrades_and_locks_remaining_quorum(
+        self,
+        fake_db_session: FakeAsyncSession,
+        test_project_id: UUID,
+        test_chapter_id: UUID,
+        test_document_id: UUID,
+        test_version_id: UUID,
+        sample_hash: str,
+        sample_segments: dict[str, str],
+    ) -> None:
+        service, panel_session = await setup_locked_panel(
+            fake_db_session,
+            project_id=test_project_id,
+            chapter_id=test_chapter_id,
+            document_id=test_document_id,
+            version_id=test_version_id,
+            content_hash=sample_hash,
+            segments=sample_segments,
+            mode=PanelMode.STANDARD,
+        )
+        failed_run = panel_session.reader_runs[-1]
+        issue = ExtractedIssueItem(
+            issue_number=1,
+            title="Unclear opening",
+            category="clarity",
+            symptom="The opening link is unclear.",
+            root_cause_hypotheses=["Missing transition"],
+            evidence=[{"segment_ids": ["S001"], "note": "Opening."}],
+            source_reader_ids=[panel_session.reader_runs[0].reader_profile_id],
+        )
+
+        class OnePermanentFailure(RecordingBallotProvider):
+            failed_calls = 0
+
+            def generate_blind_ballot(self, request: Any) -> ReaderBallotOutput:
+                if request.reader_profile_id == failed_run.reader_profile_id:
+                    self.failed_calls += 1
+                    raise ProviderConfigurationError()
+                return super().generate_blind_ballot(request)
+
+        provider = OnePermanentFailure([issue])
+        result = await service.collect_initial_ballots(
+            session_id=panel_session.id,
+            provider=provider,
+        )
+
+        assert provider.failed_calls == 1
+        assert failed_run.status == "failed"
+        assert failed_run.error_code == "configuration"
+        assert result.initial_ballots_locked is True
+        assert result.initial_ballot_count == 3
+        assert result.degradation_reason == "reader_sample_degraded"
+        assert panel_session.status == ReaderPanelStatus.INITIAL_BALLOTS_LOCKED.value
+
+    async def test_permanent_reader_failure_below_minimum_fails_panel_and_workflow(
+        self,
+        fake_db_session: FakeAsyncSession,
+        test_project_id: UUID,
+        test_chapter_id: UUID,
+        test_document_id: UUID,
+        test_version_id: UUID,
+        sample_hash: str,
+        sample_segments: dict[str, str],
+    ) -> None:
+        service, panel_session = await setup_locked_panel(
+            fake_db_session,
+            project_id=test_project_id,
+            chapter_id=test_chapter_id,
+            document_id=test_document_id,
+            version_id=test_version_id,
+            content_hash=sample_hash,
+            segments=sample_segments,
+        )
+        failed_run = panel_session.reader_runs[-1]
+        issue = ExtractedIssueItem(
+            issue_number=1,
+            title="Unclear opening",
+            category="clarity",
+            symptom="The opening link is unclear.",
+            root_cause_hypotheses=["Missing transition"],
+            evidence=[{"segment_ids": ["S001"], "note": "Opening."}],
+            source_reader_ids=[panel_session.reader_runs[0].reader_profile_id],
+        )
+
+        class OnePermanentFailure(RecordingBallotProvider):
+            def generate_blind_ballot(self, request: Any) -> ReaderBallotOutput:
+                if request.reader_profile_id == failed_run.reader_profile_id:
+                    raise ProviderConfigurationError()
+                return super().generate_blind_ballot(request)
+
+        try:
+            await service.collect_initial_ballots(
+                session_id=panel_session.id,
+                provider=OnePermanentFailure([issue]),
+            )
+        except (ReaderPanelQuorumError, ReaderPanelInvalidStateError):
+            pass
+
+        workflow = await fake_db_session.get(WorkflowRun, panel_session.workflow_run_id)
+        assert failed_run.status == "failed"
+        assert failed_run.error_code == "configuration"
+        assert panel_session.status == ReaderPanelStatus.FAILED.value
+        assert panel_session.current_step == ReaderPanelStatus.FAILED.value
+        assert panel_session.completed_at is not None
+        assert workflow.status == ReaderPanelStatus.FAILED.value
+        assert workflow.current_node == ReaderPanelStatus.FAILED.value
+        assert workflow.completed_at == panel_session.completed_at
+
     async def test_requires_locked_reports_before_any_provider_or_write(
         self,
         fake_db_session: FakeAsyncSession,
@@ -781,7 +1888,7 @@ class TestReaderPanelDiscussionBoundsAndAgenda:
             for issue in fake_db_session.storage[ReaderPanelIssue].values()
         )
 
-    async def test_malformed_discussion_turn_retries_once_and_remains_incomplete(
+    async def test_malformed_discussion_turn_exhaustion_fails_below_minimum(
         self,
         fake_db_session: FakeAsyncSession,
         test_project_id: UUID,
@@ -808,15 +1915,15 @@ class TestReaderPanelDiscussionBoundsAndAgenda:
                 return object()
 
         provider = MalformedDiscussionProvider(fake_db_session)
-        result = await service.run_discussion_and_final_ballots(
-            session_id=panel_session.id,
-            provider=provider,
-        )
+        with pytest.raises(ReaderPanelInvalidStateError):
+            await service.run_discussion_and_final_ballots(
+                session_id=panel_session.id,
+                provider=provider,
+            )
 
         assert len(provider.turn_requests) == 2
-        assert result.status == ReaderPanelStatus.DISCUSSING.value
-        assert result.discussion_message_count == 0
-        assert result.final_ballot_count == 0
+        assert panel_session.status == ReaderPanelStatus.FAILED.value
+        assert panel_session.failure_reason == "discussion_sample_below_minimum"
         assert panel_session.final_ballots_locked_at is None
 
     async def test_agenda_prefers_server_owned_initial_severity(
@@ -1035,6 +2142,101 @@ async def setup_initial_ballots_locked(
 
 @pytest.mark.anyio
 class TestReaderPanelDiscussionAndFinalBallots:
+    async def test_permanent_moderator_summary_failure_terminates_panel_and_workflow(
+        self,
+        fake_db_session: FakeAsyncSession,
+        test_project_id: UUID,
+        test_chapter_id: UUID,
+        test_document_id: UUID,
+        test_version_id: UUID,
+        sample_hash: str,
+        sample_segments: dict[str, str],
+    ) -> None:
+        service, panel_session = await setup_initial_ballots_locked(
+            fake_db_session,
+            project_id=test_project_id,
+            chapter_id=test_chapter_id,
+            document_id=test_document_id,
+            version_id=test_version_id,
+            content_hash=sample_hash,
+            segments=sample_segments,
+        )
+
+        class PermanentSummaryFailure(RecordingDiscussionProvider):
+            def summarize_discussion(self, request: Any) -> ModeratorDiscussionSummaryOutput:
+                self.summary_requests.append(request)
+                raise ProviderConfigurationError()
+
+        provider = PermanentSummaryFailure(fake_db_session)
+        try:
+            await service.run_discussion_and_final_ballots(
+                session_id=panel_session.id,
+                provider=provider,
+            )
+        except ReaderPanelInvalidStateError:
+            pass
+
+        workflow = await fake_db_session.get(WorkflowRun, panel_session.workflow_run_id)
+        assert len(provider.summary_requests) == 1
+        assert panel_session.status == ReaderPanelStatus.FAILED.value
+        assert panel_session.current_step == ReaderPanelStatus.FAILED.value
+        assert panel_session.completed_at is not None
+        assert workflow.status == ReaderPanelStatus.FAILED.value
+        assert workflow.current_node == ReaderPanelStatus.FAILED.value
+        assert workflow.completed_at == panel_session.completed_at
+
+    async def test_each_ballot_is_committed_with_its_success_before_next_claim(
+        self,
+        fake_db_session: FakeAsyncSession,
+        test_project_id: UUID,
+        test_chapter_id: UUID,
+        test_document_id: UUID,
+        test_version_id: UUID,
+        sample_hash: str,
+        sample_segments: dict[str, str],
+    ) -> None:
+        service, panel_session = await setup_locked_panel(
+            fake_db_session,
+            project_id=test_project_id,
+            chapter_id=test_chapter_id,
+            document_id=test_document_id,
+            version_id=test_version_id,
+            content_hash=sample_hash,
+            segments=sample_segments,
+        )
+        issue = ExtractedIssueItem(
+            issue_number=1,
+            title="Opening clarity",
+            category="clarity",
+            symptom="The opening link is unclear.",
+            root_cause_hypotheses=["Missing transition"],
+            evidence=[{"segment_ids": ["S001"], "note": "Opening."}],
+            source_reader_ids=[panel_session.reader_runs[0].reader_profile_id],
+        )
+
+        class CrashBoundaryProvider(RecordingBallotProvider):
+            ballot_calls = 0
+            observed_committed = False
+
+            def generate_blind_ballot(self, request):
+                self.ballot_calls += 1
+                if self.ballot_calls == 2:
+                    ballots = list(fake_db_session.storage[ReaderPanelBallot].values())
+                    invocations = list(fake_db_session.storage[ReaderPanelInvocation].values())
+                    self.observed_committed = len(ballots) == 1 and any(
+                        item.phase == "initial_ballot" and item.status == "succeeded"
+                        for item in invocations
+                    )
+                return super().generate_blind_ballot(request)
+
+        provider = CrashBoundaryProvider([issue])
+        await service.collect_initial_ballots(
+            session_id=panel_session.id,
+            provider=provider,
+        )
+
+        assert provider.observed_committed is True
+
     async def test_discusses_issue_in_isolation_and_locks_immutable_final_ballots(
         self,
         fake_db_session: FakeAsyncSession,
@@ -1173,7 +2375,7 @@ class TestReaderPanelDiscussionAndFinalBallots:
             len(fake_db_session.storage[WorkflowEvent]),
         )
 
-    async def test_malformed_final_ballot_remains_missing_and_phase_unlocked(
+    async def test_malformed_final_ballot_exhaustion_fails_below_minimum(
         self,
         fake_db_session: FakeAsyncSession,
         test_project_id: UUID,
@@ -1198,23 +2400,24 @@ class TestReaderPanelDiscussionAndFinalBallots:
             malformed_final_profile=missing_profile,
         )
 
-        result = await service.run_discussion_and_final_ballots(
-            session_id=panel_session.id,
-            provider=provider,
-        )
+        with pytest.raises(ReaderPanelInvalidStateError):
+            await service.run_discussion_and_final_ballots(
+                session_id=panel_session.id,
+                provider=provider,
+            )
 
         final_ballots = [
             ballot
             for ballot in fake_db_session.storage[ReaderPanelBallot].values()
             if ballot.phase == "final"
         ]
-        assert len(provider.final_requests) == 3  # two attempts for one reader, one success
-        assert len(final_ballots) == 1
-        assert result.status == ReaderPanelStatus.FINAL_BALLOTING.value
-        assert result.final_ballots_locked is False
+        assert len(provider.final_requests) == 2
+        assert len(final_ballots) == 0
+        assert panel_session.status == ReaderPanelStatus.FAILED.value
+        assert panel_session.failure_reason == "final_ballot_sample_below_minimum"
         assert panel_session.final_ballots_locked_at is None
 
-    async def test_retries_invalid_outputs_once_and_keeps_missing_ballot_unlocked(
+    async def test_retries_invalid_initial_ballot_then_fails_below_minimum(
         self,
         fake_db_session: FakeAsyncSession,
         test_project_id: UUID,
@@ -1273,20 +2476,18 @@ class TestReaderPanelDiscussionAndFinalBallots:
                 return super().generate_blind_ballot(request)
 
         provider = RetryProvider()
-        result = await service.collect_initial_ballots(
-            session_id=panel_session.id,
-            provider=provider,
-        )
+        with pytest.raises(ReaderPanelInvalidStateError):
+            await service.collect_initial_ballots(
+                session_id=panel_session.id,
+                provider=provider,
+            )
 
         assert provider.extract_attempts == 2
         assert provider.ballot_attempts[panel_session.reader_runs[0].reader_profile_id] == 2
-        assert provider.ballot_attempts[panel_session.reader_runs[1].reader_profile_id] == 2
-        assert result.initial_ballot_count == 1
-        assert result.initial_ballots_locked is False
-        assert result.status == ReaderPanelStatus.INITIAL_BALLOTING.value
-        assert len(fake_db_session.storage[ReaderPanelBallot]) == 1
+        assert provider.ballot_attempts[panel_session.reader_runs[1].reader_profile_id] == 0
+        assert panel_session.status == ReaderPanelStatus.FAILED.value
+        assert panel_session.failure_reason == "initial_ballot_sample_below_minimum"
         assert panel_session.initial_ballots_locked_at is None
-        assert panel_session.degradation_reason == "One or more initial ballots were invalid."
 
     async def test_rejects_moderator_limit_and_foreign_evidence_without_leaking_errors(
         self,
@@ -1308,6 +2509,7 @@ class TestReaderPanelDiscussionAndFinalBallots:
             segments=sample_segments,
         )
         panel_session.config_snapshot["max_ballot_issues"] = 1
+        panel_session.config_snapshot["max_discussion_issues"] = 1
         source_profile = panel_session.reader_runs[0].reader_profile_id
 
         class InvalidModeratorProvider:
@@ -1338,9 +2540,7 @@ class TestReaderPanelDiscussionAndFinalBallots:
 
         assert provider.calls == 2
         assert panel_session.status == ReaderPanelStatus.FAILED.value
-        assert panel_session.failure_reason == (
-            "Issue extraction produced invalid structured output."
-        )
+        assert panel_session.failure_reason == "invalid_issue_extraction"
         assert "/tmp" not in panel_session.failure_reason
         assert "token" not in panel_session.failure_reason.lower()
         assert fake_db_session.storage[ReaderPanelIssue] == {}
@@ -1481,6 +2681,9 @@ class TestReaderPanelDiscussionAndFinalBallots:
         upper, lower = panel_session.reader_runs
         upper.reader_profile_id = "Critic"
         lower.reader_profile_id = "critic"
+        snapshot = dict(panel_session.config_snapshot)
+        snapshot["reader_profile_ids"] = ["Critic", "critic"]
+        panel_session.config_snapshot = snapshot
         provider = RecordingBallotProvider(
             [
                 ExtractedIssueItem(
@@ -1539,6 +2742,12 @@ class TestReaderPanelDiscussionAndFinalBallots:
             segments=sample_segments,
         )
         panel_session.reader_runs[0].reader_profile_id = "Critic"
+        snapshot = dict(panel_session.config_snapshot)
+        snapshot["reader_profile_ids"] = [
+            "Critic",
+            panel_session.reader_runs[1].reader_profile_id,
+        ]
+        panel_session.config_snapshot = snapshot
         provider = RecordingBallotProvider(
             [
                 ExtractedIssueItem(
@@ -1688,6 +2897,50 @@ class TestReaderPanelDiscussionContextValidation:
 
 @pytest.mark.anyio
 class TestReaderPanelDiscussionRemediation:
+    @pytest.mark.parametrize(
+        ("key", "value"),
+        [
+            ("min_valid_readers", False),
+            ("max_total_model_calls", True),
+            ("reader_count", False),
+            ("max_discussion_issues", 99),
+            ("mode", PanelMode.PANEL.value),
+            ("unexpected_budget", 1),
+        ],
+    )
+    async def test_tampered_budget_snapshot_fails_before_provider(
+        self,
+        fake_db_session: FakeAsyncSession,
+        test_project_id: UUID,
+        test_chapter_id: UUID,
+        test_document_id: UUID,
+        test_version_id: UUID,
+        sample_hash: str,
+        sample_segments: dict[str, str],
+        key: str,
+        value: Any,
+    ) -> None:
+        service, panel_session = await setup_initial_ballots_locked(
+            fake_db_session,
+            project_id=test_project_id,
+            chapter_id=test_chapter_id,
+            document_id=test_document_id,
+            version_id=test_version_id,
+            content_hash=sample_hash,
+            segments=sample_segments,
+        )
+        panel_session.config_snapshot = {**panel_session.config_snapshot, key: value}
+        provider = RecordingDiscussionProvider(fake_db_session)
+
+        with pytest.raises(ReaderPanelInvalidStateError):
+            await service.run_discussion_and_final_ballots(
+                session_id=panel_session.id, provider=provider
+            )
+
+        assert provider.turn_requests == []
+        assert provider.summary_requests == []
+        assert provider.final_requests == []
+
     async def test_invalid_initial_snapshot_fails_before_any_mutation(
         self,
         fake_db_session: FakeAsyncSession,
@@ -1837,14 +3090,17 @@ class TestReaderPanelDiscussionRemediation:
         panel_session.config_snapshot["max_input_tokens_per_call"] = 1_000
         provider = RecordingDiscussionProvider(fake_db_session)
 
-        await service.run_discussion_and_final_ballots(
-            session_id=panel_session.id,
-            provider=provider,
-        )
+        with pytest.raises(ReaderPanelInvalidStateError):
+            await service.run_discussion_and_final_ballots(
+                session_id=panel_session.id,
+                provider=provider,
+            )
 
         assert provider.turn_requests == []
         assert provider.summary_requests == []
         assert provider.final_requests == []
+        assert panel_session.status == ReaderPanelStatus.FAILED.value
+        assert panel_session.failure_reason == "discussion_sample_below_minimum"
 
     async def test_bracketed_custom_segment_reference_is_repaired(
         self,
@@ -2428,6 +3684,10 @@ class TestReaderPanelEditorHandoffReport:
                 retry_count=2,
             )
         )
+        snapshot = dict(panel_session.config_snapshot)
+        snapshot["reader_count"] = 3
+        snapshot["reader_profile_ids"] = [*snapshot["reader_profile_ids"], "failed_reader"]
+        panel_session.config_snapshot = snapshot
         await fake_db_session.commit()
 
         result = await service.generate_editor_handoff_report(
@@ -2442,7 +3702,7 @@ class TestReaderPanelEditorHandoffReport:
             "valid": 2,
             "failed": 1,
             "complete": False,
-            "degradation_reason": "1 reader(s) unavailable.",
+            "degradation_reason": "reader_sample_degraded",
         }
         assert any("not a full panel" in warning for warning in report.warnings)
         workflow_run = fake_db_session.storage[WorkflowRun][panel_session.workflow_run_id]

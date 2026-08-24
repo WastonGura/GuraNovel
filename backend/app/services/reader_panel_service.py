@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 import re
-from time import monotonic
 from typing import Any
 from uuid import UUID, uuid4
 
@@ -48,6 +48,7 @@ from app.models.reader_panel import (
     ReaderInitialReport,
     ReaderPanelBallot,
     ReaderPanelIssue,
+    ReaderPanelInvocation,
     ReaderPanelMessage,
     ReaderPanelSession,
     ReaderRun,
@@ -58,6 +59,9 @@ from app.workflows.reader_panel import (
     EditorHandoffDecision,
     PanelMode,
     ReaderPanelConfig,
+    ReaderPanelInvocationPhase,
+    ReaderPanelInvocationStatus,
+    ReaderPanelSafeError,
     ReaderPanelStatus,
     RiskFlag,
     Severity,
@@ -65,6 +69,13 @@ from app.workflows.reader_panel import (
     classify_issue_consensus,
     get_mode_preset_config,
     is_mode_off,
+)
+from app.llm.errors import (
+    ProviderConfigurationError,
+    ProviderInvalidOutputError,
+    ProviderRateLimitedError,
+    ProviderTimeoutError,
+    ProviderUnavailableError,
 )
 
 
@@ -74,18 +85,6 @@ class ReaderPanelServiceError(AppError):
     status_code = status.HTTP_400_BAD_REQUEST
     code = "reader_panel_service_error"
     default_message = "Reader panel service error."
-
-
-def _sanitize_error_message(exc: Exception) -> str:
-    """Sanitizes exception messages to prevent leaking internal traces or credentials."""
-    msg = str(exc).strip()
-    if not msg:
-        return type(exc).__name__
-    lower = msg.lower()
-    for token in ("password", "token", "key", "secret", "bearer", "postgresql://", "mysql://"):
-        if token in lower:
-            return f"Provider invocation error: {type(exc).__name__} (redacted)"
-    return msg[:500]
 
 
 class ReaderPanelNotFoundError(ReaderPanelServiceError):
@@ -112,6 +111,34 @@ class ReaderPanelStaleVersionError(ReaderPanelServiceError):
     default_message = (
         "The manuscript version has been updated since the reader panel session started."
     )
+
+
+class ReaderPanelBudgetExhaustedError(ReaderPanelServiceError):
+    status_code = status.HTTP_422_UNPROCESSABLE_CONTENT
+    code = "reader_panel_budget_exhausted"
+    default_message = "The reader panel hard budget is exhausted."
+
+
+class _ReaderPanelWorkInProgressError(ReaderPanelInvalidStateError):
+    pass
+
+
+class _ReaderPanelWorkAlreadyCompleted(ReaderPanelInvalidStateError):
+    pass
+
+
+class _ReaderPanelPermanentWorkError(ReaderPanelInvalidStateError):
+    def __init__(self, error_code: str = ReaderPanelSafeError.UNKNOWN.value) -> None:
+        super().__init__()
+        self.error_code = error_code
+
+
+_TERMINAL_PANEL_STATUSES = {
+    ReaderPanelStatus.COMPLETED.value,
+    ReaderPanelStatus.DEGRADED_COMPLETED.value,
+    ReaderPanelStatus.FAILED.value,
+    ReaderPanelStatus.CANCELLED.value,
+}
 
 
 @dataclass(frozen=True)
@@ -145,6 +172,638 @@ class ReaderPanelService:
     def __init__(self, db: AsyncSession) -> None:
         self._db = db
 
+    @staticmethod
+    def _safe_provider_error(exc: BaseException) -> tuple[str, bool]:
+        if isinstance(exc, _ReaderPanelPermanentWorkError):
+            return exc.error_code, False
+        if isinstance(exc, (ProviderTimeoutError, TimeoutError)):
+            return ReaderPanelSafeError.TIMEOUT.value, True
+        if isinstance(exc, ProviderRateLimitedError):
+            return ReaderPanelSafeError.RATE_LIMITED.value, True
+        if isinstance(exc, ProviderUnavailableError):
+            return ReaderPanelSafeError.UNAVAILABLE.value, True
+        if isinstance(exc, (ProviderInvalidOutputError, TypeError, ValueError)):
+            return ReaderPanelSafeError.INVALID_OUTPUT.value, True
+        if isinstance(exc, ProviderConfigurationError):
+            return ReaderPanelSafeError.CONFIGURATION.value, False
+        if isinstance(exc, ReaderPanelBudgetExhaustedError):
+            return ReaderPanelSafeError.BUDGET_EXHAUSTED.value, False
+        return ReaderPanelSafeError.UNKNOWN.value, False
+
+    async def _locked_session(self, session_id: UUID) -> ReaderPanelSession:
+        stmt = (
+            select(ReaderPanelSession)
+            .where(ReaderPanelSession.id == session_id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+        session = (await self._db.execute(stmt)).scalars().first()
+        if session is None:
+            raise ReaderPanelNotFoundError()
+        await self._refresh_stale_flag(session)
+        return session
+
+    async def _refresh_stale_flag(self, session: ReaderPanelSession) -> None:
+        if session.document_id is not None:
+            document = await self._db.get(Document, session.document_id, populate_existing=True)
+            if document is not None and document.current_version_id != session.document_version_id:
+                session.stale = True
+
+    async def _settle_terminal(
+        self, panel_session: ReaderPanelSession, terminal_status: ReaderPanelStatus, reason: str
+    ) -> None:
+        now = datetime.now(timezone.utc)
+        panel_session.status = terminal_status.value
+        panel_session.current_step = terminal_status.value
+        panel_session.failure_reason = reason
+        if panel_session.completed_at is None:
+            panel_session.completed_at = now
+        workflow_run = await self._db.get(
+            WorkflowRun, panel_session.workflow_run_id, populate_existing=True
+        )
+        if workflow_run is not None:
+            workflow_run.status = terminal_status.value
+            workflow_run.current_node = terminal_status.value
+            workflow_run.next_node = None
+            workflow_run.awaiting_user = False
+            if workflow_run.completed_at is None:
+                workflow_run.completed_at = panel_session.completed_at
+
+    async def _settle_failed(self, panel_session: ReaderPanelSession, reason: str) -> None:
+        await self._settle_terminal(panel_session, ReaderPanelStatus.FAILED, reason)
+        await self._terminate_started_invocations(panel_session.id)
+        events = (
+            (
+                await self._db.execute(
+                    select(WorkflowEvent).where(
+                        WorkflowEvent.workflow_run_id == panel_session.workflow_run_id,
+                        WorkflowEvent.event_type == "reader_panel.failed",
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        events = [
+            event
+            for event in events
+            if event.workflow_run_id == panel_session.workflow_run_id
+            and event.event_type == "reader_panel.failed"
+        ]
+        if not events:
+            self._db.add(
+                WorkflowEvent(
+                    workflow_run_id=panel_session.workflow_run_id,
+                    event_type="reader_panel.failed",
+                    node_name="failed",
+                    payload={
+                        "session_id": str(panel_session.id),
+                        "status": panel_session.status,
+                        "reason_code": reason,
+                    },
+                    event_sequence=None,
+                )
+            )
+
+    async def _terminate_started_invocations(self, session_id: UUID) -> None:
+        invocations = (
+            (
+                await self._db.execute(
+                    select(ReaderPanelInvocation)
+                    .where(ReaderPanelInvocation.session_id == session_id)
+                    .with_for_update()
+                    .execution_options(populate_existing=True)
+                )
+            )
+            .scalars()
+            .all()
+        )
+        now = datetime.now(timezone.utc)
+        for invocation in invocations:
+            if (
+                invocation.session_id == session_id
+                and invocation.status == ReaderPanelInvocationStatus.STARTED.value
+            ):
+                invocation.status = ReaderPanelInvocationStatus.CANCELLED.value
+                invocation.error_code = ReaderPanelSafeError.CANCELLED.value
+                invocation.completed_at = now
+
+    async def _eliminate_reader(
+        self,
+        panel_session: ReaderPanelSession,
+        reader_run_id: UUID,
+        error_code: str,
+        phase_reason: str,
+    ) -> bool:
+        run = await self._db.get(ReaderRun, reader_run_id, populate_existing=True)
+        if run is None or run.session_id != panel_session.id:
+            raise ReaderPanelInvalidStateError()
+        run.status = "failed"
+        run.error_code = error_code
+        run.error_message = None
+        runs = (
+            (
+                await self._db.execute(
+                    select(ReaderRun)
+                    .where(ReaderRun.session_id == panel_session.id)
+                    .execution_options(populate_existing=True)
+                )
+            )
+            .scalars()
+            .all()
+        )
+        completed = sum(
+            candidate.session_id == panel_session.id and candidate.status == "completed"
+            for candidate in runs
+            if candidate.id != run.id
+        )
+        minimum = self._required_budget(
+            self._validate_config_snapshot(panel_session), "min_valid_readers"
+        )
+        if completed < minimum:
+            await self._settle_failed(panel_session, phase_reason)
+            await self._db.commit()
+            return False
+        panel_session.degradation_reason = "reader_sample_degraded"
+        await self._db.commit()
+        return True
+
+    async def _settle_cancellation(self, panel_session: ReaderPanelSession) -> None:
+        await self._settle_terminal(panel_session, ReaderPanelStatus.CANCELLED, "cancelled_by_user")
+        await self._terminate_started_invocations(panel_session.id)
+        events = (
+            (
+                await self._db.execute(
+                    select(WorkflowEvent).where(
+                        WorkflowEvent.workflow_run_id == panel_session.workflow_run_id,
+                        WorkflowEvent.event_type == "reader_panel.cancelled",
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        if not any(
+            event.workflow_run_id == panel_session.workflow_run_id
+            and event.event_type == "reader_panel.cancelled"
+            for event in events
+        ):
+            self._db.add(
+                WorkflowEvent(
+                    workflow_run_id=panel_session.workflow_run_id,
+                    event_type="reader_panel.cancelled",
+                    node_name="cancelled",
+                    payload={
+                        "session_id": str(panel_session.id),
+                        "status": panel_session.status,
+                        "reason_code": "cancelled_by_user",
+                    },
+                    event_sequence=None,
+                )
+            )
+
+    async def _settle_cancelled_attempt(self, session_id: UUID, attempt_id: UUID) -> None:
+        panel_session = await self._locked_session(session_id)
+        attempt = await self._db.get(ReaderPanelInvocation, attempt_id, populate_existing=True)
+        if (
+            attempt is not None
+            and attempt.session_id == session_id
+            and attempt.status == ReaderPanelInvocationStatus.STARTED.value
+        ):
+            attempt.status = ReaderPanelInvocationStatus.CANCELLED.value
+            attempt.error_code = ReaderPanelSafeError.CANCELLED.value
+            attempt.completed_at = datetime.now(timezone.utc)
+        if panel_session.status not in {
+            ReaderPanelStatus.COMPLETED.value,
+            ReaderPanelStatus.DEGRADED_COMPLETED.value,
+            ReaderPanelStatus.FAILED.value,
+        }:
+            await self._settle_cancellation(panel_session)
+        await self._db.commit()
+
+    @staticmethod
+    def _required_budget(snapshot: dict[str, Any], name: str) -> int:
+        value = snapshot.get(name)
+        if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+            raise ReaderPanelInvalidStateError()
+        return value
+
+    @classmethod
+    def _validate_config_snapshot(cls, session: ReaderPanelSession) -> dict[str, Any]:
+        snapshot = session.config_snapshot
+        required = {
+            "mode",
+            "reader_count",
+            "reader_profile_ids",
+            "min_valid_readers",
+            "max_ballot_issues",
+            "max_discussion_issues",
+            "max_rounds_per_issue",
+            "max_total_model_calls",
+            "max_model_calls_per_phase",
+            "max_total_input_tokens",
+            "max_total_output_tokens",
+            "max_input_tokens_per_call",
+            "max_output_tokens_per_call",
+            "max_messages",
+            "max_provider_attempts",
+            "max_invalid_output_repairs",
+            "max_execution_seconds",
+        }
+        if not isinstance(snapshot, dict) or set(snapshot) != required:
+            raise ReaderPanelInvalidStateError()
+        profiles = snapshot["reader_profile_ids"]
+        reader_count = snapshot["reader_count"]
+        min_readers = snapshot["min_valid_readers"]
+        if (
+            snapshot["mode"] != session.mode
+            or snapshot["mode"] not in {mode.value for mode in PanelMode if mode != PanelMode.OFF}
+            or not isinstance(profiles, list)
+            or not all(isinstance(item, str) and item for item in profiles)
+            or len(profiles) != len(set(profiles))
+            or type(reader_count) is not int
+            or reader_count != len(profiles)
+            or type(min_readers) is not int
+            or not 1 <= min_readers <= reader_count
+            or snapshot["max_invalid_output_repairs"] != 1
+        ):
+            raise ReaderPanelInvalidStateError()
+        for name in {
+            "reader_count",
+            "max_total_model_calls",
+            "max_model_calls_per_phase",
+            "max_total_input_tokens",
+            "max_total_output_tokens",
+            "max_input_tokens_per_call",
+            "max_output_tokens_per_call",
+            "max_messages",
+            "max_provider_attempts",
+            "max_invalid_output_repairs",
+            "max_execution_seconds",
+        }:
+            cls._required_budget(snapshot, name)
+        if any(
+            type(snapshot[name]) is not int or snapshot[name] < 0
+            for name in {"max_ballot_issues", "max_discussion_issues", "max_rounds_per_issue"}
+        ):
+            raise ReaderPanelInvalidStateError()
+        if (
+            snapshot["max_discussion_issues"] > snapshot["max_ballot_issues"]
+            or snapshot["max_model_calls_per_phase"] > snapshot["max_total_model_calls"]
+            or snapshot["max_input_tokens_per_call"] > snapshot["max_total_input_tokens"]
+            or snapshot["max_output_tokens_per_call"] > snapshot["max_total_output_tokens"]
+        ):
+            raise ReaderPanelInvalidStateError()
+        return snapshot
+
+    async def _invoke_provider(
+        self,
+        *,
+        session_id: UUID,
+        phase: ReaderPanelInvocationPhase,
+        work_key: str,
+        request: Any,
+        invoke: Any,
+        expected_type: type,
+        validate: Any = None,
+    ) -> Any:
+        """Invoke once-per-attempt outside a transaction with durable safe accounting."""
+        if not re.fullmatch(r"[A-Za-z0-9:_-]{1,160}", work_key):
+            raise ReaderPanelInvalidStateError()
+        request_json = (
+            request.model_dump_json() if hasattr(request, "model_dump_json") else repr(request)
+        )
+        # One charged token per UTF-8 byte is a provider-neutral upper bound;
+        # persisted accounting is reserved/charged usage, never claimed actual usage.
+        input_reservation = max(1, len(request_json.encode("utf-8")))
+        active_waits = 0
+
+        while True:
+            session = await self._locked_session(session_id)
+            if session.status in _TERMINAL_PANEL_STATUSES:
+                await self._db.commit()
+                raise ReaderPanelInvalidStateError()
+            snapshot = self._validate_config_snapshot(session)
+            max_attempts = self._required_budget(snapshot, "max_provider_attempts")
+            max_repairs = self._required_budget(snapshot, "max_invalid_output_repairs")
+            max_calls = self._required_budget(snapshot, "max_total_model_calls")
+            max_phase_calls = self._required_budget(snapshot, "max_model_calls_per_phase")
+            max_input = self._required_budget(snapshot, "max_total_input_tokens")
+            max_output = self._required_budget(snapshot, "max_total_output_tokens")
+            max_input_call = self._required_budget(snapshot, "max_input_tokens_per_call")
+            output_reservation = self._required_budget(snapshot, "max_output_tokens_per_call")
+            max_elapsed = self._required_budget(snapshot, "max_execution_seconds")
+            if input_reservation > max_input_call:
+                await self._db.commit()
+                raise ReaderPanelBudgetExhaustedError()
+            if isinstance(session.created_at, datetime):
+                created = session.created_at
+                if created.tzinfo is None:
+                    created = created.replace(tzinfo=timezone.utc)
+                if (datetime.now(timezone.utc) - created).total_seconds() >= max_elapsed:
+                    await self._db.commit()
+                    raise ReaderPanelBudgetExhaustedError()
+
+            rows = (
+                (
+                    await self._db.execute(
+                        select(ReaderPanelInvocation)
+                        .where(ReaderPanelInvocation.session_id == session_id)
+                        .execution_options(populate_existing=True)
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            rows = [row for row in rows if row.session_id == session_id]
+            reader_runs = (
+                (
+                    await self._db.execute(
+                        select(ReaderRun)
+                        .where(ReaderRun.session_id == session_id)
+                        .execution_options(populate_existing=True)
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            reader_runs = [row for row in reader_runs if row.session_id == session_id]
+            if len(reader_runs) != snapshot["reader_count"] or {
+                run.reader_profile_id for run in reader_runs
+            } != set(snapshot["reader_profile_ids"]):
+                await self._db.commit()
+                raise ReaderPanelInvalidStateError()
+            issues = (
+                (
+                    await self._db.execute(
+                        select(ReaderPanelIssue)
+                        .where(ReaderPanelIssue.session_id == session_id)
+                        .execution_options(populate_existing=True)
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            messages = (
+                (
+                    await self._db.execute(
+                        select(ReaderPanelMessage)
+                        .where(ReaderPanelMessage.session_id == session_id)
+                        .execution_options(populate_existing=True)
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            if (
+                len([item for item in issues if item.session_id == session_id])
+                > snapshot["max_ballot_issues"]
+                or (
+                    phase
+                    in {
+                        ReaderPanelInvocationPhase.DISCUSSION_TURN,
+                        ReaderPanelInvocationPhase.DISCUSSION_SUMMARY,
+                    }
+                    and len([item for item in messages if item.session_id == session_id])
+                    >= snapshot["max_messages"]
+                )
+                or any(
+                    item.session_id == session_id
+                    and item.round_number > snapshot["max_rounds_per_issue"]
+                    for item in messages
+                )
+            ):
+                await self._db.commit()
+                raise ReaderPanelBudgetExhaustedError()
+            work_rows = [
+                row for row in rows if row.phase == phase.value and row.work_key == work_key
+            ]
+            if any(row.status == ReaderPanelInvocationStatus.SUCCEEDED.value for row in work_rows):
+                await self._db.commit()
+                raise _ReaderPanelWorkAlreadyCompleted()
+            if any(
+                row.status == ReaderPanelInvocationStatus.UNKNOWN_COMMIT.value for row in work_rows
+            ):
+                await self._db.commit()
+                raise _ReaderPanelPermanentWorkError(ReaderPanelSafeError.UNKNOWN_COMMIT.value)
+            if any(
+                row.error_code
+                in {
+                    ReaderPanelSafeError.CONFIGURATION.value,
+                    ReaderPanelSafeError.UNKNOWN.value,
+                }
+                for row in work_rows
+            ):
+                await self._db.commit()
+                error_code = next(
+                    row.error_code
+                    for row in reversed(work_rows)
+                    if row.error_code
+                    in {
+                        ReaderPanelSafeError.CONFIGURATION.value,
+                        ReaderPanelSafeError.UNKNOWN.value,
+                    }
+                )
+                raise _ReaderPanelPermanentWorkError(error_code)
+            started = next(
+                (
+                    row
+                    for row in work_rows
+                    if row.status == ReaderPanelInvocationStatus.STARTED.value
+                ),
+                None,
+            )
+            if started is not None:
+                if isinstance(started.started_at, datetime):
+                    began = started.started_at
+                    if began.tzinfo is None:
+                        began = began.replace(tzinfo=timezone.utc)
+                    if (datetime.now(timezone.utc) - began).total_seconds() < max_elapsed:
+                        await self._db.commit()
+                        if active_waits >= 10:
+                            raise _ReaderPanelWorkInProgressError()
+                        active_waits += 1
+                        await asyncio.sleep(0.05)
+                        continue
+                started.status = ReaderPanelInvocationStatus.UNKNOWN_COMMIT.value
+                started.error_code = ReaderPanelSafeError.UNKNOWN_COMMIT.value
+                started.completed_at = datetime.now(timezone.utc)
+                await self._db.commit()
+                raise _ReaderPanelPermanentWorkError(ReaderPanelSafeError.UNKNOWN_COMMIT.value)
+            if (
+                sum(
+                    row.error_code == ReaderPanelSafeError.INVALID_OUTPUT.value for row in work_rows
+                )
+                >= max_repairs + 1
+            ):
+                await self._db.commit()
+                raise _ReaderPanelPermanentWorkError(ReaderPanelSafeError.INVALID_OUTPUT.value)
+            calls = sum(row.provider_calls for row in rows)
+            phase_calls = sum(row.provider_calls for row in rows if row.phase == phase.value)
+            input_used = sum(row.input_tokens for row in rows)
+            output_used = sum(row.output_tokens for row in rows)
+            if (
+                calls >= max_calls
+                or phase_calls >= max_phase_calls
+                or input_used + input_reservation > max_input
+                or output_used + output_reservation > max_output
+                or len(work_rows) >= max_attempts
+            ):
+                await self._db.commit()
+                raise ReaderPanelBudgetExhaustedError()
+
+            attempt = ReaderPanelInvocation(
+                id=uuid4(),
+                session_id=session_id,
+                phase=phase.value,
+                work_key=work_key,
+                attempt=len(work_rows) + 1,
+                status=ReaderPanelInvocationStatus.STARTED.value,
+                error_code=None,
+                provider_calls=1,
+                input_tokens=input_reservation,
+                output_tokens=output_reservation,
+                started_at=datetime.now(timezone.utc),
+            )
+            self._db.add(attempt)
+            await self._db.commit()
+
+            try:
+                output = await asyncio.to_thread(invoke, request)
+                if type(output) is not expected_type:
+                    raise ProviderInvalidOutputError()
+                if validate is not None:
+                    output = validate(output)
+                output_json = (
+                    output.model_dump_json() if hasattr(output, "model_dump_json") else repr(output)
+                )
+                output_charge = max(1, len(output_json.encode("utf-8")))
+            except asyncio.CancelledError:
+                await asyncio.shield(self._settle_cancelled_attempt(session_id, attempt.id))
+                raise
+            except Exception as exc:
+                code, retryable = self._safe_provider_error(exc)
+                try:
+                    await self._locked_session(session_id)
+                    fresh_attempt = await self._db.get(
+                        ReaderPanelInvocation, attempt.id, populate_existing=True
+                    )
+                except asyncio.CancelledError:
+                    await asyncio.shield(self._settle_cancelled_attempt(session_id, attempt.id))
+                    raise
+                if (
+                    fresh_attempt is None
+                    or fresh_attempt.session_id != session_id
+                    or fresh_attempt.status != ReaderPanelInvocationStatus.STARTED.value
+                ):
+                    await self._db.commit()
+                    raise ReaderPanelInvalidStateError() from None
+                fresh_attempt.status = ReaderPanelInvocationStatus.FAILED.value
+                fresh_attempt.error_code = code
+                fresh_attempt.completed_at = datetime.now(timezone.utc)
+                await self._db.commit()
+                invalid_count = sum(
+                    row.error_code == ReaderPanelSafeError.INVALID_OUTPUT.value for row in work_rows
+                ) + (code == ReaderPanelSafeError.INVALID_OUTPUT.value)
+                if (
+                    retryable
+                    and len(work_rows) + 1 < max_attempts
+                    and (
+                        code != ReaderPanelSafeError.INVALID_OUTPUT.value
+                        or invalid_count <= max_repairs
+                    )
+                ):
+                    continue
+                raise
+
+            try:
+                await asyncio.sleep(0)
+                fresh = await self._locked_session(session_id)
+                fresh_attempt = await self._db.get(
+                    ReaderPanelInvocation, attempt.id, populate_existing=True
+                )
+            except asyncio.CancelledError:
+                await asyncio.shield(self._settle_cancelled_attempt(session_id, attempt.id))
+                raise
+            if (
+                fresh_attempt is None
+                or fresh_attempt.session_id != session_id
+                or fresh_attempt.status != ReaderPanelInvocationStatus.STARTED.value
+            ):
+                await self._db.commit()
+                raise ReaderPanelInvalidStateError()
+            if fresh.status in _TERMINAL_PANEL_STATUSES:
+                fresh_attempt.status = ReaderPanelInvocationStatus.CANCELLED.value
+                fresh_attempt.error_code = ReaderPanelSafeError.CANCELLED.value
+                fresh_attempt.completed_at = datetime.now(timezone.utc)
+                await self._db.commit()
+                raise ReaderPanelInvalidStateError()
+            if isinstance(fresh.created_at, datetime):
+                created = fresh.created_at
+                if created.tzinfo is None:
+                    created = created.replace(tzinfo=timezone.utc)
+                if (datetime.now(timezone.utc) - created).total_seconds() >= max_elapsed:
+                    fresh_attempt.status = ReaderPanelInvocationStatus.FAILED.value
+                    fresh_attempt.error_code = ReaderPanelSafeError.BUDGET_EXHAUSTED.value
+                    fresh_attempt.completed_at = datetime.now(timezone.utc)
+                    await self._db.commit()
+                    raise ReaderPanelBudgetExhaustedError()
+            if output_charge > output_reservation:
+                fresh_attempt.status = ReaderPanelInvocationStatus.FAILED.value
+                fresh_attempt.error_code = ReaderPanelSafeError.BUDGET_EXHAUSTED.value
+                fresh_attempt.completed_at = datetime.now(timezone.utc)
+                await self._db.commit()
+                raise ReaderPanelBudgetExhaustedError()
+            fresh_attempt.status = ReaderPanelInvocationStatus.SUCCEEDED.value
+            fresh_attempt.completed_at = datetime.now(timezone.utc)
+            return output
+
+    async def _reject_report_synthesis_output(self, session_id: UUID) -> None:
+        """Turn a semantically invalid synthesis success into a repairable failure."""
+        session = await self._locked_session(session_id)
+        snapshot = self._validate_config_snapshot(session)
+        attempts = (
+            (
+                await self._db.execute(
+                    select(ReaderPanelInvocation)
+                    .where(
+                        ReaderPanelInvocation.session_id == session_id,
+                        ReaderPanelInvocation.phase
+                        == ReaderPanelInvocationPhase.REPORT_SYNTHESIS.value,
+                        ReaderPanelInvocation.work_key == "editor_handoff",
+                    )
+                    .execution_options(populate_existing=True)
+                )
+            )
+            .scalars()
+            .all()
+        )
+        attempts = [
+            item
+            for item in attempts
+            if item.session_id == session_id
+            and item.phase == ReaderPanelInvocationPhase.REPORT_SYNTHESIS.value
+            and item.work_key == "editor_handoff"
+        ]
+        succeeded = next(
+            (
+                item
+                for item in reversed(sorted(attempts, key=lambda value: value.attempt))
+                if item.status == ReaderPanelInvocationStatus.SUCCEEDED.value
+            ),
+            None,
+        )
+        if succeeded is None:
+            return
+        succeeded.status = ReaderPanelInvocationStatus.FAILED.value
+        succeeded.error_code = ReaderPanelSafeError.INVALID_OUTPUT.value
+        succeeded.completed_at = datetime.now(timezone.utc)
+        if (
+            sum(item.error_code == ReaderPanelSafeError.INVALID_OUTPUT.value for item in attempts)
+            > snapshot["max_invalid_output_repairs"] + 1
+        ):
+            raise ReaderPanelInvalidStateError()
+
     async def initialize_session(
         self,
         *,
@@ -169,6 +828,15 @@ class ReaderPanelService:
 
         panel_mode = PanelMode(mode.lower()) if isinstance(mode, str) else mode
         panel_config = config or get_mode_preset_config(panel_mode)
+        profile_ids = custom_profile_ids or list(panel_config.reader_profile_ids)
+        if (
+            panel_config.mode != panel_mode
+            or len(profile_ids) != panel_config.reader_count
+            or len(profile_ids) < panel_config.min_valid_readers
+            or len(profile_ids) != len(set(profile_ids))
+            or any(not isinstance(item, str) or not item for item in profile_ids)
+        ):
+            raise ReaderPanelInvalidStateError()
 
         # 1. Resolve project, chapter, document, and immutable version
         project = await self._db.get(Project, project_id)
@@ -249,8 +917,6 @@ class ReaderPanelService:
             else list(project_meta.get("target_audience", []))
         )
         final_test_goals = test_goals or []
-        profile_ids = custom_profile_ids or list(panel_config.reader_profile_ids)
-
         # 5. Create ReaderPanelSession
         session_id = uuid4()
         panel_session = ReaderPanelSession(
@@ -273,7 +939,14 @@ class ReaderPanelService:
                 "max_discussion_issues": panel_config.max_discussion_issues,
                 "max_rounds_per_issue": panel_config.max_rounds_per_issue,
                 "max_total_model_calls": panel_config.max_total_model_calls,
+                "max_model_calls_per_phase": panel_config.max_model_calls_per_phase,
+                "max_total_input_tokens": panel_config.max_total_input_tokens,
+                "max_total_output_tokens": panel_config.max_total_output_tokens,
                 "max_input_tokens_per_call": panel_config.max_input_tokens_per_call,
+                "max_output_tokens_per_call": panel_config.max_output_tokens_per_call,
+                "max_messages": panel_config.max_messages,
+                "max_provider_attempts": panel_config.max_provider_attempts,
+                "max_invalid_output_repairs": panel_config.max_invalid_output_repairs,
                 "max_execution_seconds": panel_config.max_execution_seconds,
             },
             model_snapshot={"provider": "fake", "model": "deterministic-reader-panel-v1"},
@@ -333,13 +1006,10 @@ class ReaderPanelService:
         panel_session = (await self._db.execute(stmt)).scalars().first()
         if panel_session is None:
             raise ReaderPanelNotFoundError()
+        reader_runs = list(panel_session.reader_runs)
 
         # 2. Check staleness against live document version
-        if (
-            panel_session.document is not None
-            and panel_session.document.current_version_id != panel_session.document_version_id
-        ):
-            panel_session.stale = True
+        await self._refresh_stale_flag(panel_session)
 
         # If already locked, return existing reports idempotently
         if panel_session.initial_reports_locked_at is not None:
@@ -354,7 +1024,7 @@ class ReaderPanelService:
                     else "maybe",
                     "confidence": r.initial_report.confidence if r.initial_report else "medium",
                 }
-                for r in panel_session.reader_runs
+                for r in reader_runs
                 if r.initial_report is not None
             ]
             return ReaderPanelSessionResult(
@@ -363,7 +1033,7 @@ class ReaderPanelService:
                 status=panel_session.status,
                 mode=panel_session.mode,
                 is_noop=False,
-                planned_readers=len(panel_session.reader_runs),
+                planned_readers=len(reader_runs),
                 completed_readers=len(reports_data),
                 initial_reports_locked=True,
                 stale=panel_session.stale,
@@ -388,7 +1058,7 @@ class ReaderPanelService:
 
         # 4. Concurrently or sequentially run reader agents in mutual isolation
         collected_reports = []
-        for run in panel_session.reader_runs:
+        for run in reader_runs:
             if run.status == "completed" and run.initial_report is not None:
                 collected_reports.append(run.initial_report)
                 continue
@@ -405,8 +1075,14 @@ class ReaderPanelService:
             )
 
             try:
-                # LLM / provider invocation outside database transaction
-                output: ReaderInitialReadingOutput = panel_provider.generate_initial_reading(req)
+                output: ReaderInitialReadingOutput = await self._invoke_provider(
+                    session_id=panel_session.id,
+                    phase=ReaderPanelInvocationPhase.INITIAL_READING,
+                    work_key=f"reader:{run.id}",
+                    request=req,
+                    invoke=panel_provider.generate_initial_reading,
+                    expected_type=ReaderInitialReadingOutput,
+                )
 
                 # Persist initial report
                 init_report = ReaderInitialReport(
@@ -427,59 +1103,171 @@ class ReaderPanelService:
                 run.status = "completed"
                 run.completed_at = datetime.now(timezone.utc)
                 collected_reports.append(init_report)
-            except Exception as exc:
+                await self._db.commit()
+            except _ReaderPanelWorkAlreadyCompleted:
+                return await self.collect_initial_reports(
+                    session_id=session_id, provider=panel_provider
+                )
+            except _ReaderPanelPermanentWorkError as exc:
+                if exc.error_code == ReaderPanelSafeError.UNKNOWN_COMMIT.value:
+                    locked = await self._locked_session(panel_session.id)
+                    await self._settle_failed(locked, "provider_outcome_unknown")
+                    await self._db.commit()
+                    raise ReaderPanelInvalidStateError() from None
                 run.status = "failed"
-                run.error_code = type(exc).__name__
-                run.error_message = _sanitize_error_message(exc)
+                run.error_code = exc.error_code
+                run.error_message = None
+                await self._db.commit()
+            except ReaderPanelInvalidStateError:
+                raise
+            except Exception as exc:
+                error_code, _ = self._safe_provider_error(exc)
+                run.status = "failed"
+                run.error_code = error_code
+                run.error_message = None
+                await self._db.commit()
 
         # 5. Evaluate Quorum
         valid_count = len(collected_reports)
         min_valid = panel_session.config_snapshot.get("min_valid_readers", 1)
-        planned_count = len(panel_session.reader_runs)
+        planned_count = len(reader_runs)
 
         if valid_count >= min_valid:
             panel_session.status = ReaderPanelStatus.INITIAL_REPORTS_LOCKED.value
             panel_session.initial_reports_locked_at = datetime.now(timezone.utc)
             if valid_count < planned_count:
-                panel_session.degradation_reason = (
-                    f"Degraded sample: {valid_count}/{planned_count} readers succeeded"
-                )
+                panel_session.degradation_reason = "reader_sample_degraded"
             await self._db.commit()
 
+            refreshed_session = (
+                (
+                    await self._db.execute(
+                        select(ReaderPanelSession)
+                        .options(
+                            selectinload(ReaderPanelSession.reader_runs).selectinload(
+                                ReaderRun.initial_report
+                            )
+                        )
+                        .where(ReaderPanelSession.id == session_id)
+                        .execution_options(populate_existing=True)
+                    )
+                )
+                .scalars()
+                .first()
+            )
+            if refreshed_session is None:
+                raise ReaderPanelNotFoundError()
+            refreshed_runs = list(refreshed_session.reader_runs)
             reports_data = [
                 {
                     "reader_profile_id": r.reader_profile_id,
-                    "overall_reaction": r.initial_report.overall_reaction
-                    if r.initial_report
-                    else "",
-                    "continue_reading": r.initial_report.continue_reading
-                    if r.initial_report
-                    else "maybe",
-                    "confidence": r.initial_report.confidence if r.initial_report else "medium",
+                    "overall_reaction": r.initial_report.overall_reaction,
+                    "continue_reading": r.initial_report.continue_reading,
+                    "confidence": r.initial_report.confidence,
                 }
-                for r in panel_session.reader_runs
+                for r in refreshed_runs
                 if r.initial_report is not None
+                and r.initial_report.session_id == refreshed_session.id
+                and r.initial_report.reader_run_id == r.id
             ]
+            return ReaderPanelSessionResult(
+                session_id=refreshed_session.id,
+                workflow_run_id=refreshed_session.workflow_run_id,
+                status=refreshed_session.status,
+                mode=refreshed_session.mode,
+                is_noop=False,
+                planned_readers=planned_count,
+                completed_readers=valid_count,
+                initial_reports_locked=True,
+                stale=refreshed_session.stale,
+                degradation_reason=refreshed_session.degradation_reason,
+                reports=reports_data,
+            )
+        else:
+            await self._settle_failed(panel_session, "reader_sample_below_minimum")
+            await self._db.commit()
+            raise ReaderPanelQuorumError()
+
+    async def cancel_session(self, *, session_id: UUID) -> ReaderPanelSessionResult:
+        """Cancel unfinished work while preserving all committed panel history."""
+        panel_session = await self._locked_session(session_id)
+        terminal = {
+            ReaderPanelStatus.COMPLETED.value,
+            ReaderPanelStatus.DEGRADED_COMPLETED.value,
+            ReaderPanelStatus.FAILED.value,
+        }
+        if panel_session.status in terminal:
+            await self._db.commit()
+            raise ReaderPanelInvalidStateError()
+        await self._settle_cancellation(panel_session)
+        await self._db.commit()
+        return ReaderPanelSessionResult(
+            session_id=panel_session.id,
+            workflow_run_id=panel_session.workflow_run_id,
+            status=panel_session.status,
+            mode=panel_session.mode,
+            stale=panel_session.stale,
+            failure_reason=panel_session.failure_reason,
+        )
+
+    async def resume_session(
+        self, *, session_id: UUID, provider: Any = None
+    ) -> ReaderPanelSessionResult:
+        """Resume from the durable phase boundary without replaying completed work."""
+        panel_session = await self._locked_session(session_id)
+        status_value = panel_session.status
+        if status_value in {
+            ReaderPanelStatus.CREATED.value,
+            ReaderPanelStatus.PREPARING.value,
+        }:
+            panel_session.status = ReaderPanelStatus.INDEPENDENT_READING.value
+            await self._db.commit()
+            status_value = panel_session.status
+        else:
+            await self._db.commit()
+
+        if status_value == ReaderPanelStatus.INDEPENDENT_READING.value:
+            return await self.collect_initial_reports(session_id=session_id, provider=provider)
+        if status_value in {
+            ReaderPanelStatus.INITIAL_REPORTS_LOCKED.value,
+            ReaderPanelStatus.ISSUE_EXTRACTION.value,
+            ReaderPanelStatus.INITIAL_BALLOTING.value,
+        }:
+            return await self.collect_initial_ballots(session_id=session_id, provider=provider)
+        if status_value in {
+            ReaderPanelStatus.INITIAL_BALLOTS_LOCKED.value,
+            ReaderPanelStatus.DISCUSSING.value,
+            ReaderPanelStatus.FINAL_BALLOTING.value,
+            ReaderPanelStatus.FINAL_BALLOTS_LOCKED.value,
+        }:
+            if status_value == ReaderPanelStatus.FINAL_BALLOTS_LOCKED.value:
+                return await self.generate_editor_handoff_report(
+                    session_id=session_id, provider=provider
+                )
+            return await self.run_discussion_and_final_ballots(
+                session_id=session_id, provider=provider
+            )
+        if status_value == ReaderPanelStatus.REPORT_GENERATING.value:
+            return await self.generate_editor_handoff_report(
+                session_id=session_id, provider=provider
+            )
+        if status_value in {
+            ReaderPanelStatus.COMPLETED.value,
+            ReaderPanelStatus.DEGRADED_COMPLETED.value,
+            ReaderPanelStatus.FAILED.value,
+            ReaderPanelStatus.CANCELLED.value,
+        }:
             return ReaderPanelSessionResult(
                 session_id=panel_session.id,
                 workflow_run_id=panel_session.workflow_run_id,
                 status=panel_session.status,
                 mode=panel_session.mode,
-                is_noop=False,
-                planned_readers=planned_count,
-                completed_readers=valid_count,
-                initial_reports_locked=True,
+                review_report_id=panel_session.review_report_id,
                 stale=panel_session.stale,
                 degradation_reason=panel_session.degradation_reason,
-                reports=reports_data,
+                failure_reason=panel_session.failure_reason,
             )
-        else:
-            panel_session.status = ReaderPanelStatus.FAILED.value
-            panel_session.failure_reason = (
-                f"Quorum failed: only {valid_count}/{min_valid} required readers succeeded"
-            )
-            await self._db.commit()
-            raise ReaderPanelQuorumError()
+        raise ReaderPanelInvalidStateError()
 
     async def collect_initial_ballots(
         self,
@@ -518,6 +1306,7 @@ class ReaderPanelService:
                 or locked.chapter_id is None
             ):
                 raise ReaderPanelInvalidStateError()
+            await self._refresh_stale_flag(locked)
             return locked
 
         def eligible(session: ReaderPanelSession) -> list[ReaderRun]:
@@ -533,8 +1322,15 @@ class ReaderPanelService:
             ]
 
         def source_snapshot(
-            session: ReaderPanelSession, eligible_runs: list[ReaderRun]
+            session: ReaderPanelSession, _eligible_runs: list[ReaderRun]
         ) -> tuple[Any, ...]:
+            bound_runs = [
+                run
+                for run in session.reader_runs
+                if run.initial_report is not None
+                and run.initial_report.locked
+                and run.initial_report.locked_at is not None
+            ]
             return (
                 session.document_version_id,
                 session.source_hash,
@@ -547,7 +1343,7 @@ class ReaderPanelService:
                             run.reader_profile_id,
                             str(run.initial_report.locked_at),
                         )
-                        for run in eligible_runs
+                        for run in bound_runs
                     )
                 ),
             )
@@ -629,6 +1425,100 @@ class ReaderPanelService:
             uuid_tokens = set(uuid_to_report_ids)
             max_issues = request.max_ballot_issues
             normalized: list[ExtractedIssueItem] | None = None
+            extraction_failure_reason = "invalid_issue_extraction"
+
+            def normalize_extraction(
+                output: ModeratorIssueExtractionOutput,
+            ) -> list[ExtractedIssueItem]:
+                if len(output.issues) > max_issues:
+                    raise ValueError
+                issue_numbers = [issue.issue_number for issue in output.issues]
+                if len(issue_numbers) != len(set(issue_numbers)):
+                    raise ValueError
+                deduped: list[ExtractedIssueItem] = []
+                dedupe_indexes: dict[tuple[Any, ...], int] = {}
+                for extracted in output.issues:
+                    text_fields = [
+                        extracted.title,
+                        extracted.category,
+                        extracted.symptom,
+                        *extracted.root_cause_hypotheses,
+                        *(ref.note for ref in extracted.evidence),
+                    ]
+                    if (
+                        not extracted.evidence
+                        or not extracted.source_reader_ids
+                        or any(
+                            not set(ref.segment_ids).issubset(segment_ids)
+                            for ref in extracted.evidence
+                        )
+                        or any(
+                            pattern.search(value)
+                            for pattern in profile_patterns
+                            for value in text_fields
+                        )
+                        or any(
+                            token in value.casefold()
+                            for token in uuid_tokens
+                            for value in text_fields
+                        )
+                    ):
+                        raise ValueError
+                    source_ids = []
+                    for source in extracted.source_reader_ids:
+                        candidates = set()
+                        if source in profile_to_report_id:
+                            candidates.add(profile_to_report_id[source])
+                        try:
+                            canonical_uuid = str(UUID(source))
+                        except ValueError:
+                            canonical_uuid = None
+                        if canonical_uuid is not None:
+                            candidates.update(uuid_to_report_ids.get(canonical_uuid, set()))
+                        if len(candidates) != 1:
+                            raise ValueError
+                        source_ids.append(next(iter(candidates)))
+                    title = " ".join(extracted.title.split())
+                    category = " ".join(extracted.category.split()).lower()
+                    symptom = " ".join(extracted.symptom.split())
+                    locations = tuple(
+                        sorted(
+                            {
+                                segment_id
+                                for ref in extracted.evidence
+                                for segment_id in ref.segment_ids
+                            }
+                        )
+                    )
+                    key = (title.casefold(), category, symptom.casefold(), locations)
+                    if key in dedupe_indexes:
+                        index = dedupe_indexes[key]
+                        prior = deduped[index]
+                        deduped[index] = prior.model_copy(
+                            update={
+                                "source_reader_ids": list(
+                                    dict.fromkeys(prior.source_reader_ids + source_ids)
+                                )
+                            }
+                        )
+                        continue
+                    dedupe_indexes[key] = len(deduped)
+                    deduped.append(
+                        extracted.model_copy(
+                            update={
+                                "issue_number": len(deduped) + 1,
+                                "title": title,
+                                "category": category,
+                                "symptom": symptom,
+                                "root_cause_hypotheses": [
+                                    " ".join(value.split())
+                                    for value in extracted.root_cause_hypotheses
+                                ],
+                                "source_reader_ids": list(dict.fromkeys(source_ids)),
+                            }
+                        )
+                    )
+                return deduped
 
             if panel_session.status == ReaderPanelStatus.INITIAL_REPORTS_LOCKED.value:
                 panel_session.status = ReaderPanelStatus.ISSUE_EXTRACTION.value
@@ -645,104 +1535,27 @@ class ReaderPanelService:
                     )
                 )
             await self._db.commit()
-            for _ in range(2):
-                try:
-                    output = panel_provider.extract_issues(request)
-                    if type(output) is not ModeratorIssueExtractionOutput:
-                        raise TypeError
-                    if len(output.issues) > max_issues:
-                        raise ValueError
-                    issue_numbers = [issue.issue_number for issue in output.issues]
-                    if len(issue_numbers) != len(set(issue_numbers)):
-                        raise ValueError
-
-                    deduped: list[ExtractedIssueItem] = []
-                    dedupe_indexes: dict[tuple[Any, ...], int] = {}
-                    for extracted in output.issues:
-                        text_fields = [
-                            extracted.title,
-                            extracted.category,
-                            extracted.symptom,
-                            *extracted.root_cause_hypotheses,
-                            *(ref.note for ref in extracted.evidence),
-                        ]
-                        if (
-                            not extracted.evidence
-                            or not extracted.source_reader_ids
-                            or any(
-                                not set(ref.segment_ids).issubset(segment_ids)
-                                for ref in extracted.evidence
-                            )
-                            or any(
-                                pattern.search(value)
-                                for pattern in profile_patterns
-                                for value in text_fields
-                            )
-                            or any(
-                                token in value.casefold()
-                                for token in uuid_tokens
-                                for value in text_fields
-                            )
-                        ):
-                            raise ValueError
-                        source_ids = []
-                        for source in extracted.source_reader_ids:
-                            candidates = set()
-                            if source in profile_to_report_id:
-                                candidates.add(profile_to_report_id[source])
-                            try:
-                                canonical_uuid = str(UUID(source))
-                            except ValueError:
-                                canonical_uuid = None
-                            if canonical_uuid is not None:
-                                candidates.update(uuid_to_report_ids.get(canonical_uuid, set()))
-                            if len(candidates) != 1:
-                                raise ValueError
-                            source_ids.append(next(iter(candidates)))
-                        title = " ".join(extracted.title.split())
-                        category = " ".join(extracted.category.split()).lower()
-                        symptom = " ".join(extracted.symptom.split())
-                        locations = tuple(
-                            sorted(
-                                {
-                                    segment_id
-                                    for ref in extracted.evidence
-                                    for segment_id in ref.segment_ids
-                                }
-                            )
-                        )
-                        key = (title.casefold(), category, symptom.casefold(), locations)
-                        if key in dedupe_indexes:
-                            index = dedupe_indexes[key]
-                            prior = deduped[index]
-                            deduped[index] = prior.model_copy(
-                                update={
-                                    "source_reader_ids": list(
-                                        dict.fromkeys(prior.source_reader_ids + source_ids)
-                                    )
-                                }
-                            )
-                            continue
-                        dedupe_indexes[key] = len(deduped)
-                        deduped.append(
-                            extracted.model_copy(
-                                update={
-                                    "issue_number": len(deduped) + 1,
-                                    "title": title,
-                                    "category": category,
-                                    "symptom": symptom,
-                                    "root_cause_hypotheses": [
-                                        " ".join(value.split())
-                                        for value in extracted.root_cause_hypotheses
-                                    ],
-                                    "source_reader_ids": list(dict.fromkeys(source_ids)),
-                                }
-                            )
-                        )
-                    normalized = deduped
-                    break
-                except Exception:
-                    continue
+            try:
+                normalized = await self._invoke_provider(
+                    session_id=panel_session.id,
+                    phase=ReaderPanelInvocationPhase.ISSUE_EXTRACTION,
+                    work_key="issues",
+                    request=request,
+                    invoke=panel_provider.extract_issues,
+                    expected_type=ModeratorIssueExtractionOutput,
+                    validate=normalize_extraction,
+                )
+            except _ReaderPanelWorkAlreadyCompleted:
+                return await self.collect_initial_ballots(
+                    session_id=session_id, provider=panel_provider
+                )
+            except (asyncio.CancelledError, _ReaderPanelWorkInProgressError):
+                raise
+            except Exception as exc:
+                error_code, _ = self._safe_provider_error(exc)
+                if error_code != ReaderPanelSafeError.INVALID_OUTPUT.value:
+                    extraction_failure_reason = "issue_extraction_failed"
+                normalized = None
 
             panel_session = await lock_session()
             fresh_runs = eligible(panel_session)
@@ -762,23 +1575,7 @@ class ReaderPanelService:
             )
             if not issues and panel_session.status == ReaderPanelStatus.ISSUE_EXTRACTION.value:
                 if normalized is None:
-                    panel_session.status = ReaderPanelStatus.FAILED.value
-                    panel_session.failure_reason = (
-                        "Issue extraction produced invalid structured output."
-                    )
-                    self._db.add(
-                        WorkflowEvent(
-                            workflow_run_id=panel_session.workflow_run_id,
-                            event_type="reader_panel.failed",
-                            node_name="failed",
-                            payload={
-                                "session_id": str(panel_session.id),
-                                "status": panel_session.status,
-                                "reason_code": "invalid_issue_extraction",
-                            },
-                            event_sequence=None,
-                        )
-                    )
+                    await self._settle_failed(panel_session, extraction_failure_reason)
                     await self._db.commit()
                     raise ReaderPanelInvalidStateError()
                 for extracted in normalized:
@@ -852,7 +1649,6 @@ class ReaderPanelService:
             .all()
         )
         existing_pairs = {(ballot.reader_run_id, ballot.issue_id) for ballot in ballots}
-        pending: list[tuple[ReaderRun, ReaderPanelIssue, ReaderBallotOutput]] = []
         await self._db.commit()
         for run in eligible_runs:
             for issue in issues:
@@ -879,26 +1675,85 @@ class ReaderPanelService:
                     manuscript_segments=segments,
                 )
                 valid_output = None
-                for _ in range(2):
-                    try:
-                        output = panel_provider.generate_blind_ballot(request)
-                        if type(output) is not ReaderBallotOutput:
-                            raise TypeError
-                        if (
-                            output.issue_number != issue.issue_number
-                            or not output.evidence
-                            or any(
-                                not set(ref.segment_ids).issubset(segment_ids)
-                                for ref in output.evidence
-                            )
-                        ):
-                            raise ValueError
-                        valid_output = output
-                        break
-                    except Exception:
-                        continue
+
+                def validate_ballot(output: ReaderBallotOutput) -> ReaderBallotOutput:
+                    if (
+                        output.issue_number != issue.issue_number
+                        or not output.evidence
+                        or any(
+                            not set(ref.segment_ids).issubset(segment_ids)
+                            for ref in output.evidence
+                        )
+                    ):
+                        raise ValueError
+                    return output
+
+                try:
+                    valid_output = await self._invoke_provider(
+                        session_id=panel_session.id,
+                        phase=ReaderPanelInvocationPhase.INITIAL_BALLOT,
+                        work_key=f"reader:{run.id}:issue:{issue.issue_number}",
+                        request=request,
+                        invoke=panel_provider.generate_blind_ballot,
+                        expected_type=ReaderBallotOutput,
+                        validate=validate_ballot,
+                    )
+                except _ReaderPanelWorkAlreadyCompleted:
+                    return await self.collect_initial_ballots(
+                        session_id=session_id, provider=panel_provider
+                    )
+                except (asyncio.CancelledError, _ReaderPanelWorkInProgressError):
+                    raise
+                except Exception as exc:
+                    error_code, _ = self._safe_provider_error(exc)
+                    locked = await lock_session()
+                    if error_code == ReaderPanelSafeError.UNKNOWN_COMMIT.value:
+                        await self._settle_failed(locked, "provider_outcome_unknown")
+                        await self._db.commit()
+                        raise ReaderPanelInvalidStateError() from None
+                    if not await self._eliminate_reader(
+                        locked,
+                        run.id,
+                        error_code,
+                        "initial_ballot_sample_below_minimum",
+                    ):
+                        raise ReaderPanelInvalidStateError() from None
+                    break
                 if valid_output is not None:
-                    pending.append((run, issue, valid_output))
+                    locked = await lock_session()
+                    fresh_ballots = (
+                        (
+                            await self._db.execute(
+                                select(ReaderPanelBallot).where(
+                                    ReaderPanelBallot.session_id == locked.id,
+                                    ReaderPanelBallot.phase == "initial",
+                                )
+                            )
+                        )
+                        .scalars()
+                        .all()
+                    )
+                    if not any(
+                        ballot.reader_run_id == run.id and ballot.issue_id == issue.id
+                        for ballot in fresh_ballots
+                    ):
+                        self._db.add(
+                            ReaderPanelBallot(
+                                id=uuid4(),
+                                session_id=locked.id,
+                                reader_run_id=run.id,
+                                issue_id=issue.id,
+                                phase="initial",
+                                severity=valid_output.severity.value,
+                                suggested_action=valid_output.suggested_action.value,
+                                confidence=valid_output.confidence.value,
+                                evidence=[ref.model_dump() for ref in valid_output.evidence],
+                                position_changed=False,
+                                change_reason=None,
+                                remaining_disagreement=None,
+                            )
+                        )
+                    await self._db.commit()
 
         panel_session = await lock_session()
         eligible_runs = eligible(panel_session)
@@ -937,40 +1792,11 @@ class ReaderPanelService:
             .all()
         )
         actual_pairs = {(ballot.reader_run_id, ballot.issue_id) for ballot in ballots}
-        valid_run_ids = {run.id for run in eligible_runs}
-        issues_by_id = {issue.id: issue for issue in issues}
-        for run, issue, output in pending:
-            pair = (run.id, issue.id)
-            if (
-                panel_session.status == ReaderPanelStatus.INITIAL_BALLOTS_LOCKED.value
-                or run.id not in valid_run_ids
-                or issue.id not in issues_by_id
-                or pair in actual_pairs
-            ):
-                continue
-            ballot = ReaderPanelBallot(
-                id=uuid4(),
-                session_id=panel_session.id,
-                reader_run_id=run.id,
-                issue_id=issue.id,
-                phase="initial",
-                severity=output.severity.value,
-                suggested_action=output.suggested_action.value,
-                confidence=output.confidence.value,
-                evidence=[ref.model_dump() for ref in output.evidence],
-                position_changed=False,
-                change_reason=None,
-                remaining_disagreement=None,
-            )
-            self._db.add(ballot)
-            ballots.append(ballot)
-            actual_pairs.add(pair)
         expected_pairs = {(run.id, issue.id) for run in eligible_runs for issue in issues}
         complete = expected_pairs.issubset(actual_pairs)
         if complete and panel_session.initial_ballots_locked_at is None:
             panel_session.initial_ballots_locked_at = datetime.now(timezone.utc)
             panel_session.status = ReaderPanelStatus.INITIAL_BALLOTS_LOCKED.value
-            panel_session.degradation_reason = None
             self._db.add(
                 WorkflowEvent(
                     workflow_run_id=panel_session.workflow_run_id,
@@ -989,7 +1815,7 @@ class ReaderPanelService:
             not complete and panel_session.status != ReaderPanelStatus.INITIAL_BALLOTS_LOCKED.value
         ):
             panel_session.status = ReaderPanelStatus.INITIAL_BALLOTING.value
-            panel_session.degradation_reason = "One or more initial ballots were invalid."
+            panel_session.degradation_reason = "initial_ballot_incomplete"
         await self._db.commit()
         return ReaderPanelSessionResult(
             session_id=panel_session.id,
@@ -1017,7 +1843,6 @@ class ReaderPanelService:
         panel_provider = provider or DeterministicReaderPanelProvider(
             scenario=ReaderPanelFakeScenario.CLEAN
         )
-        started = monotonic()
         active_statuses = {
             ReaderPanelStatus.INITIAL_BALLOTS_LOCKED.value,
             ReaderPanelStatus.DISCUSSING.value,
@@ -1035,6 +1860,7 @@ class ReaderPanelService:
             locked = (await self._db.execute(stmt)).scalars().first()
             if locked is None:
                 raise ReaderPanelNotFoundError()
+            await self._refresh_stale_flag(locked)
             return locked
 
         async def load_issues() -> list[ReaderPanelIssue]:
@@ -1143,7 +1969,6 @@ class ReaderPanelService:
             )
 
         async def reserve_call(
-            request: Any,
             step: str,
             *,
             issue_id: UUID,
@@ -1228,25 +2053,7 @@ class ReaderPanelService:
                 ):
                     await self._db.commit()
                     return "work_complete"
-            max_calls = int(locked.config_snapshot.get("max_total_model_calls", 64))
-            if len(messages) >= max_calls:
-                await self._db.commit()
-                return "message_exhaustion"
             step_counter = int(locked.step_counter or 0)
-            if step_counter >= max_calls:
-                await self._db.commit()
-                return "call_exhaustion"
-            if monotonic() - started >= float(
-                locked.config_snapshot.get("max_execution_seconds", 300)
-            ):
-                await self._db.commit()
-                return "time_exhaustion"
-            estimated_tokens = max(1, len(request.model_dump_json().encode("utf-8")))
-            if estimated_tokens > int(
-                locked.config_snapshot.get("max_input_tokens_per_call", 32_000)
-            ):
-                await self._db.commit()
-                return "token_exhaustion"
             locked.step_counter = step_counter + 1
             locked.current_step = step
             await self._db.commit()
@@ -1328,6 +2135,7 @@ class ReaderPanelService:
 
         issue_ids = {issue.id for issue in issues}
         run_ids = {run.id for run in eligible_runs}
+        all_run_ids = {run.id for run in runs if run.session_id == session_id}
         for issue in issues:
             evidence = issue.evidence
             if not isinstance(evidence, list) or not evidence:
@@ -1346,7 +2154,7 @@ class ReaderPanelService:
         expected_initial_pairs = {(run.id, issue.id) for run in eligible_runs for issue in issues}
         if any(
             ballot.session_id != session_id
-            or ballot.reader_run_id not in run_ids
+            or ballot.reader_run_id not in all_run_ids
             or ballot.issue_id not in issue_ids
             or ballot.phase != "initial"
             for ballot in initial_ballots
@@ -1377,6 +2185,12 @@ class ReaderPanelService:
                     raise ReaderPanelInvalidStateError()
         initial_by_pair = {
             (ballot.reader_run_id, ballot.issue_id): ballot for ballot in initial_ballots
+        }
+        turn_by_run = {
+            run.id: turn
+            for turn, run in enumerate(
+                sorted(runs, key=lambda item: (item.reader_profile_id, str(item.id))), start=1
+            )
         }
         severity_rank = {
             "critical": 4,
@@ -1493,11 +2307,14 @@ class ReaderPanelService:
                 round_reader_messages: list[ReaderPanelMessage] = [
                     message
                     for message in issue_messages
-                    if message.round_number == round_number and message.speaker_type == "reader"
+                    if message.round_number == round_number
+                    and message.speaker_type == "reader"
+                    and message.reader_run_id in run_ids
                 ]
                 existing_turns = {message.turn_number for message in round_reader_messages}
                 discussion_incomplete = False
-                for turn_number, run in enumerate(eligible_runs, start=1):
+                for run in eligible_runs:
+                    turn_number = turn_by_run[run.id]
                     if turn_number in existing_turns:
                         continue
                     initial = initial_by_pair[(run.id, agenda_issue.id)]
@@ -1559,55 +2376,86 @@ class ReaderPanelService:
                         manuscript_segments=issue_segments,
                     )
                     valid_output = None
-                    stop_reason = None
-                    for _ in range(2):
-                        stop_reason = await reserve_call(
-                            request,
-                            f"discussion:{agenda_issue.issue_number}:{round_number}:{turn_number}",
-                            issue_id=agenda_issue.id,
-                            round_number=round_number,
-                            turn_number=turn_number,
-                            reader_run_id=run.id,
-                        )
-                        if stop_reason is not None:
-                            break
+                    stop_reason = await reserve_call(
+                        f"discussion:{agenda_issue.issue_number}:{round_number}:{turn_number}",
+                        issue_id=agenda_issue.id,
+                        round_number=round_number,
+                        turn_number=turn_number,
+                        reader_run_id=run.id,
+                    )
+                    allowed_uuids = {
+                        str(panel_session.project_id).lower(),
+                        str(panel_session.chapter_id).lower(),
+                        str(panel_session.workflow_run_id).lower(),
+                        str(panel_session.id).lower(),
+                        str(agenda_issue.id).lower(),
+                    }
+
+                    def validate_turn(
+                        output: ReaderDiscussionTurnOutput,
+                    ) -> ReaderDiscussionTurnOutput:
+                        if (
+                            not output.evidence
+                            or any(
+                                not set(ref.segment_ids).issubset(allowed_segment_ids)
+                                for ref in output.evidence
+                            )
+                            or not references_are_scoped(
+                                [
+                                    output.claim,
+                                    output.concession,
+                                    output.proposed_action,
+                                    *(ref.note for ref in output.evidence),
+                                ],
+                                issue=agenda_issue,
+                                allowed_segment_ids=allowed_segment_ids,
+                                round_number=round_number,
+                                allowed_uuids=allowed_uuids,
+                                forbidden_profiles={
+                                    other.reader_profile_id for other in eligible_runs
+                                },
+                            )
+                        ):
+                            raise ValueError
+                        return output
+
+                    if stop_reason is None:
                         try:
-                            output = panel_provider.generate_discussion_turn(request)
-                            allowed_uuids = {
-                                str(panel_session.project_id).lower(),
-                                str(panel_session.chapter_id).lower(),
-                                str(panel_session.workflow_run_id).lower(),
-                                str(panel_session.id).lower(),
-                                str(agenda_issue.id).lower(),
-                            }
-                            if (
-                                type(output) is not ReaderDiscussionTurnOutput
-                                or not output.evidence
-                                or any(
-                                    not set(ref.segment_ids).issubset(allowed_segment_ids)
-                                    for ref in output.evidence
-                                )
-                                or not references_are_scoped(
-                                    [
-                                        output.claim,
-                                        output.concession,
-                                        output.proposed_action,
-                                        *(ref.note for ref in output.evidence),
-                                    ],
-                                    issue=agenda_issue,
-                                    allowed_segment_ids=allowed_segment_ids,
-                                    round_number=round_number,
-                                    allowed_uuids=allowed_uuids,
-                                    forbidden_profiles={
-                                        other.reader_profile_id for other in eligible_runs
-                                    },
-                                )
+                            valid_output = await self._invoke_provider(
+                                session_id=panel_session.id,
+                                phase=ReaderPanelInvocationPhase.DISCUSSION_TURN,
+                                work_key=(
+                                    f"issue:{agenda_issue.issue_number}:round:{round_number}:"
+                                    f"reader:{run.id}"
+                                ),
+                                request=request,
+                                invoke=panel_provider.generate_discussion_turn,
+                                expected_type=ReaderDiscussionTurnOutput,
+                                validate=validate_turn,
+                            )
+                        except _ReaderPanelWorkAlreadyCompleted:
+                            return await self.run_discussion_and_final_ballots(
+                                session_id=session_id, provider=panel_provider
+                            )
+                        except (asyncio.CancelledError, _ReaderPanelWorkInProgressError):
+                            raise
+                        except Exception as exc:
+                            error_code, _ = self._safe_provider_error(exc)
+                            locked = await lock_session()
+                            if error_code == ReaderPanelSafeError.UNKNOWN_COMMIT.value:
+                                await self._settle_failed(locked, "provider_outcome_unknown")
+                                await self._db.commit()
+                                raise ReaderPanelInvalidStateError() from None
+                            if not await self._eliminate_reader(
+                                locked,
+                                run.id,
+                                error_code,
+                                "discussion_sample_below_minimum",
                             ):
-                                raise ValueError
-                            valid_output = output
-                            break
-                        except Exception:
-                            continue
+                                raise ReaderPanelInvalidStateError() from None
+                            return await self.run_discussion_and_final_ballots(
+                                session_id=session_id, provider=panel_provider
+                            )
                     if stop_reason == "work_complete":
                         continue
                     if stop_reason is not None:
@@ -1687,10 +2535,11 @@ class ReaderPanelService:
                         if message.issue_id == agenda_issue.id
                         and message.round_number == round_number
                         and message.speaker_type == "reader"
+                        and message.reader_run_id in run_ids
                     ],
                     key=lambda message: message.turn_number,
                 )
-                summary_turn = len(eligible_runs) + 1
+                summary_turn = len(runs) + 1
                 existing_summary = next(
                     (
                         message
@@ -1726,44 +2575,61 @@ class ReaderPanelService:
                         ],
                     )
                     summary_output = None
-                    stop_reason = None
-                    for _ in range(2):
-                        stop_reason = await reserve_call(
-                            summary_request,
-                            f"summary:{agenda_issue.issue_number}:{round_number}",
-                            issue_id=agenda_issue.id,
+                    stop_reason = await reserve_call(
+                        f"summary:{agenda_issue.issue_number}:{round_number}",
+                        issue_id=agenda_issue.id,
+                        round_number=round_number,
+                        turn_number=summary_turn,
+                    )
+
+                    def validate_summary(
+                        output: ModeratorDiscussionSummaryOutput,
+                    ) -> ModeratorDiscussionSummaryOutput:
+                        if not references_are_scoped(
+                            [
+                                output.round_summary,
+                                *output.remaining_disagreements,
+                                output.suggested_focus,
+                            ],
+                            issue=agenda_issue,
+                            allowed_segment_ids=allowed_segment_ids,
                             round_number=round_number,
-                            turn_number=summary_turn,
-                        )
-                        if stop_reason is not None:
-                            break
+                            allowed_uuids={
+                                str(panel_session.project_id).lower(),
+                                str(panel_session.chapter_id).lower(),
+                                str(panel_session.workflow_run_id).lower(),
+                                str(panel_session.id).lower(),
+                                str(agenda_issue.id).lower(),
+                            },
+                            forbidden_profiles={run.reader_profile_id for run in eligible_runs},
+                        ):
+                            raise ValueError
+                        return output
+
+                    if stop_reason is None:
                         try:
-                            output = panel_provider.summarize_discussion(summary_request)
-                            if type(
-                                output
-                            ) is not ModeratorDiscussionSummaryOutput or not references_are_scoped(
-                                [
-                                    output.round_summary,
-                                    *output.remaining_disagreements,
-                                    output.suggested_focus,
-                                ],
-                                issue=agenda_issue,
-                                allowed_segment_ids=allowed_segment_ids,
-                                round_number=round_number,
-                                allowed_uuids={
-                                    str(panel_session.project_id).lower(),
-                                    str(panel_session.chapter_id).lower(),
-                                    str(panel_session.workflow_run_id).lower(),
-                                    str(panel_session.id).lower(),
-                                    str(agenda_issue.id).lower(),
-                                },
-                                forbidden_profiles={run.reader_profile_id for run in eligible_runs},
-                            ):
-                                raise TypeError
-                            summary_output = output
-                            break
+                            summary_output = await self._invoke_provider(
+                                session_id=panel_session.id,
+                                phase=ReaderPanelInvocationPhase.DISCUSSION_SUMMARY,
+                                work_key=(
+                                    f"issue:{agenda_issue.issue_number}:round:{round_number}"
+                                ),
+                                request=summary_request,
+                                invoke=panel_provider.summarize_discussion,
+                                expected_type=ModeratorDiscussionSummaryOutput,
+                                validate=validate_summary,
+                            )
+                        except _ReaderPanelWorkAlreadyCompleted:
+                            return await self.run_discussion_and_final_ballots(
+                                session_id=session_id, provider=panel_provider
+                            )
+                        except (asyncio.CancelledError, _ReaderPanelWorkInProgressError):
+                            raise
                         except Exception:
-                            continue
+                            locked = await lock_session()
+                            await self._settle_failed(locked, "discussion_summary_failed")
+                            await self._db.commit()
+                            raise ReaderPanelInvalidStateError() from None
                     if stop_reason == "work_complete":
                         break
                     if stop_reason is not None:
@@ -1924,58 +2790,87 @@ class ReaderPanelService:
                         manuscript_segments=issue_segments,
                     )
                     valid_output = None
-                    for _ in range(2):
-                        stop_reason = await reserve_call(
-                            request,
-                            f"final:{agenda_issue.issue_number}:{run.id}",
-                            issue_id=agenda_issue.id,
-                            reader_run_id=run.id,
-                        )
-                        if stop_reason is not None:
-                            break
-                        try:
-                            output = panel_provider.generate_final_ballot(request)
-                            if (
-                                type(output) is not ReaderFinalBallotOutput
-                                or output.issue_number != agenda_issue.issue_number
-                                or not output.evidence
-                                or any(
-                                    not set(ref.segment_ids).issubset(allowed_segment_ids)
-                                    for ref in output.evidence
-                                )
-                                or not references_are_scoped(
-                                    [
-                                        output.change_reason,
-                                        output.remaining_disagreement,
-                                        *(ref.note for ref in output.evidence),
-                                    ],
-                                    issue=agenda_issue,
-                                    allowed_segment_ids=allowed_segment_ids,
-                                    round_number=max(
-                                        (
-                                            message.round_number
-                                            for message in messages
-                                            if message.issue_id == agenda_issue.id
-                                        ),
-                                        default=1,
+                    stop_reason = await reserve_call(
+                        f"final:{agenda_issue.issue_number}:{run.id}",
+                        issue_id=agenda_issue.id,
+                        reader_run_id=run.id,
+                    )
+
+                    def validate_final(
+                        output: ReaderFinalBallotOutput,
+                    ) -> ReaderFinalBallotOutput:
+                        if (
+                            output.issue_number != agenda_issue.issue_number
+                            or not output.evidence
+                            or any(
+                                not set(ref.segment_ids).issubset(allowed_segment_ids)
+                                for ref in output.evidence
+                            )
+                            or not references_are_scoped(
+                                [
+                                    output.change_reason,
+                                    output.remaining_disagreement,
+                                    *(ref.note for ref in output.evidence),
+                                ],
+                                issue=agenda_issue,
+                                allowed_segment_ids=allowed_segment_ids,
+                                round_number=max(
+                                    (
+                                        message.round_number
+                                        for message in messages
+                                        if message.issue_id == agenda_issue.id
                                     ),
-                                    allowed_uuids={
-                                        str(panel_session.project_id).lower(),
-                                        str(panel_session.chapter_id).lower(),
-                                        str(panel_session.workflow_run_id).lower(),
-                                        str(panel_session.id).lower(),
-                                        str(agenda_issue.id).lower(),
-                                    },
-                                    forbidden_profiles={
-                                        other.reader_profile_id for other in eligible_runs
-                                    },
-                                )
+                                    default=1,
+                                ),
+                                allowed_uuids={
+                                    str(panel_session.project_id).lower(),
+                                    str(panel_session.chapter_id).lower(),
+                                    str(panel_session.workflow_run_id).lower(),
+                                    str(panel_session.id).lower(),
+                                    str(agenda_issue.id).lower(),
+                                },
+                                forbidden_profiles={
+                                    other.reader_profile_id for other in eligible_runs
+                                },
+                            )
+                        ):
+                            raise ValueError
+                        return output
+
+                    if stop_reason is None:
+                        try:
+                            valid_output = await self._invoke_provider(
+                                session_id=panel_session.id,
+                                phase=ReaderPanelInvocationPhase.FINAL_BALLOT,
+                                work_key=(f"issue:{agenda_issue.issue_number}:reader:{run.id}"),
+                                request=request,
+                                invoke=panel_provider.generate_final_ballot,
+                                expected_type=ReaderFinalBallotOutput,
+                                validate=validate_final,
+                            )
+                        except _ReaderPanelWorkAlreadyCompleted:
+                            return await self.run_discussion_and_final_ballots(
+                                session_id=session_id, provider=panel_provider
+                            )
+                        except (asyncio.CancelledError, _ReaderPanelWorkInProgressError):
+                            raise
+                        except Exception as exc:
+                            error_code, _ = self._safe_provider_error(exc)
+                            locked = await lock_session()
+                            if error_code == ReaderPanelSafeError.UNKNOWN_COMMIT.value:
+                                await self._settle_failed(locked, "provider_outcome_unknown")
+                                await self._db.commit()
+                                raise ReaderPanelInvalidStateError() from None
+                            if not await self._eliminate_reader(
+                                locked,
+                                run.id,
+                                error_code,
+                                "final_ballot_sample_below_minimum",
                             ):
-                                raise ValueError
-                            valid_output = output
-                            break
-                        except Exception:
-                            continue
+                                raise ReaderPanelInvalidStateError() from None
+                            return await self.run_discussion_and_final_ballots(
+                                session_id=session_id, provider=panel_provider
+                            )
                     if valid_output is None:
                         continue
                     locked = await lock_session()
@@ -2617,10 +3512,17 @@ class ReaderPanelService:
         session.status = ReaderPanelStatus.REPORT_GENERATING.value
         session.current_step = "report_generating"
         await self._db.commit()
+        output_received = False
         try:
-            output = panel_provider.synthesize_report(request)
-            if type(output) is not ModeratorReportSynthesisOutput:
-                raise TypeError
+            output = await self._invoke_provider(
+                session_id=session.id,
+                phase=ReaderPanelInvocationPhase.REPORT_SYNTHESIS,
+                work_key="editor_handoff",
+                request=request,
+                invoke=panel_provider.synthesize_report,
+                expected_type=ModeratorReportSynthesisOutput,
+            )
+            output_received = True
             output = ModeratorReportSynthesisOutput.model_validate(output.model_dump(mode="python"))
 
             def references_are_scoped(
@@ -2725,9 +3627,43 @@ class ReaderPanelService:
                     or recommendation.target_segment_ids != segment_ids
                 ):
                     raise ValueError("recommendation binding")
+        except _ReaderPanelWorkAlreadyCompleted:
+            completed, *_ = await load_locked_snapshot()
+            report_id = await existing_report_id(completed)
+            if report_id is None:
+                await self._db.commit()
+                raise ReaderPanelInvalidStateError() from None
+            await self._db.commit()
+            return ReaderPanelSessionResult(
+                session_id=completed.id,
+                workflow_run_id=completed.workflow_run_id,
+                status=completed.status,
+                mode=completed.mode,
+                review_report_id=report_id,
+                stale=completed.stale,
+                degradation_reason=completed.degradation_reason,
+            )
+        except (asyncio.CancelledError, _ReaderPanelWorkInProgressError):
+            raise
         except Exception:
+            if output_received:
+                await self._reject_report_synthesis_output(session.id)
             failed, *_ = await load_locked_snapshot()
-            if failed.review_report_id is None:
+            report_id = await existing_report_id(failed)
+            if report_id is not None:
+                await self._db.commit()
+                return ReaderPanelSessionResult(
+                    session_id=failed.id,
+                    workflow_run_id=failed.workflow_run_id,
+                    status=failed.status,
+                    mode=failed.mode,
+                    review_report_id=report_id,
+                    stale=failed.stale,
+                    degradation_reason=failed.degradation_reason,
+                )
+            if not output_received:
+                await self._settle_failed(failed, "report_synthesis_failed")
+            elif failed.review_report_id is None:
                 failed.status = ReaderPanelStatus.FINAL_BALLOTS_LOCKED.value
                 failed.current_step = "final_ballots_locked"
             await self._db.commit()
@@ -2767,7 +3703,7 @@ class ReaderPanelService:
         degraded = bool(failed_readers or fresh_session.degradation_reason)
         degradation_reasons = [fresh_session.degradation_reason]
         if failed_readers:
-            degradation_reasons.append(f"{failed_readers} reader(s) unavailable.")
+            degradation_reasons.append("reader_sample_degraded")
         degradation_reason = (
             " ".join(dict.fromkeys(reason for reason in degradation_reasons if reason)) or None
         )

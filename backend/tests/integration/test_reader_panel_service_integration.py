@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+from threading import Event
 from uuid import uuid4
 import pytest
 from sqlalchemy import select
@@ -35,8 +36,10 @@ from app.models.reader_panel import (
     ReaderInitialReport,
     ReaderPanelBallot,
     ReaderPanelIssue,
+    ReaderPanelInvocation,
     ReaderPanelMessage,
     ReaderPanelSession,
+    ReaderRun,
 )
 from app.services.reader_panel_service import (
     ReaderPanelNotFoundError,
@@ -142,6 +145,166 @@ class PostgreSQLReportProvider(DeterministicReaderPanelProvider):
 @pytest.mark.integration
 @pytest.mark.anyio
 class TestReaderPanelServiceIntegration:
+    async def test_concurrent_resume_and_cancel_preserve_committed_history(
+        self,
+        async_session: AsyncSession,
+    ) -> None:
+        project_id = uuid4()
+        chapter_id = uuid4()
+        document_id = uuid4()
+        version_id = uuid4()
+        content = "A version-bound opening."
+        project = Project(
+            id=project_id,
+            slug=f"recovery-{project_id.hex[:8]}",
+            title="Recovery",
+            genre="fantasy",
+            workspace_root=f"/tmp/workspaces/{project_id}",
+        )
+        chapter = Chapter(
+            id=chapter_id,
+            project_id=project_id,
+            chapter_number=1,
+            title="Opening",
+        )
+        document = Document(
+            id=document_id,
+            project_id=project_id,
+            chapter_id=chapter_id,
+            type="chapter_draft",
+            title="Opening",
+            path="chapters/001.md",
+            current_version_id=None,
+        )
+        async_session.add_all([project, chapter, document])
+        await async_session.flush()
+        version = DocumentVersion(
+            id=version_id,
+            document_id=document_id,
+            version_number=1,
+            source="writer_agent",
+            content_hash=hashlib.sha256(content.encode()).hexdigest(),
+            byte_size=len(content.encode()),
+            word_count=4,
+            file_path="chapters/001_v1.md",
+            metadata_={"segments": {"S001": content}},
+        )
+        async_session.add(version)
+        await async_session.flush()
+        document.current_version_id = version_id
+        await async_session.commit()
+
+        initialized = await ReaderPanelService(async_session).initialize_session(
+            project_id=project_id,
+            chapter_id=chapter_id,
+            mode=PanelMode.QUICK,
+        )
+        engine = async_session.bind
+        assert engine is not None
+        session_factory = async_sessionmaker(engine, expire_on_commit=False)
+        started = Event()
+        release = Event()
+
+        class BlockingProvider(DeterministicReaderPanelProvider):
+            def generate_initial_reading(self, request):
+                started.set()
+                assert release.wait(timeout=10)
+                return super().generate_initial_reading(request)
+
+        provider = BlockingProvider(scenario=ReaderPanelFakeScenario.CLEAN)
+
+        async def resume():
+            async with session_factory() as db:
+                return await ReaderPanelService(db).resume_session(
+                    session_id=initialized.session_id,
+                    provider=provider,
+                )
+
+        async def cancel():
+            async with session_factory() as db:
+                return await ReaderPanelService(db).cancel_session(
+                    session_id=initialized.session_id,
+                )
+
+        resume_task = asyncio.create_task(resume())
+        assert await asyncio.to_thread(started.wait, 10)
+        try:
+            cancel_result = await cancel()
+        finally:
+            release.set()
+        resume_result = await asyncio.gather(resume_task, return_exceptions=True)
+        assert cancel_result.status == ReaderPanelStatus.CANCELLED.value
+        assert len(resume_result) == 1
+        durable = await async_session.get(
+            ReaderPanelSession, initialized.session_id, populate_existing=True
+        )
+        assert durable is not None
+        assert durable.status == ReaderPanelStatus.CANCELLED.value
+        assert durable.current_step == ReaderPanelStatus.CANCELLED.value
+        assert durable.completed_at is not None
+        workflow = await async_session.get(
+            WorkflowRun, initialized.workflow_run_id, populate_existing=True
+        )
+        assert workflow is not None
+        assert workflow.status == ReaderPanelStatus.CANCELLED.value
+        assert workflow.current_node == ReaderPanelStatus.CANCELLED.value
+        assert workflow.next_node is None
+        assert workflow.awaiting_user is False
+        assert workflow.completed_at == durable.completed_at
+        runs = (
+            (
+                await async_session.execute(
+                    select(ReaderRun).where(ReaderRun.session_id == initialized.session_id)
+                )
+            )
+            .scalars()
+            .all()
+        )
+        reports = (
+            (
+                await async_session.execute(
+                    select(ReaderInitialReport).where(
+                        ReaderInitialReport.session_id == initialized.session_id
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        attempts = (
+            (
+                await async_session.execute(
+                    select(ReaderPanelInvocation).where(
+                        ReaderPanelInvocation.session_id == initialized.session_id
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        assert len(runs) == 2
+        assert reports == []
+        assert len({report.reader_run_id for report in reports}) == len(reports)
+        assert len({(item.phase, item.work_key, item.attempt) for item in attempts}) == len(
+            attempts
+        )
+        assert attempts
+        assert all(item.status != "started" for item in attempts)
+        assert all(item.status == "cancelled" for item in attempts)
+        events = (
+            (
+                await async_session.execute(
+                    select(WorkflowEvent).where(
+                        WorkflowEvent.workflow_run_id == initialized.workflow_run_id,
+                        WorkflowEvent.event_type == "reader_panel.cancelled",
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        assert len(events) == 1
+
     async def test_full_initial_reading_lifecycle_postgresql(
         self,
         async_session: AsyncSession,
@@ -239,13 +402,31 @@ class TestReaderPanelServiceIntegration:
         assert dup_result.session_id == init_result.session_id
 
         # 3. Collect cold-read reports
-        provider = DeterministicReaderPanelProvider(scenario=ReaderPanelFakeScenario.CLEAN)
+        loop = asyncio.get_running_loop()
+
+        class ExpiringNestedRelationshipProvider(DeterministicReaderPanelProvider):
+            def generate_initial_reading(self, request):
+                output = super().generate_initial_reading(request)
+                expired = Event()
+
+                def expire_nested_relationships() -> None:
+                    for instance in list(async_session.identity_map.values()):
+                        if isinstance(instance, ReaderRun):
+                            async_session.expire(instance, ["initial_report"])
+                    expired.set()
+
+                loop.call_soon_threadsafe(expire_nested_relationships)
+                assert expired.wait(timeout=5)
+                return output
+
+        provider = ExpiringNestedRelationshipProvider(scenario=ReaderPanelFakeScenario.CLEAN)
         report_result = await service.collect_initial_reports(
             session_id=init_result.session_id,
             provider=provider,
         )
 
         assert report_result.initial_reports_locked is True
+        assert report_result.planned_readers == 4
         assert report_result.completed_readers == 4
         assert report_result.status == ReaderPanelStatus.INITIAL_REPORTS_LOCKED.value
 
@@ -269,22 +450,40 @@ class TestReaderPanelServiceIntegration:
             assert r.locked_at is not None
 
         # 4. Two independent sessions race safely: provider calls may repeat, rows may not.
-        ballot_provider = PostgreSQLBallotProvider()
+        extraction_started = Event()
+        release_extraction = Event()
+
+        class BlockingExtractionProvider(PostgreSQLBallotProvider):
+            def extract_issues(self, request) -> ModeratorIssueExtractionOutput:
+                extraction_started.set()
+                assert release_extraction.wait(timeout=10)
+                return super().extract_issues(request)
+
+        ballot_provider = BlockingExtractionProvider()
         engine = async_session.bind
         assert engine is not None
         session_factory = async_sessionmaker(engine, expire_on_commit=False)
 
-        async def collect_concurrently():
+        loser_entered_provider = asyncio.Event()
+
+        class SignallingLoserService(ReaderPanelService):
+            async def _invoke_provider(self, **kwargs):
+                loser_entered_provider.set()
+                return await super()._invoke_provider(**kwargs)
+
+        async def collect_concurrently(service_type=ReaderPanelService):
             async with session_factory() as concurrent_session:
-                return await ReaderPanelService(concurrent_session).collect_initial_ballots(
+                return await service_type(concurrent_session).resume_session(
                     session_id=init_result.session_id,
                     provider=ballot_provider,
                 )
 
-        concurrent_results = await asyncio.gather(
-            collect_concurrently(),
-            collect_concurrently(),
-        )
+        winner = asyncio.create_task(collect_concurrently())
+        assert await asyncio.to_thread(extraction_started.wait, 10)
+        loser = asyncio.create_task(collect_concurrently(SignallingLoserService))
+        await asyncio.wait_for(loser_entered_provider.wait(), timeout=10)
+        release_extraction.set()
+        concurrent_results = await asyncio.gather(winner, loser)
         assert all(result.issue_count == 2 for result in concurrent_results)
         assert all(result.initial_ballot_count == 8 for result in concurrent_results)
         assert all(result.initial_ballots_locked for result in concurrent_results)
@@ -292,6 +491,17 @@ class TestReaderPanelServiceIntegration:
             result.status == ReaderPanelStatus.INITIAL_BALLOTS_LOCKED.value
             for result in concurrent_results
         )
+        durable_runs = (
+            (
+                await async_session.execute(
+                    select(ReaderRun).where(ReaderRun.session_id == init_result.session_id)
+                )
+            )
+            .scalars()
+            .all()
+        )
+        assert durable_runs
+        assert all(run.status == "completed" for run in durable_runs)
 
         issues = (
             (
@@ -369,6 +579,26 @@ class TestReaderPanelServiceIntegration:
             .all()
         )
         assert len(replay_ballots) == 8
+        invocation_rows = (
+            (
+                await async_session.execute(
+                    select(ReaderPanelInvocation).where(
+                        ReaderPanelInvocation.session_id == init_result.session_id
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        successful_keys = [
+            (row.phase, row.work_key) for row in invocation_rows if row.status == "succeeded"
+        ]
+        assert len(successful_keys) == len(set(successful_keys))
+        assert all(
+            not hasattr(row, field)
+            for row in invocation_rows
+            for field in ("prompt", "response", "content", "endpoint", "credential", "path")
+        )
 
         # 5. Discussion/final ballot recovery is also safe across two sessions.
         session_for_agenda = await async_session.get(
@@ -383,9 +613,7 @@ class TestReaderPanelServiceIntegration:
 
         async def discuss_concurrently():
             async with session_factory() as concurrent_session:
-                return await ReaderPanelService(
-                    concurrent_session
-                ).run_discussion_and_final_ballots(
+                return await ReaderPanelService(concurrent_session).resume_session(
                     session_id=init_result.session_id,
                     provider=discussion_provider,
                 )
@@ -498,7 +726,7 @@ class TestReaderPanelServiceIntegration:
 
         async def report_concurrently():
             async with session_factory() as concurrent_session:
-                return await ReaderPanelService(concurrent_session).generate_editor_handoff_report(
+                return await ReaderPanelService(concurrent_session).resume_session(
                     session_id=init_result.session_id,
                     provider=report_provider,
                 )

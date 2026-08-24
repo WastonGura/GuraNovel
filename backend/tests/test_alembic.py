@@ -55,14 +55,18 @@ def test_maintenance_migration_downgrades_in_dependency_order() -> None:
 
 
 def test_runtime_pin_migration_downgrades_in_dependency_order() -> None:
-    sql = run_alembic("downgrade", "0003_runtime_pin_event_sequence:0002_maintenance_persistence", "--sql")
+    sql = run_alembic(
+        "downgrade", "0003_runtime_pin_event_sequence:0002_maintenance_persistence", "--sql"
+    )
 
     assert "DROP INDEX uq_workflow_events_run_sequence" in sql
     assert "DROP COLUMN event_sequence" in sql
 
 
 def test_reader_panel_migration_generates_upgrade_sql() -> None:
-    sql = run_alembic("upgrade", "0003_runtime_pin_event_sequence:0004_reader_panel_persistence", "--sql")
+    sql = run_alembic(
+        "upgrade", "0003_runtime_pin_event_sequence:0004_reader_panel_persistence", "--sql"
+    )
 
     assert "CREATE TABLE reader_panel_sessions" in sql
     assert "CREATE TABLE reader_runs" in sql
@@ -79,7 +83,9 @@ def test_reader_panel_migration_generates_upgrade_sql() -> None:
 
 
 def test_reader_panel_migration_downgrades_in_dependency_order() -> None:
-    sql = run_alembic("downgrade", "0004_reader_panel_persistence:0003_runtime_pin_event_sequence", "--sql")
+    sql = run_alembic(
+        "downgrade", "0004_reader_panel_persistence:0003_runtime_pin_event_sequence", "--sql"
+    )
 
     msg = sql.index("DROP TABLE reader_panel_messages")
     ballot = sql.index("DROP TABLE reader_panel_ballots")
@@ -90,3 +96,37 @@ def test_reader_panel_migration_downgrades_in_dependency_order() -> None:
 
     assert msg < ballot < issue < report < run < session
 
+
+def test_reader_panel_recovery_migration_matches_invocation_ledger() -> None:
+    sql = run_alembic(
+        "upgrade", "0004_reader_panel_persistence:0005_reader_panel_recovery", "--sql"
+    )
+
+    assert "CREATE TABLE reader_panel_invocations" in sql
+    assert "uq_reader_panel_invocations_work_attempt" in sql
+    assert "uq_reader_panel_invocations_success" in sql
+    assert "ck_reader_panel_invocations_status" in sql
+    assert "ck_reader_panel_invocations_safe_error" in sql
+    assert "ck_reader_panel_invocations_work_key" in sql
+    assert "UPDATE reader_panel_sessions" in sql
+    for key in (
+        "max_model_calls_per_phase",
+        "max_total_input_tokens",
+        "max_total_output_tokens",
+        "max_output_tokens_per_call",
+        "max_messages",
+        "max_provider_attempts",
+        "max_invalid_output_repairs",
+    ):
+        assert key in sql
+    assert "prompt" not in sql.lower()
+    assert "response" not in sql.lower()
+
+
+def test_reader_panel_recovery_migration_downgrades_ledger() -> None:
+    sql = run_alembic(
+        "downgrade", "0005_reader_panel_recovery:0004_reader_panel_persistence", "--sql"
+    )
+
+    assert "DROP TABLE reader_panel_invocations" in sql
+    assert "config_snapshot -" in sql

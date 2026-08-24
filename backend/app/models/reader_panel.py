@@ -29,6 +29,9 @@ from app.workflows.reader_panel import (
     EditorHandoffDecision,
     PanelMode,
     ReaderPanelStatus,
+    ReaderPanelInvocationPhase,
+    ReaderPanelInvocationStatus,
+    ReaderPanelSafeError,
     Severity,
     SuggestedAction,
 )
@@ -130,7 +133,9 @@ class ReaderPanelSession(TimestampMixin, Base):
         default=ReaderPanelStatus.CREATED.value,
         server_default=text(f"'{ReaderPanelStatus.CREATED.value}'"),
     )
-    stale: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default=text("false"))
+    stale: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=text("false")
+    )
     config_snapshot: Mapped[dict] = mapped_column(
         JSONB,
         nullable=False,
@@ -161,13 +166,23 @@ class ReaderPanelSession(TimestampMixin, Base):
         default=list,
         server_default=text("'[]'::jsonb"),
     )
-    step_counter: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default=text("0"))
-    current_step: Mapped[str] = mapped_column(Text, nullable=False, default="", server_default=text("''"))
+    step_counter: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default=text("0")
+    )
+    current_step: Mapped[str] = mapped_column(
+        Text, nullable=False, default="", server_default=text("''")
+    )
     degradation_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
     failure_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
-    initial_reports_locked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    initial_ballots_locked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    final_ballots_locked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    initial_reports_locked_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    initial_ballots_locked_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    final_ballots_locked_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     review_report_id: Mapped[UUID | None] = mapped_column(
         PGUUID(as_uuid=True),
@@ -185,7 +200,9 @@ class ReaderPanelSession(TimestampMixin, Base):
         overlaps="project,reader_panel_sessions",
     )
     document: Mapped[Document | None] = relationship(foreign_keys=[document_id])
-    document_version: Mapped[DocumentVersion | None] = relationship(foreign_keys=[document_version_id])
+    document_version: Mapped[DocumentVersion | None] = relationship(
+        foreign_keys=[document_version_id]
+    )
 
     reader_runs: Mapped[list[ReaderRun]] = relationship(
         back_populates="session",
@@ -204,6 +221,10 @@ class ReaderPanelSession(TimestampMixin, Base):
         cascade="all, delete-orphan",
     )
     messages: Mapped[list[ReaderPanelMessage]] = relationship(
+        back_populates="session",
+        cascade="all, delete-orphan",
+    )
+    invocations: Mapped[list[ReaderPanelInvocation]] = relationship(
         back_populates="session",
         cascade="all, delete-orphan",
     )
@@ -240,9 +261,15 @@ class ReaderRun(TimestampMixin, Base):
         nullable=False,
     )
     reader_profile_id: Mapped[str] = mapped_column(Text, nullable=False)
-    status: Mapped[str] = mapped_column(Text, nullable=False, default="pending", server_default=text("'pending'"))
-    is_target_audience: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default=text("false"))
-    retry_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default=text("0"))
+    status: Mapped[str] = mapped_column(
+        Text, nullable=False, default="pending", server_default=text("'pending'")
+    )
+    is_target_audience: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=text("false")
+    )
+    retry_count: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default=text("0")
+    )
     error_code: Mapped[str | None] = mapped_column(Text, nullable=True)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
@@ -328,7 +355,9 @@ class ReaderInitialReport(Base):
         default=list,
         server_default=text("'[]'::jsonb"),
     )
-    locked: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default=text("true"))
+    locked: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=True, server_default=text("true")
+    )
     locked_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,
@@ -349,7 +378,9 @@ class ReaderPanelIssue(TimestampMixin, Base):
 
     __tablename__ = "reader_panel_issues"
     __table_args__ = (
-        UniqueConstraint("session_id", "issue_number", name="uq_reader_panel_issues_session_number"),
+        UniqueConstraint(
+            "session_id", "issue_number", name="uq_reader_panel_issues_session_number"
+        ),
         CheckConstraint("issue_number >= 1", name="ck_reader_panel_issues_number_positive"),
         CheckConstraint(
             "btrim(title) <> '' AND char_length(title) <= 256",
@@ -432,7 +463,9 @@ class ReaderPanelIssue(TimestampMixin, Base):
         default="medium",
         server_default=text("'medium'"),
     )
-    minority_risk: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default=text("false"))
+    minority_risk: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=text("false")
+    )
     discussion_status: Mapped[str] = mapped_column(
         Text,
         nullable=False,
@@ -459,7 +492,9 @@ class ReaderPanelBallot(Base):
 
     __tablename__ = "reader_panel_ballots"
     __table_args__ = (
-        UniqueConstraint("reader_run_id", "issue_id", "phase", name="uq_reader_panel_ballots_run_issue_phase"),
+        UniqueConstraint(
+            "reader_run_id", "issue_id", "phase", name="uq_reader_panel_ballots_run_issue_phase"
+        ),
         CheckConstraint(
             "phase IN ('initial', 'final')",
             name="ck_reader_panel_ballots_phase",
@@ -515,7 +550,9 @@ class ReaderPanelBallot(Base):
         default=list,
         server_default=text("'[]'::jsonb"),
     )
-    position_changed: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default=text("false"))
+    position_changed: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=text("false")
+    )
     change_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
     remaining_disagreement: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
@@ -534,7 +571,12 @@ class ReaderPanelMessage(Base):
 
     __tablename__ = "reader_panel_messages"
     __table_args__ = (
-        UniqueConstraint("issue_id", "round_number", "turn_number", name="uq_reader_panel_messages_issue_round_turn"),
+        UniqueConstraint(
+            "issue_id",
+            "round_number",
+            "turn_number",
+            name="uq_reader_panel_messages_issue_round_turn",
+        ),
         CheckConstraint("round_number >= 1", name="ck_reader_panel_messages_round_positive"),
         CheckConstraint("turn_number >= 1", name="ck_reader_panel_messages_turn_positive"),
         CheckConstraint(
@@ -613,3 +655,83 @@ class ReaderPanelMessage(Base):
     session: Mapped[ReaderPanelSession] = relationship(back_populates="messages")
     issue: Mapped[ReaderPanelIssue] = relationship(back_populates="messages")
     reader_run: Mapped[ReaderRun | None] = relationship(back_populates="messages")
+
+
+class ReaderPanelInvocation(Base):
+    """Content-free durable accounting for one provider attempt."""
+
+    __tablename__ = "reader_panel_invocations"
+    __table_args__ = (
+        UniqueConstraint(
+            "session_id",
+            "phase",
+            "work_key",
+            "attempt",
+            name="uq_reader_panel_invocations_work_attempt",
+        ),
+        CheckConstraint(
+            f"phase IN ({_sql_values(ReaderPanelInvocationPhase)})",
+            name="ck_reader_panel_invocations_phase",
+        ),
+        CheckConstraint(
+            f"status IN ({_sql_values(ReaderPanelInvocationStatus)})",
+            name="ck_reader_panel_invocations_status",
+        ),
+        CheckConstraint(
+            f"error_code IS NULL OR error_code IN ({_sql_values(ReaderPanelSafeError)})",
+            name="ck_reader_panel_invocations_safe_error",
+        ),
+        CheckConstraint(
+            "work_key ~ '^[A-Za-z0-9:_-]{1,160}$'",
+            name="ck_reader_panel_invocations_work_key",
+        ),
+        CheckConstraint("attempt >= 1", name="ck_reader_panel_invocations_attempt_positive"),
+        CheckConstraint(
+            "provider_calls >= 1 AND input_tokens >= 0 AND output_tokens >= 0",
+            name="ck_reader_panel_invocations_accounting_non_negative",
+        ),
+        Index("idx_reader_panel_invocations_session", "session_id"),
+        Index(
+            "uq_reader_panel_invocations_success",
+            "session_id",
+            "phase",
+            "work_key",
+            unique=True,
+            postgresql_where=text("status = 'succeeded'"),
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(
+        PGUUID(as_uuid=True),
+        primary_key=True,
+        default=uuid4,
+        server_default=text("gen_random_uuid()"),
+    )
+    session_id: Mapped[UUID] = mapped_column(
+        PGUUID(as_uuid=True),
+        ForeignKey("reader_panel_sessions.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    phase: Mapped[str] = mapped_column(Text, nullable=False)
+    work_key: Mapped[str] = mapped_column(Text, nullable=False)
+    attempt: Mapped[int] = mapped_column(Integer, nullable=False)
+    status: Mapped[str] = mapped_column(Text, nullable=False)
+    error_code: Mapped[str | None] = mapped_column(Text, nullable=True)
+    provider_calls: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=1, server_default=text("1")
+    )
+    input_tokens: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default=text("0")
+    )
+    output_tokens: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default=text("0")
+    )
+    started_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    session: Mapped[ReaderPanelSession] = relationship(back_populates="invocations")

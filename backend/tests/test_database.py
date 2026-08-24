@@ -18,6 +18,7 @@ from app.models import (
     ReaderInitialReport,
     ReaderPanelBallot,
     ReaderPanelIssue,
+    ReaderPanelInvocation,
     ReaderPanelMessage,
     ReaderPanelSession,
     ReaderRun,
@@ -77,11 +78,27 @@ def test_async_session_infrastructure_is_constructed_without_connecting() -> Non
 
 def test_mvp_models_are_imported_and_registered() -> None:
     assert set(Base.metadata.tables) == {
-        "users", "projects", "chapters", "workflow_runs", "workflow_checkpoints", "workflow_events",
-        "documents", "document_versions", "action_requests", "agent_conversations", "agent_messages", "review_reports",
-        "maintenance_changes", "maintenance_affected_items",
-        "reader_panel_sessions", "reader_runs", "reader_initial_reports", "reader_panel_issues",
-        "reader_panel_ballots", "reader_panel_messages",
+        "users",
+        "projects",
+        "chapters",
+        "workflow_runs",
+        "workflow_checkpoints",
+        "workflow_events",
+        "documents",
+        "document_versions",
+        "action_requests",
+        "agent_conversations",
+        "agent_messages",
+        "review_reports",
+        "maintenance_changes",
+        "maintenance_affected_items",
+        "reader_panel_sessions",
+        "reader_runs",
+        "reader_initial_reports",
+        "reader_panel_issues",
+        "reader_panel_ballots",
+        "reader_panel_messages",
+        "reader_panel_invocations",
     }
     assert Project.__table__.c.metadata.name == "metadata"
     assert "metadata" not in Project.__dict__
@@ -98,27 +115,45 @@ def test_mvp_models_are_imported_and_registered() -> None:
     assert ReaderPanelIssue.__table__.c.issue_number.nullable is False
     assert ReaderPanelBallot.__table__.c.phase.nullable is False
     assert ReaderPanelMessage.__table__.c.speaker_type.nullable is False
+    assert ReaderPanelInvocation.__table__.c.work_key.nullable is False
     configure_mappers()
 
 
 def test_reader_panel_model_constraint_and_index_names_match_migration_contract() -> None:
     session_constraints = {
-        c.name for c in ReaderPanelSession.__table__.constraints if isinstance(c, (CheckConstraint, UniqueConstraint))
+        c.name
+        for c in ReaderPanelSession.__table__.constraints
+        if isinstance(c, (CheckConstraint, UniqueConstraint))
     }
     run_constraints = {
-        c.name for c in ReaderRun.__table__.constraints if isinstance(c, (CheckConstraint, UniqueConstraint))
+        c.name
+        for c in ReaderRun.__table__.constraints
+        if isinstance(c, (CheckConstraint, UniqueConstraint))
     }
     report_constraints = {
-        c.name for c in ReaderInitialReport.__table__.constraints if isinstance(c, (CheckConstraint, UniqueConstraint))
+        c.name
+        for c in ReaderInitialReport.__table__.constraints
+        if isinstance(c, (CheckConstraint, UniqueConstraint))
     }
     issue_constraints = {
-        c.name for c in ReaderPanelIssue.__table__.constraints if isinstance(c, (CheckConstraint, UniqueConstraint))
+        c.name
+        for c in ReaderPanelIssue.__table__.constraints
+        if isinstance(c, (CheckConstraint, UniqueConstraint))
     }
     ballot_constraints = {
-        c.name for c in ReaderPanelBallot.__table__.constraints if isinstance(c, (CheckConstraint, UniqueConstraint))
+        c.name
+        for c in ReaderPanelBallot.__table__.constraints
+        if isinstance(c, (CheckConstraint, UniqueConstraint))
     }
     message_constraints = {
-        c.name for c in ReaderPanelMessage.__table__.constraints if isinstance(c, (CheckConstraint, UniqueConstraint))
+        c.name
+        for c in ReaderPanelMessage.__table__.constraints
+        if isinstance(c, (CheckConstraint, UniqueConstraint))
+    }
+    invocation_constraints = {
+        c.name
+        for c in ReaderPanelInvocation.__table__.constraints
+        if isinstance(c, (CheckConstraint, UniqueConstraint))
     }
 
     assert "uq_reader_panel_sessions_run_id" in session_constraints
@@ -129,6 +164,10 @@ def test_reader_panel_model_constraint_and_index_names_match_migration_contract(
     assert "uq_reader_panel_issues_session_number" in issue_constraints
     assert "uq_reader_panel_ballots_run_issue_phase" in ballot_constraints
     assert "uq_reader_panel_messages_issue_round_turn" in message_constraints
+    assert "uq_reader_panel_invocations_work_attempt" in invocation_constraints
+    assert "ck_reader_panel_invocations_status" in invocation_constraints
+    assert "ck_reader_panel_invocations_safe_error" in invocation_constraints
+    assert "ck_reader_panel_invocations_work_key" in invocation_constraints
 
 
 def test_maintenance_model_constraint_and_index_names_match_migration_contract() -> None:
