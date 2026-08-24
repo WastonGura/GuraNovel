@@ -1092,7 +1092,7 @@ class ReaderPanelService:
             if any(
                 match.group(0).lower() not in allowed_uuids
                 for match in re.finditer(
-                    r"\b[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}\b",
+                    r"(?<![0-9a-f])[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}(?![0-9a-f])",
                     joined,
                     re.IGNORECASE,
                 )
@@ -1107,6 +1107,13 @@ class ReaderPanelService:
             if any(
                 match.group(0).upper() not in allowed_segments
                 for match in re.finditer(r"(?<![\w-])S\d+(?![\w-])", joined, re.IGNORECASE)
+            ):
+                return False
+            if any(
+                match.group(1).upper() not in allowed_segments
+                and match.group(1).lower() not in allowed_uuids
+                and not re.fullmatch(r"(?:ISSUE|ROUND)-\d+", match.group(1), re.IGNORECASE)
+                for match in re.finditer(r"\[([A-Za-z0-9_-]{1,64})\]", joined)
             ):
                 return False
             if any(
@@ -1139,11 +1146,31 @@ class ReaderPanelService:
             messages = await load_messages()
             if round_number is not None and turn_number is not None:
                 issues = await load_issues()
+                runs = (
+                    (
+                        await self._db.execute(
+                            select(ReaderRun).where(ReaderRun.session_id == session_id)
+                        )
+                    )
+                    .scalars()
+                    .all()
+                )
                 if (
                     locked.status != ReaderPanelStatus.DISCUSSING.value
                     or not any(
-                        issue.id == issue_id and issue.discussion_status == "discussing"
+                        issue.id == issue_id
+                        and issue.session_id == session_id
+                        and issue.discussion_status == "discussing"
                         for issue in issues
+                    )
+                    or (
+                        reader_run_id is not None
+                        and not any(
+                            run.id == reader_run_id
+                            and run.session_id == session_id
+                            and run.status == "completed"
+                            for run in runs
+                        )
                     )
                     or any(
                         message.issue_id == issue_id
@@ -1156,11 +1183,36 @@ class ReaderPanelService:
                     return "work_complete"
             elif reader_run_id is not None:
                 ballots = await load_ballots()
-                if locked.status != ReaderPanelStatus.FINAL_BALLOTING.value or any(
-                    ballot.issue_id == issue_id
-                    and ballot.reader_run_id == reader_run_id
-                    and ballot.phase == "final"
-                    for ballot in ballots
+                issues = await load_issues()
+                runs = (
+                    (
+                        await self._db.execute(
+                            select(ReaderRun).where(ReaderRun.session_id == session_id)
+                        )
+                    )
+                    .scalars()
+                    .all()
+                )
+                if (
+                    locked.status != ReaderPanelStatus.FINAL_BALLOTING.value
+                    or not any(
+                        issue.id == issue_id
+                        and issue.session_id == session_id
+                        and issue.discussion_status in {"closed", "skipped"}
+                        for issue in issues
+                    )
+                    or not any(
+                        run.id == reader_run_id
+                        and run.session_id == session_id
+                        and run.status == "completed"
+                        for run in runs
+                    )
+                    or any(
+                        ballot.issue_id == issue_id
+                        and ballot.reader_run_id == reader_run_id
+                        and ballot.phase == "final"
+                        for ballot in ballots
+                    )
                 ):
                     await self._db.commit()
                     return "work_complete"
@@ -1177,7 +1229,7 @@ class ReaderPanelService:
             ):
                 await self._db.commit()
                 return "time_exhaustion"
-            estimated_tokens = max(1, len(str(request.model_dump(mode="json"))) // 4)
+            estimated_tokens = max(1, len(request.model_dump_json().encode("utf-8")))
             if estimated_tokens > int(
                 locked.config_snapshot.get("max_input_tokens_per_call", 32_000)
             ):
@@ -1249,18 +1301,72 @@ class ReaderPanelService:
             [run for run in runs if run.session_id == session_id and run.status == "completed"],
             key=lambda run: (run.reader_profile_id, str(run.id)),
         )
-        reports = (
-            (
-                await self._db.execute(
-                    select(ReaderInitialReport).where(ReaderInitialReport.session_id == session_id)
-                )
-            )
-            .scalars()
-            .all()
-        )
         issues = await load_issues()
         ballots = await load_ballots()
         initial_ballots = [ballot for ballot in ballots if ballot.phase == "initial"]
+        doc_version = await self._db.get(DocumentVersion, panel_session.document_version_id)
+        all_segments = (
+            doc_version.metadata_.get("segments")
+            if doc_version is not None and isinstance(doc_version.metadata_, dict)
+            else None
+        )
+        if not isinstance(all_segments, dict):
+            await self._db.commit()
+            raise ReaderPanelInvalidStateError()
+
+        issue_ids = {issue.id for issue in issues}
+        run_ids = {run.id for run in eligible_runs}
+        bound_segments: dict[UUID, set[str]] = {}
+        for issue in issues:
+            evidence = issue.evidence
+            if not isinstance(evidence, list) or not evidence:
+                await self._db.commit()
+                raise ReaderPanelInvalidStateError()
+            segment_ids: set[str] = set()
+            for ref in evidence:
+                ref_ids = ref.get("segment_ids") if isinstance(ref, dict) else None
+                if (
+                    not isinstance(ref_ids, list)
+                    or not ref_ids
+                    or not set(ref_ids).issubset(all_segments)
+                ):
+                    await self._db.commit()
+                    raise ReaderPanelInvalidStateError()
+                segment_ids.update(ref_ids)
+            bound_segments[issue.id] = segment_ids
+
+        expected_initial_pairs = {(run.id, issue.id) for run in eligible_runs for issue in issues}
+        if any(
+            ballot.session_id != session_id
+            or ballot.reader_run_id not in run_ids
+            or ballot.issue_id not in issue_ids
+            or ballot.phase != "initial"
+            for ballot in initial_ballots
+        ):
+            await self._db.commit()
+            raise ReaderPanelInvalidStateError()
+        for pair in expected_initial_pairs:
+            matches = [
+                ballot
+                for ballot in initial_ballots
+                if (ballot.reader_run_id, ballot.issue_id) == pair
+            ]
+            if len(matches) != 1:
+                await self._db.commit()
+                raise ReaderPanelInvalidStateError()
+            evidence = matches[0].evidence
+            if not isinstance(evidence, list) or not evidence:
+                await self._db.commit()
+                raise ReaderPanelInvalidStateError()
+            for ref in evidence:
+                ref_ids = ref.get("segment_ids") if isinstance(ref, dict) else None
+                if (
+                    not isinstance(ref_ids, list)
+                    or not ref_ids
+                    or not set(ref_ids).issubset(bound_segments[pair[1]])
+                ):
+                    await self._db.commit()
+                    raise ReaderPanelInvalidStateError()
         initial_by_pair = {
             (ballot.reader_run_id, ballot.issue_id): ballot for ballot in initial_ballots
         }
@@ -1297,15 +1403,15 @@ class ReaderPanelService:
                 str(issue.id),
             ),
         )
-        agenda = ranked_issues[
-            : max(0, int(panel_session.config_snapshot.get("max_discussion_issues", 0)))
-        ]
+        max_rounds = int(panel_session.config_snapshot.get("max_rounds_per_issue", 1))
+        agenda = (
+            ranked_issues[
+                : max(0, int(panel_session.config_snapshot.get("max_discussion_issues", 0)))
+            ]
+            if max_rounds > 0
+            else []
+        )
         agenda_ids = {issue.id for issue in agenda}
-        if any(
-            (run.id, issue.id) not in initial_by_pair for run in eligible_runs for issue in agenda
-        ):
-            await self._db.commit()
-            raise ReaderPanelInvalidStateError()
 
         if panel_session.status == ReaderPanelStatus.INITIAL_BALLOTS_LOCKED.value:
             if agenda:
@@ -1346,16 +1452,6 @@ class ReaderPanelService:
         else:
             await self._db.commit()
 
-        doc_version = await self._db.get(DocumentVersion, panel_session.document_version_id)
-        all_segments = (
-            doc_version.metadata_.get("segments")
-            if doc_version is not None and isinstance(doc_version.metadata_, dict)
-            else None
-        )
-        if not isinstance(all_segments, dict):
-            raise ReaderPanelInvalidStateError()
-        await self._db.commit()
-
         for agenda_issue in agenda:
             if agenda_issue.discussion_status in {"closed", "skipped"}:
                 continue
@@ -1373,7 +1469,6 @@ class ReaderPanelService:
                 segment_id: all_segments[segment_id] for segment_id in sorted(allowed_segment_ids)
             }
             issue_contract = as_issue_contract(agenda_issue)
-            max_rounds = int(panel_session.config_snapshot.get("max_rounds_per_issue", 1))
             for round_number in range(1, max_rounds + 1):
                 fresh_issues = await load_issues()
                 fresh_issue = next(
@@ -1464,6 +1559,7 @@ class ReaderPanelService:
                             issue_id=agenda_issue.id,
                             round_number=round_number,
                             turn_number=turn_number,
+                            reader_run_id=run.id,
                         )
                         if stop_reason is not None:
                             break
@@ -1475,12 +1571,6 @@ class ReaderPanelService:
                                 str(panel_session.workflow_run_id).lower(),
                                 str(panel_session.id).lower(),
                                 str(agenda_issue.id).lower(),
-                                str(run.id).lower(),
-                                *(
-                                    str(report.id).lower()
-                                    for report in reports
-                                    if report.reader_run_id == run.id
-                                ),
                             }
                             if (
                                 type(output) is not ReaderDiscussionTurnOutput
@@ -1501,9 +1591,7 @@ class ReaderPanelService:
                                     round_number=round_number,
                                     allowed_uuids=allowed_uuids,
                                     forbidden_profiles={
-                                        other.reader_profile_id
-                                        for other in eligible_runs
-                                        if other.id != run.id
+                                        other.reader_profile_id for other in eligible_runs
                                     },
                                 )
                             ):
@@ -1524,14 +1612,28 @@ class ReaderPanelService:
                     locked = await lock_session()
                     fresh_messages = await load_messages()
                     fresh_issues = await load_issues()
+                    fresh_runs = (
+                        (
+                            await self._db.execute(
+                                select(ReaderRun).where(ReaderRun.session_id == session_id)
+                            )
+                        )
+                        .scalars()
+                        .all()
+                    )
                     fresh_issue = next(
                         (issue for issue in fresh_issues if issue.id == agenda_issue.id),
                         None,
                     )
+                    fresh_run = next((item for item in fresh_runs if item.id == run.id), None)
                     if (
                         locked.status == ReaderPanelStatus.DISCUSSING.value
                         and fresh_issue is not None
+                        and fresh_issue.session_id == locked.id
                         and fresh_issue.discussion_status == "discussing"
+                        and fresh_run is not None
+                        and fresh_run.session_id == locked.id
+                        and fresh_run.status == "completed"
                         and not any(
                             message.issue_id == agenda_issue.id
                             and message.round_number == round_number
@@ -1678,11 +1780,17 @@ class ReaderPanelService:
                     fresh_issue = next(
                         (issue for issue in fresh_issues if issue.id == agenda_issue.id), None
                     )
-                    if locked.status == ReaderPanelStatus.DISCUSSING.value and not any(
-                        message.issue_id == agenda_issue.id
-                        and message.round_number == round_number
-                        and message.turn_number == summary_turn
-                        for message in fresh_messages
+                    if (
+                        locked.status == ReaderPanelStatus.DISCUSSING.value
+                        and fresh_issue is not None
+                        and fresh_issue.session_id == locked.id
+                        and fresh_issue.discussion_status == "discussing"
+                        and not any(
+                            message.issue_id == agenda_issue.id
+                            and message.round_number == round_number
+                            and message.turn_number == summary_turn
+                            for message in fresh_messages
+                        )
                     ):
                         self._db.add(
                             ReaderPanelMessage(
@@ -1706,7 +1814,7 @@ class ReaderPanelService:
                                 ),
                             )
                         )
-                        if fresh_issue is not None and round_stop != "continue":
+                        if round_stop != "continue":
                             fresh_issue.discussion_status = "closed"
                         self._db.add(
                             WorkflowEvent(
@@ -1849,17 +1957,9 @@ class ReaderPanelService:
                                         str(panel_session.workflow_run_id).lower(),
                                         str(panel_session.id).lower(),
                                         str(agenda_issue.id).lower(),
-                                        str(run.id).lower(),
-                                        *(
-                                            str(report.id).lower()
-                                            for report in reports
-                                            if report.reader_run_id == run.id
-                                        ),
                                     },
                                     forbidden_profiles={
-                                        other.reader_profile_id
-                                        for other in eligible_runs
-                                        if other.id != run.id
+                                        other.reader_profile_id for other in eligible_runs
                                     },
                                 )
                             ):
@@ -1872,11 +1972,35 @@ class ReaderPanelService:
                         continue
                     locked = await lock_session()
                     fresh_ballots = await load_ballots()
-                    if locked.status == ReaderPanelStatus.FINAL_BALLOTING.value and not any(
-                        ballot.reader_run_id == run.id
-                        and ballot.issue_id == agenda_issue.id
-                        and ballot.phase == "final"
-                        for ballot in fresh_ballots
+                    fresh_issues = await load_issues()
+                    fresh_runs = (
+                        (
+                            await self._db.execute(
+                                select(ReaderRun).where(ReaderRun.session_id == session_id)
+                            )
+                        )
+                        .scalars()
+                        .all()
+                    )
+                    fresh_issue = next(
+                        (item for item in fresh_issues if item.id == agenda_issue.id), None
+                    )
+                    fresh_run = next((item for item in fresh_runs if item.id == run.id), None)
+                    if (
+                        locked.status == ReaderPanelStatus.FINAL_BALLOTING.value
+                        and fresh_issue is not None
+                        and fresh_issue.session_id == locked.id
+                        and fresh_issue.discussion_status in {"closed", "skipped"}
+                        and fresh_run is not None
+                        and fresh_run.session_id == locked.id
+                        and fresh_run.status == "completed"
+                        and (fresh_run.id, fresh_issue.id) in expected_initial_pairs
+                        and not any(
+                            ballot.reader_run_id == run.id
+                            and ballot.issue_id == agenda_issue.id
+                            and ballot.phase == "final"
+                            for ballot in fresh_ballots
+                        )
                     ):
                         self._db.add(
                             ReaderPanelBallot(
