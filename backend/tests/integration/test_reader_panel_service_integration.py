@@ -482,6 +482,7 @@ class TestReaderPanelServiceIntegration:
             metadata_={"segments": {**segments, "S003": "A later edit."}},
         )
         async_session.add(newer_version)
+        await async_session.flush()
         doc.current_version_id = newer_version_id
         await async_session.commit()
         assert await service.reconcile_stale_status(session_id=init_result.session_id) is True
