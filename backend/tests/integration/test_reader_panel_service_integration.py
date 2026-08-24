@@ -450,22 +450,40 @@ class TestReaderPanelServiceIntegration:
             assert r.locked_at is not None
 
         # 4. Two independent sessions race safely: provider calls may repeat, rows may not.
-        ballot_provider = PostgreSQLBallotProvider()
+        extraction_started = Event()
+        release_extraction = Event()
+
+        class BlockingExtractionProvider(PostgreSQLBallotProvider):
+            def extract_issues(self, request) -> ModeratorIssueExtractionOutput:
+                extraction_started.set()
+                assert release_extraction.wait(timeout=10)
+                return super().extract_issues(request)
+
+        ballot_provider = BlockingExtractionProvider()
         engine = async_session.bind
         assert engine is not None
         session_factory = async_sessionmaker(engine, expire_on_commit=False)
 
-        async def collect_concurrently():
+        loser_entered_provider = asyncio.Event()
+
+        class SignallingLoserService(ReaderPanelService):
+            async def _invoke_provider(self, **kwargs):
+                loser_entered_provider.set()
+                return await super()._invoke_provider(**kwargs)
+
+        async def collect_concurrently(service_type=ReaderPanelService):
             async with session_factory() as concurrent_session:
-                return await ReaderPanelService(concurrent_session).resume_session(
+                return await service_type(concurrent_session).resume_session(
                     session_id=init_result.session_id,
                     provider=ballot_provider,
                 )
 
-        concurrent_results = await asyncio.gather(
-            collect_concurrently(),
-            collect_concurrently(),
-        )
+        winner = asyncio.create_task(collect_concurrently())
+        assert await asyncio.to_thread(extraction_started.wait, 10)
+        loser = asyncio.create_task(collect_concurrently(SignallingLoserService))
+        await asyncio.wait_for(loser_entered_provider.wait(), timeout=10)
+        release_extraction.set()
+        concurrent_results = await asyncio.gather(winner, loser)
         assert all(result.issue_count == 2 for result in concurrent_results)
         assert all(result.initial_ballot_count == 8 for result in concurrent_results)
         assert all(result.initial_ballots_locked for result in concurrent_results)
@@ -473,6 +491,17 @@ class TestReaderPanelServiceIntegration:
             result.status == ReaderPanelStatus.INITIAL_BALLOTS_LOCKED.value
             for result in concurrent_results
         )
+        durable_runs = (
+            (
+                await async_session.execute(
+                    select(ReaderRun).where(ReaderRun.session_id == init_result.session_id)
+                )
+            )
+            .scalars()
+            .all()
+        )
+        assert durable_runs
+        assert all(run.status == "completed" for run in durable_runs)
 
         issues = (
             (

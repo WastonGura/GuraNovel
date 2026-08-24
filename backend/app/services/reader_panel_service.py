@@ -123,6 +123,10 @@ class _ReaderPanelWorkInProgressError(ReaderPanelInvalidStateError):
     pass
 
 
+class _ReaderPanelWorkAlreadyCompleted(ReaderPanelInvalidStateError):
+    pass
+
+
 class _ReaderPanelPermanentWorkError(ReaderPanelInvalidStateError):
     def __init__(self, error_code: str = ReaderPanelSafeError.UNKNOWN.value) -> None:
         super().__init__()
@@ -576,7 +580,7 @@ class ReaderPanelService:
             ]
             if any(row.status == ReaderPanelInvocationStatus.SUCCEEDED.value for row in work_rows):
                 await self._db.commit()
-                raise _ReaderPanelPermanentWorkError()
+                raise _ReaderPanelWorkAlreadyCompleted()
             if any(
                 row.status == ReaderPanelInvocationStatus.UNKNOWN_COMMIT.value for row in work_rows
             ):
@@ -1100,6 +1104,10 @@ class ReaderPanelService:
                 run.completed_at = datetime.now(timezone.utc)
                 collected_reports.append(init_report)
                 await self._db.commit()
+            except _ReaderPanelWorkAlreadyCompleted:
+                return await self.collect_initial_reports(
+                    session_id=session_id, provider=panel_provider
+                )
             except _ReaderPanelPermanentWorkError as exc:
                 if exc.error_code == ReaderPanelSafeError.UNKNOWN_COMMIT.value:
                     locked = await self._locked_session(panel_session.id)
@@ -1537,6 +1545,10 @@ class ReaderPanelService:
                     expected_type=ModeratorIssueExtractionOutput,
                     validate=normalize_extraction,
                 )
+            except _ReaderPanelWorkAlreadyCompleted:
+                return await self.collect_initial_ballots(
+                    session_id=session_id, provider=panel_provider
+                )
             except (asyncio.CancelledError, _ReaderPanelWorkInProgressError):
                 raise
             except Exception as exc:
@@ -1685,6 +1697,10 @@ class ReaderPanelService:
                         invoke=panel_provider.generate_blind_ballot,
                         expected_type=ReaderBallotOutput,
                         validate=validate_ballot,
+                    )
+                except _ReaderPanelWorkAlreadyCompleted:
+                    return await self.collect_initial_ballots(
+                        session_id=session_id, provider=panel_provider
                     )
                 except (asyncio.CancelledError, _ReaderPanelWorkInProgressError):
                     raise
@@ -2417,6 +2433,10 @@ class ReaderPanelService:
                                 expected_type=ReaderDiscussionTurnOutput,
                                 validate=validate_turn,
                             )
+                        except _ReaderPanelWorkAlreadyCompleted:
+                            return await self.run_discussion_and_final_ballots(
+                                session_id=session_id, provider=panel_provider
+                            )
                         except (asyncio.CancelledError, _ReaderPanelWorkInProgressError):
                             raise
                         except Exception as exc:
@@ -2598,6 +2618,10 @@ class ReaderPanelService:
                                 invoke=panel_provider.summarize_discussion,
                                 expected_type=ModeratorDiscussionSummaryOutput,
                                 validate=validate_summary,
+                            )
+                        except _ReaderPanelWorkAlreadyCompleted:
+                            return await self.run_discussion_and_final_ballots(
+                                session_id=session_id, provider=panel_provider
                             )
                         except (asyncio.CancelledError, _ReaderPanelWorkInProgressError):
                             raise
@@ -2823,6 +2847,10 @@ class ReaderPanelService:
                                 invoke=panel_provider.generate_final_ballot,
                                 expected_type=ReaderFinalBallotOutput,
                                 validate=validate_final,
+                            )
+                        except _ReaderPanelWorkAlreadyCompleted:
+                            return await self.run_discussion_and_final_ballots(
+                                session_id=session_id, provider=panel_provider
                             )
                         except (asyncio.CancelledError, _ReaderPanelWorkInProgressError):
                             raise
@@ -3599,6 +3627,22 @@ class ReaderPanelService:
                     or recommendation.target_segment_ids != segment_ids
                 ):
                     raise ValueError("recommendation binding")
+        except _ReaderPanelWorkAlreadyCompleted:
+            completed, *_ = await load_locked_snapshot()
+            report_id = await existing_report_id(completed)
+            if report_id is None:
+                await self._db.commit()
+                raise ReaderPanelInvalidStateError() from None
+            await self._db.commit()
+            return ReaderPanelSessionResult(
+                session_id=completed.id,
+                workflow_run_id=completed.workflow_run_id,
+                status=completed.status,
+                mode=completed.mode,
+                review_report_id=report_id,
+                stale=completed.stale,
+                degradation_reason=completed.degradation_reason,
+            )
         except (asyncio.CancelledError, _ReaderPanelWorkInProgressError):
             raise
         except Exception:
