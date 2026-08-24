@@ -398,6 +398,7 @@ class TestReaderPanelServiceIntegration:
             project_id=project_id,
             chapter_id=chapter_id,
             mode=PanelMode.STANDARD,
+            test_goals=["Check pacing and worldbuilding introduction"],
         )
         assert dup_result.session_id == init_result.session_id
 
