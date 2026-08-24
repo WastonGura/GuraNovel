@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+import re
 from typing import Any
 from uuid import UUID, uuid4
 
@@ -581,16 +582,24 @@ class ReaderPanelService:
                 manuscript_segments=segments,
                 max_ballot_issues=panel_session.config_snapshot.get("max_ballot_issues", 8),
             )
-            source_to_report_id = {
-                source.casefold(): str(run.initial_report.id)
-                for run in eligible_runs
-                for source in (
-                    run.reader_profile_id,
-                    str(run.id),
-                    str(run.initial_report.id),
-                )
+            profile_to_report_ids: dict[str, set[str]] = {}
+            uuid_to_report_ids: dict[str, set[str]] = {}
+            for run in eligible_runs:
+                report_id = str(run.initial_report.id)
+                profile_to_report_ids.setdefault(run.reader_profile_id, set()).add(report_id)
+                uuid_to_report_ids.setdefault(str(run.id), set()).add(report_id)
+                uuid_to_report_ids.setdefault(report_id, set()).add(report_id)
+            if any(len(report_ids) != 1 for report_ids in profile_to_report_ids.values()):
+                raise ReaderPanelInvalidStateError()
+            profile_to_report_id = {
+                profile: next(iter(report_ids))
+                for profile, report_ids in profile_to_report_ids.items()
             }
-            provenance_tokens = {source.casefold() for source in source_to_report_id}
+            profile_patterns = tuple(
+                re.compile(rf"(?<![\w-]){re.escape(profile)}(?![\w-])", re.IGNORECASE)
+                for profile in profile_to_report_id
+            )
+            uuid_tokens = set(uuid_to_report_ids)
             max_issues = request.max_ballot_issues
             normalized: list[ExtractedIssueItem] | None = None
 
@@ -638,19 +647,31 @@ class ReaderPanelService:
                                 for ref in extracted.evidence
                             )
                             or any(
+                                pattern.search(value)
+                                for pattern in profile_patterns
+                                for value in text_fields
+                            )
+                            or any(
                                 token in value.casefold()
-                                for token in provenance_tokens
+                                for token in uuid_tokens
                                 for value in text_fields
                             )
                         ):
                             raise ValueError
-                        try:
-                            source_ids = [
-                                source_to_report_id[source.casefold()]
-                                for source in extracted.source_reader_ids
-                            ]
-                        except KeyError as exc:
-                            raise ValueError from exc
+                        source_ids = []
+                        for source in extracted.source_reader_ids:
+                            candidates = set()
+                            if source in profile_to_report_id:
+                                candidates.add(profile_to_report_id[source])
+                            try:
+                                canonical_uuid = str(UUID(source))
+                            except ValueError:
+                                canonical_uuid = None
+                            if canonical_uuid is not None:
+                                candidates.update(uuid_to_report_ids.get(canonical_uuid, set()))
+                            if len(candidates) != 1:
+                                raise ValueError
+                            source_ids.append(next(iter(candidates)))
                         title = " ".join(extracted.title.split())
                         category = " ".join(extracted.category.split()).lower()
                         symptom = " ".join(extracted.symptom.split())

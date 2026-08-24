@@ -969,3 +969,104 @@ class TestReaderPanelInitialBallots:
         assert len(fake_db_session.storage[WorkflowEvent]) == event_count
         assert len(fake_db_session.storage[ReaderPanelIssue]) == 1
         assert len(fake_db_session.storage[ReaderPanelBallot]) == 2
+
+    async def test_preserves_exact_case_colliding_profile_sources(
+        self,
+        fake_db_session: FakeAsyncSession,
+        test_project_id: UUID,
+        test_chapter_id: UUID,
+        test_document_id: UUID,
+        test_version_id: UUID,
+        sample_hash: str,
+        sample_segments: dict[str, str],
+    ) -> None:
+        service, panel_session = await setup_locked_panel(
+            fake_db_session,
+            project_id=test_project_id,
+            chapter_id=test_chapter_id,
+            document_id=test_document_id,
+            version_id=test_version_id,
+            content_hash=sample_hash,
+            segments=sample_segments,
+        )
+        upper, lower = panel_session.reader_runs
+        upper.reader_profile_id = "Critic"
+        lower.reader_profile_id = "critic"
+        provider = RecordingBallotProvider(
+            [
+                ExtractedIssueItem(
+                    issue_number=1,
+                    title="Upper perspective",
+                    category="clarity",
+                    symptom="The opening is unclear.",
+                    root_cause_hypotheses=["Missing transition"],
+                    evidence=[{"segment_ids": ["S001"], "note": "Opening."}],
+                    source_reader_ids=["Critic"],
+                ),
+                ExtractedIssueItem(
+                    issue_number=2,
+                    title="Lower perspective",
+                    category="pacing",
+                    symptom="The opening moves slowly.",
+                    root_cause_hypotheses=["Long setup"],
+                    evidence=[{"segment_ids": ["S002"], "note": "Setup."}],
+                    source_reader_ids=["critic"],
+                ),
+            ]
+        )
+
+        result = await service.collect_initial_ballots(
+            session_id=panel_session.id,
+            provider=provider,
+        )
+
+        assert result.issue_count == 2
+        sources_by_title = {
+            issue.title: issue.source_reader_ids
+            for issue in fake_db_session.storage[ReaderPanelIssue].values()
+        }
+        assert sources_by_title == {
+            "Upper perspective": [str(upper.initial_report.id)],
+            "Lower perspective": [str(lower.initial_report.id)],
+        }
+
+    async def test_profile_provenance_requires_identifier_boundary(
+        self,
+        fake_db_session: FakeAsyncSession,
+        test_project_id: UUID,
+        test_chapter_id: UUID,
+        test_document_id: UUID,
+        test_version_id: UUID,
+        sample_hash: str,
+        sample_segments: dict[str, str],
+    ) -> None:
+        service, panel_session = await setup_locked_panel(
+            fake_db_session,
+            project_id=test_project_id,
+            chapter_id=test_chapter_id,
+            document_id=test_document_id,
+            version_id=test_version_id,
+            content_hash=sample_hash,
+            segments=sample_segments,
+        )
+        panel_session.reader_runs[0].reader_profile_id = "Critic"
+        provider = RecordingBallotProvider(
+            [
+                ExtractedIssueItem(
+                    issue_number=1,
+                    title="Critical pacing",
+                    category="pacing",
+                    symptom="The opening is slow.",
+                    root_cause_hypotheses=["Long setup"],
+                    evidence=[{"segment_ids": ["S001"], "note": "Critical beat."}],
+                    source_reader_ids=["Critic"],
+                )
+            ]
+        )
+
+        result = await service.collect_initial_ballots(
+            session_id=panel_session.id,
+            provider=provider,
+        )
+
+        assert result.initial_ballots_locked is True
