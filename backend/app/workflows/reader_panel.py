@@ -34,6 +34,36 @@ class ReaderPanelStatus(str, Enum):
     CANCELLED = "cancelled"
 
 
+class ReaderPanelInvocationPhase(str, Enum):
+    INITIAL_READING = "initial_reading"
+    ISSUE_EXTRACTION = "issue_extraction"
+    INITIAL_BALLOT = "initial_ballot"
+    DISCUSSION_TURN = "discussion_turn"
+    DISCUSSION_SUMMARY = "discussion_summary"
+    FINAL_BALLOT = "final_ballot"
+    REPORT_SYNTHESIS = "report_synthesis"
+
+
+class ReaderPanelInvocationStatus(str, Enum):
+    STARTED = "started"
+    SUCCEEDED = "succeeded"
+    FAILED = "failed"
+    CANCELLED = "cancelled"
+    UNKNOWN_COMMIT = "unknown_commit"
+
+
+class ReaderPanelSafeError(str, Enum):
+    TIMEOUT = "timeout"
+    RATE_LIMITED = "rate_limited"
+    UNAVAILABLE = "unavailable"
+    INVALID_OUTPUT = "invalid_output"
+    CONFIGURATION = "configuration"
+    UNKNOWN = "unknown"
+    BUDGET_EXHAUSTED = "budget_exhausted"
+    CANCELLED = "cancelled"
+    UNKNOWN_COMMIT = "unknown_commit"
+
+
 class Severity(str, Enum):
     NONE = "none"
     MINOR = "minor"
@@ -106,7 +136,9 @@ def _validate_content_hash(value: str | None, field_name: str = "Source hash") -
     if value is None:
         return None
     if not isinstance(value, str) or not _HEX_64_RE.match(value.strip()):
-        raise ReaderPanelValidationError(f"{field_name} must be a valid 64-character hex SHA-256 hash.")
+        raise ReaderPanelValidationError(
+            f"{field_name} must be a valid 64-character hex SHA-256 hash."
+        )
     return value.strip().lower()
 
 
@@ -194,7 +226,14 @@ class ReaderPanelConfig:
     max_rounds_per_issue: int
     min_valid_readers: int
     max_total_model_calls: int = 100
+    max_model_calls_per_phase: int = 20
+    max_total_input_tokens: int = 2_000_000
+    max_total_output_tokens: int = 1_000_000
     max_input_tokens_per_call: int = 8192
+    max_output_tokens_per_call: int = 4096
+    max_messages: int = 200
+    max_provider_attempts: int = 3
+    max_invalid_output_repairs: int = 1
     max_execution_seconds: int = 3600
     blind_panel: bool = True
     include_transcript: bool = True
@@ -206,10 +245,67 @@ class ReaderPanelConfig:
     def __post_init__(self) -> None:
         if not isinstance(self.mode, PanelMode):
             object.__setattr__(self, "mode", PanelMode(str(self.mode).lower()))
-        if self.min_valid_readers < 0:
-            raise ReaderPanelValidationError("min_valid_readers cannot be negative.")
+        integer_fields = {
+            "reader_count": self.reader_count,
+            "max_ballot_issues": self.max_ballot_issues,
+            "max_discussion_issues": self.max_discussion_issues,
+            "max_rounds_per_issue": self.max_rounds_per_issue,
+            "min_valid_readers": self.min_valid_readers,
+            "max_total_model_calls": self.max_total_model_calls,
+            "max_model_calls_per_phase": self.max_model_calls_per_phase,
+            "max_total_input_tokens": self.max_total_input_tokens,
+            "max_total_output_tokens": self.max_total_output_tokens,
+            "max_input_tokens_per_call": self.max_input_tokens_per_call,
+            "max_output_tokens_per_call": self.max_output_tokens_per_call,
+            "max_messages": self.max_messages,
+            "max_provider_attempts": self.max_provider_attempts,
+            "max_invalid_output_repairs": self.max_invalid_output_repairs,
+            "max_execution_seconds": self.max_execution_seconds,
+        }
+        if any(type(value) is not int for value in integer_fields.values()):
+            raise ReaderPanelValidationError("Reader panel numeric budgets must be exact integers.")
+        if (
+            not isinstance(self.reader_profile_ids, list)
+            or len(self.reader_profile_ids) != self.reader_count
+            or len(self.reader_profile_ids) != len(set(self.reader_profile_ids))
+            or any(not isinstance(item, str) or not item for item in self.reader_profile_ids)
+        ):
+            raise ReaderPanelValidationError("Reader profiles must match reader_count exactly.")
+        if self.min_valid_readers < 0 or (
+            self.mode != PanelMode.OFF and self.min_valid_readers == 0
+        ):
+            raise ReaderPanelValidationError("min_valid_readers must be positive when enabled.")
         if self.reader_count < self.min_valid_readers:
             raise ReaderPanelValidationError("reader_count cannot be less than min_valid_readers.")
+        budgets = (
+            self.max_total_model_calls,
+            self.max_model_calls_per_phase,
+            self.max_total_input_tokens,
+            self.max_total_output_tokens,
+            self.max_input_tokens_per_call,
+            self.max_output_tokens_per_call,
+            self.max_messages,
+            self.max_provider_attempts,
+        )
+        if self.mode != PanelMode.OFF and any(value <= 0 for value in budgets):
+            raise ReaderPanelValidationError("Reader panel hard budgets must be positive.")
+        if self.max_invalid_output_repairs != 1:
+            raise ReaderPanelValidationError("Invalid structured output allows exactly one repair.")
+        if any(
+            type(value) is not bool
+            for value in (self.blind_panel, self.include_transcript, self.allow_retest)
+        ):
+            raise ReaderPanelValidationError("Reader panel flags must be booleans.")
+        thresholds = (
+            self.strong_consensus_threshold,
+            self.weak_consensus_threshold,
+            self.polarization_threshold,
+        )
+        if any(
+            isinstance(value, bool) or not isinstance(value, (int, float)) or not 0 <= value <= 1
+            for value in thresholds
+        ):
+            raise ReaderPanelValidationError("Consensus thresholds must be numeric ratios.")
 
 
 def get_mode_preset_config(mode: PanelMode | str) -> ReaderPanelConfig:
@@ -258,7 +354,12 @@ def get_mode_preset_config(mode: PanelMode | str) -> ReaderPanelConfig:
         return ReaderPanelConfig(
             mode=PanelMode.STANDARD,
             reader_count=4,
-            reader_profile_ids=["general_immersive", "low_patience", "character_emotion", "genre_experienced"],
+            reader_profile_ids=[
+                "general_immersive",
+                "low_patience",
+                "character_emotion",
+                "genre_experienced",
+            ],
             max_ballot_issues=6,
             max_discussion_issues=4,
             max_rounds_per_issue=2,
@@ -323,7 +424,9 @@ class BallotVote:
         if not isinstance(self.severity, Severity):
             object.__setattr__(self, "severity", Severity(str(self.severity).lower()))
         if not isinstance(self.suggested_action, SuggestedAction):
-            object.__setattr__(self, "suggested_action", SuggestedAction(str(self.suggested_action).lower()))
+            object.__setattr__(
+                self, "suggested_action", SuggestedAction(str(self.suggested_action).lower())
+            )
         if isinstance(self.confidence, str):
             try:
                 object.__setattr__(self, "confidence", Confidence(self.confidence.lower()))
@@ -457,8 +560,14 @@ class ReaderPanelState:
         object.__setattr__(self, "session_id", _canonical_uuid(self.session_id, "Session ID"))
         object.__setattr__(self, "project_id", _canonical_uuid(self.project_id, "Project ID"))
         object.__setattr__(self, "document_id", _canonical_uuid(self.document_id, "Document ID"))
-        object.__setattr__(self, "document_version_id", _canonical_uuid(self.document_version_id, "Document version ID"))
-        object.__setattr__(self, "source_hash", _validate_content_hash(self.source_hash, "Source hash"))
+        object.__setattr__(
+            self,
+            "document_version_id",
+            _canonical_uuid(self.document_version_id, "Document version ID"),
+        )
+        object.__setattr__(
+            self, "source_hash", _validate_content_hash(self.source_hash, "Source hash")
+        )
         if not isinstance(self.status, ReaderPanelStatus):
             object.__setattr__(self, "status", ReaderPanelStatus(str(self.status).lower()))
 
@@ -487,7 +596,9 @@ class ReaderPanelState:
             active_reader_ids=list(config.reader_profile_ids),
         )
 
-    def transition_to(self, new_status: ReaderPanelStatus | str, step_name: str | None = None) -> ReaderPanelState:
+    def transition_to(
+        self, new_status: ReaderPanelStatus | str, step_name: str | None = None
+    ) -> ReaderPanelState:
         if isinstance(new_status, str):
             try:
                 new_status = ReaderPanelStatus(new_status.lower())
@@ -495,7 +606,9 @@ class ReaderPanelState:
                 raise ReaderPanelValidationError(f"Unknown status: {new_status}") from exc
 
         if self.is_terminal:
-            raise ReaderPanelValidationError(f"Terminal state cannot transition: {self.status} -> {new_status}")
+            raise ReaderPanelValidationError(
+                f"Terminal state cannot transition: {self.status} -> {new_status}"
+            )
 
         allowed = _LEGAL_TRANSITIONS.get(self.status, set())
         if new_status not in allowed:
@@ -503,9 +616,15 @@ class ReaderPanelState:
                 f"Illegal state transition: {self.status.value} -> {new_status.value}. Allowed: {[s.value for s in allowed]}"
             )
 
-        new_reports_locked = self.initial_reports_locked or (new_status == ReaderPanelStatus.INITIAL_REPORTS_LOCKED)
-        new_initial_ballots_locked = self.initial_ballots_locked or (new_status == ReaderPanelStatus.INITIAL_BALLOTS_LOCKED)
-        new_final_ballots_locked = self.final_ballots_locked or (new_status == ReaderPanelStatus.FINAL_BALLOTS_LOCKED)
+        new_reports_locked = self.initial_reports_locked or (
+            new_status == ReaderPanelStatus.INITIAL_REPORTS_LOCKED
+        )
+        new_initial_ballots_locked = self.initial_ballots_locked or (
+            new_status == ReaderPanelStatus.INITIAL_BALLOTS_LOCKED
+        )
+        new_final_ballots_locked = self.final_ballots_locked or (
+            new_status == ReaderPanelStatus.FINAL_BALLOTS_LOCKED
+        )
 
         return replace(
             self,
@@ -550,7 +669,14 @@ class ReaderPanelState:
                 "max_rounds_per_issue": self.config.max_rounds_per_issue,
                 "min_valid_readers": self.config.min_valid_readers,
                 "max_total_model_calls": self.config.max_total_model_calls,
+                "max_model_calls_per_phase": self.config.max_model_calls_per_phase,
+                "max_total_input_tokens": self.config.max_total_input_tokens,
+                "max_total_output_tokens": self.config.max_total_output_tokens,
                 "max_input_tokens_per_call": self.config.max_input_tokens_per_call,
+                "max_output_tokens_per_call": self.config.max_output_tokens_per_call,
+                "max_messages": self.config.max_messages,
+                "max_provider_attempts": self.config.max_provider_attempts,
+                "max_invalid_output_repairs": self.config.max_invalid_output_repairs,
                 "max_execution_seconds": self.config.max_execution_seconds,
                 "blind_panel": self.config.blind_panel,
                 "include_transcript": self.config.include_transcript,
@@ -577,30 +703,67 @@ class ReaderPanelState:
         }
         missing = required_keys - data.keys()
         if missing:
-            raise ReaderPanelValidationError(f"Invalid checkpoint: missing required fields: {missing}")
+            raise ReaderPanelValidationError(
+                f"Invalid checkpoint: missing required fields: {missing}"
+            )
 
         raw_config = data["config"]
         if not isinstance(raw_config, dict):
             raise ReaderPanelValidationError("Invalid checkpoint config: must be a dict.")
 
+        config_keys = {
+            "mode",
+            "reader_count",
+            "reader_profile_ids",
+            "max_ballot_issues",
+            "max_discussion_issues",
+            "max_rounds_per_issue",
+            "min_valid_readers",
+            "max_total_model_calls",
+            "max_model_calls_per_phase",
+            "max_total_input_tokens",
+            "max_total_output_tokens",
+            "max_input_tokens_per_call",
+            "max_output_tokens_per_call",
+            "max_messages",
+            "max_provider_attempts",
+            "max_invalid_output_repairs",
+            "max_execution_seconds",
+            "blind_panel",
+            "include_transcript",
+            "allow_retest",
+            "strong_consensus_threshold",
+            "weak_consensus_threshold",
+            "polarization_threshold",
+        }
+        if set(raw_config) != config_keys:
+            raise ReaderPanelValidationError("Invalid checkpoint config shape.")
+
         try:
             config = ReaderPanelConfig(
                 mode=PanelMode(raw_config["mode"]),
-                reader_count=int(raw_config["reader_count"]),
-                reader_profile_ids=list(raw_config.get("reader_profile_ids", [])),
-                max_ballot_issues=int(raw_config["max_ballot_issues"]),
-                max_discussion_issues=int(raw_config["max_discussion_issues"]),
-                max_rounds_per_issue=int(raw_config["max_rounds_per_issue"]),
-                min_valid_readers=int(raw_config["min_valid_readers"]),
-                max_total_model_calls=int(raw_config.get("max_total_model_calls", 100)),
-                max_input_tokens_per_call=int(raw_config.get("max_input_tokens_per_call", 8192)),
-                max_execution_seconds=int(raw_config.get("max_execution_seconds", 3600)),
-                blind_panel=bool(raw_config.get("blind_panel", True)),
-                include_transcript=bool(raw_config.get("include_transcript", True)),
-                allow_retest=bool(raw_config.get("allow_retest", True)),
-                strong_consensus_threshold=float(raw_config.get("strong_consensus_threshold", 0.75)),
-                weak_consensus_threshold=float(raw_config.get("weak_consensus_threshold", 0.60)),
-                polarization_threshold=float(raw_config.get("polarization_threshold", 0.30)),
+                reader_count=raw_config["reader_count"],
+                reader_profile_ids=raw_config["reader_profile_ids"],
+                max_ballot_issues=raw_config["max_ballot_issues"],
+                max_discussion_issues=raw_config["max_discussion_issues"],
+                max_rounds_per_issue=raw_config["max_rounds_per_issue"],
+                min_valid_readers=raw_config["min_valid_readers"],
+                max_total_model_calls=raw_config["max_total_model_calls"],
+                max_model_calls_per_phase=raw_config["max_model_calls_per_phase"],
+                max_total_input_tokens=raw_config["max_total_input_tokens"],
+                max_total_output_tokens=raw_config["max_total_output_tokens"],
+                max_input_tokens_per_call=raw_config["max_input_tokens_per_call"],
+                max_output_tokens_per_call=raw_config["max_output_tokens_per_call"],
+                max_messages=raw_config["max_messages"],
+                max_provider_attempts=raw_config["max_provider_attempts"],
+                max_invalid_output_repairs=raw_config["max_invalid_output_repairs"],
+                max_execution_seconds=raw_config["max_execution_seconds"],
+                blind_panel=raw_config["blind_panel"],
+                include_transcript=raw_config["include_transcript"],
+                allow_retest=raw_config["allow_retest"],
+                strong_consensus_threshold=raw_config["strong_consensus_threshold"],
+                weak_consensus_threshold=raw_config["weak_consensus_threshold"],
+                polarization_threshold=raw_config["polarization_threshold"],
             )
             return cls(
                 session_id=data["session_id"],

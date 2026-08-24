@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 import pytest
 
 from app.workflows.reader_panel import (
@@ -21,6 +22,19 @@ from app.workflows.reader_panel import (
 
 
 class TestReaderPanelModes:
+    def test_presets_snapshot_complete_hard_budgets(self) -> None:
+        config = get_mode_preset_config(PanelMode.STANDARD)
+
+        assert config.max_total_model_calls > 0
+        assert config.max_model_calls_per_phase > 0
+        assert config.max_total_input_tokens > 0
+        assert config.max_total_output_tokens > 0
+        assert config.max_input_tokens_per_call > 0
+        assert config.max_output_tokens_per_call > 0
+        assert config.max_messages > 0
+        assert config.max_provider_attempts >= 1
+        assert config.max_invalid_output_repairs == 1
+
     def test_mode_off_preset_is_noop(self) -> None:
         config = get_mode_preset_config(PanelMode.OFF)
         assert config.mode == PanelMode.OFF
@@ -185,10 +199,24 @@ class TestReaderPanelTransitions:
 class TestDeterministicConsensusClassification:
     def test_strong_consensus_when_75_percent_significant_or_critical(self) -> None:
         votes = [
-            BallotVote(reader_id="r1", severity=Severity.CRITICAL, suggested_action=SuggestedAction.REWRITE_LOCAL),
-            BallotVote(reader_id="r2", severity=Severity.SIGNIFICANT, suggested_action=SuggestedAction.COMPRESS),
-            BallotVote(reader_id="r3", severity=Severity.SIGNIFICANT, suggested_action=SuggestedAction.CLARIFY),
-            BallotVote(reader_id="r4", severity=Severity.MINOR, suggested_action=SuggestedAction.KEEP),
+            BallotVote(
+                reader_id="r1",
+                severity=Severity.CRITICAL,
+                suggested_action=SuggestedAction.REWRITE_LOCAL,
+            ),
+            BallotVote(
+                reader_id="r2",
+                severity=Severity.SIGNIFICANT,
+                suggested_action=SuggestedAction.COMPRESS,
+            ),
+            BallotVote(
+                reader_id="r3",
+                severity=Severity.SIGNIFICANT,
+                suggested_action=SuggestedAction.CLARIFY,
+            ),
+            BallotVote(
+                reader_id="r4", severity=Severity.MINOR, suggested_action=SuggestedAction.KEEP
+            ),
         ]
         result = classify_issue_consensus(votes)
         assert result.consensus_class == ConsensusClass.STRONG_CONSENSUS
@@ -201,11 +229,23 @@ class TestDeterministicConsensusClassification:
 
     def test_weak_consensus_when_majority_agree_issue_exists_with_low_dispersion(self) -> None:
         votes = [
-            BallotVote(reader_id="r1", severity=Severity.SIGNIFICANT, suggested_action=SuggestedAction.COMPRESS),
-            BallotVote(reader_id="r2", severity=Severity.MINOR, suggested_action=SuggestedAction.CLARIFY),
-            BallotVote(reader_id="r3", severity=Severity.MINOR, suggested_action=SuggestedAction.KEEP),
-            BallotVote(reader_id="r4", severity=Severity.MINOR, suggested_action=SuggestedAction.KEEP),
-            BallotVote(reader_id="r5", severity=Severity.NONE, suggested_action=SuggestedAction.KEEP),
+            BallotVote(
+                reader_id="r1",
+                severity=Severity.SIGNIFICANT,
+                suggested_action=SuggestedAction.COMPRESS,
+            ),
+            BallotVote(
+                reader_id="r2", severity=Severity.MINOR, suggested_action=SuggestedAction.CLARIFY
+            ),
+            BallotVote(
+                reader_id="r3", severity=Severity.MINOR, suggested_action=SuggestedAction.KEEP
+            ),
+            BallotVote(
+                reader_id="r4", severity=Severity.MINOR, suggested_action=SuggestedAction.KEEP
+            ),
+            BallotVote(
+                reader_id="r5", severity=Severity.NONE, suggested_action=SuggestedAction.KEEP
+            ),
         ]
         # 4/5 = 80% agree issue exists (1 sig, 3 minor, 1 none). Sig/crit is 20% (<30% so not polarized).
         result = classify_issue_consensus(votes)
@@ -214,10 +254,20 @@ class TestDeterministicConsensusClassification:
 
     def test_polarized_when_30_percent_low_and_30_percent_high(self) -> None:
         votes = [
-            BallotVote(reader_id="r1", severity=Severity.SIGNIFICANT, suggested_action=SuggestedAction.COMPRESS),
-            BallotVote(reader_id="r2", severity=Severity.CRITICAL, suggested_action=SuggestedAction.MOVE),
-            BallotVote(reader_id="r3", severity=Severity.NONE, suggested_action=SuggestedAction.KEEP),
-            BallotVote(reader_id="r4", severity=Severity.MINOR, suggested_action=SuggestedAction.KEEP),
+            BallotVote(
+                reader_id="r1",
+                severity=Severity.SIGNIFICANT,
+                suggested_action=SuggestedAction.COMPRESS,
+            ),
+            BallotVote(
+                reader_id="r2", severity=Severity.CRITICAL, suggested_action=SuggestedAction.MOVE
+            ),
+            BallotVote(
+                reader_id="r3", severity=Severity.NONE, suggested_action=SuggestedAction.KEEP
+            ),
+            BallotVote(
+                reader_id="r4", severity=Severity.MINOR, suggested_action=SuggestedAction.KEEP
+            ),
         ]
         # High: 2/4 = 50% (>= 30%), Low: 2/4 = 50% (>= 30%)
         result = classify_issue_consensus(votes)
@@ -226,11 +276,23 @@ class TestDeterministicConsensusClassification:
 
     def test_accepted_when_majority_rates_none_or_minor(self) -> None:
         votes = [
-            BallotVote(reader_id="r1", severity=Severity.NONE, suggested_action=SuggestedAction.KEEP),
-            BallotVote(reader_id="r2", severity=Severity.NONE, suggested_action=SuggestedAction.KEEP),
-            BallotVote(reader_id="r3", severity=Severity.NONE, suggested_action=SuggestedAction.KEEP),
-            BallotVote(reader_id="r4", severity=Severity.MINOR, suggested_action=SuggestedAction.KEEP),
-            BallotVote(reader_id="r5", severity=Severity.SIGNIFICANT, suggested_action=SuggestedAction.CLARIFY),
+            BallotVote(
+                reader_id="r1", severity=Severity.NONE, suggested_action=SuggestedAction.KEEP
+            ),
+            BallotVote(
+                reader_id="r2", severity=Severity.NONE, suggested_action=SuggestedAction.KEEP
+            ),
+            BallotVote(
+                reader_id="r3", severity=Severity.NONE, suggested_action=SuggestedAction.KEEP
+            ),
+            BallotVote(
+                reader_id="r4", severity=Severity.MINOR, suggested_action=SuggestedAction.KEEP
+            ),
+            BallotVote(
+                reader_id="r5",
+                severity=Severity.SIGNIFICANT,
+                suggested_action=SuggestedAction.CLARIFY,
+            ),
         ]
         result = classify_issue_consensus(votes)
         assert result.consensus_class == ConsensusClass.ACCEPTED
@@ -238,9 +300,15 @@ class TestDeterministicConsensusClassification:
 
     def test_minority_high_risk_flag_triggered_independently(self) -> None:
         votes = [
-            BallotVote(reader_id="r1", severity=Severity.NONE, suggested_action=SuggestedAction.KEEP),
-            BallotVote(reader_id="r2", severity=Severity.NONE, suggested_action=SuggestedAction.KEEP),
-            BallotVote(reader_id="r3", severity=Severity.NONE, suggested_action=SuggestedAction.KEEP),
+            BallotVote(
+                reader_id="r1", severity=Severity.NONE, suggested_action=SuggestedAction.KEEP
+            ),
+            BallotVote(
+                reader_id="r2", severity=Severity.NONE, suggested_action=SuggestedAction.KEEP
+            ),
+            BallotVote(
+                reader_id="r3", severity=Severity.NONE, suggested_action=SuggestedAction.KEEP
+            ),
             BallotVote(
                 reader_id="r4",
                 severity=Severity.CRITICAL,
@@ -256,10 +324,30 @@ class TestDeterministicConsensusClassification:
 
     def test_target_audience_distribution_separation(self) -> None:
         votes = [
-            BallotVote(reader_id="r1", severity=Severity.SIGNIFICANT, suggested_action=SuggestedAction.COMPRESS, is_target_audience=True),
-            BallotVote(reader_id="r2", severity=Severity.SIGNIFICANT, suggested_action=SuggestedAction.COMPRESS, is_target_audience=True),
-            BallotVote(reader_id="r3", severity=Severity.NONE, suggested_action=SuggestedAction.KEEP, is_target_audience=False),
-            BallotVote(reader_id="r4", severity=Severity.NONE, suggested_action=SuggestedAction.KEEP, is_target_audience=False),
+            BallotVote(
+                reader_id="r1",
+                severity=Severity.SIGNIFICANT,
+                suggested_action=SuggestedAction.COMPRESS,
+                is_target_audience=True,
+            ),
+            BallotVote(
+                reader_id="r2",
+                severity=Severity.SIGNIFICANT,
+                suggested_action=SuggestedAction.COMPRESS,
+                is_target_audience=True,
+            ),
+            BallotVote(
+                reader_id="r3",
+                severity=Severity.NONE,
+                suggested_action=SuggestedAction.KEEP,
+                is_target_audience=False,
+            ),
+            BallotVote(
+                reader_id="r4",
+                severity=Severity.NONE,
+                suggested_action=SuggestedAction.KEEP,
+                is_target_audience=False,
+            ),
         ]
         result = classify_issue_consensus(votes)
         assert result.target_audience_votes == 2
@@ -268,6 +356,52 @@ class TestDeterministicConsensusClassification:
 
 
 class TestReaderPanelCheckpoint:
+    def test_checkpoint_roundtrips_every_hard_budget_without_defaulting(self) -> None:
+        config = replace(
+            get_mode_preset_config(PanelMode.QUICK),
+            max_total_model_calls=7,
+            max_model_calls_per_phase=3,
+            max_total_input_tokens=101,
+            max_total_output_tokens=103,
+            max_input_tokens_per_call=17,
+            max_output_tokens_per_call=19,
+            max_messages=5,
+            max_provider_attempts=2,
+            max_invalid_output_repairs=1,
+            max_execution_seconds=23,
+        )
+        state = ReaderPanelState.create(
+            session_id="11111111-1111-4111-8111-111111111111",
+            project_id="22222222-2222-4222-8222-222222222222",
+            document_id="33333333-3333-4333-8333-333333333333",
+            document_version_id="44444444-4444-4444-8444-444444444444",
+            source_hash="a" * 64,
+            config=config,
+        )
+
+        restored = ReaderPanelState.from_checkpoint_dict(state.to_checkpoint_dict())
+
+        assert restored.config == config
+
+    def test_checkpoint_rejects_bool_or_missing_hard_budget(self) -> None:
+        state = ReaderPanelState.create(
+            session_id="11111111-1111-4111-8111-111111111111",
+            project_id="22222222-2222-4222-8222-222222222222",
+            document_id="33333333-3333-4333-8333-833333333333",
+            document_version_id="44444444-4444-4444-8444-444444444444",
+            source_hash="a" * 64,
+            config=get_mode_preset_config(PanelMode.QUICK),
+        )
+        checkpoint = state.to_checkpoint_dict()
+        checkpoint["config"]["max_total_output_tokens"] = True
+        with pytest.raises(ReaderPanelValidationError):
+            ReaderPanelState.from_checkpoint_dict(checkpoint)
+
+        checkpoint = state.to_checkpoint_dict()
+        del checkpoint["config"]["max_model_calls_per_phase"]
+        with pytest.raises(ReaderPanelValidationError):
+            ReaderPanelState.from_checkpoint_dict(checkpoint)
+
     def test_checkpoint_roundtrip_is_content_free(self) -> None:
         config = get_mode_preset_config(PanelMode.STANDARD)
         state = ReaderPanelState.create(
@@ -367,8 +501,16 @@ class TestReaderPanelAdvancedEdgeCases:
 
     def test_all_abstain_yields_inconclusive(self) -> None:
         votes = [
-            BallotVote(reader_id="r1", severity=Severity.ABSTAIN, suggested_action=SuggestedAction.MANUAL_REVIEW),
-            BallotVote(reader_id="r2", severity=Severity.ABSTAIN, suggested_action=SuggestedAction.MANUAL_REVIEW),
+            BallotVote(
+                reader_id="r1",
+                severity=Severity.ABSTAIN,
+                suggested_action=SuggestedAction.MANUAL_REVIEW,
+            ),
+            BallotVote(
+                reader_id="r2",
+                severity=Severity.ABSTAIN,
+                suggested_action=SuggestedAction.MANUAL_REVIEW,
+            ),
         ]
         result = classify_issue_consensus(votes)
         assert result.consensus_class == ConsensusClass.INCONCLUSIVE

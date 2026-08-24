@@ -10,6 +10,7 @@ from app.models.reader_panel import (
     ReaderInitialReport,
     ReaderPanelBallot,
     ReaderPanelIssue,
+    ReaderPanelInvocation,
     ReaderPanelMessage,
     ReaderPanelSession,
     ReaderRun,
@@ -17,6 +18,28 @@ from app.models.reader_panel import (
 
 
 class TestReaderPanelModelStructure:
+    def test_reader_panel_invocation_is_content_safe_ledger(self) -> None:
+        assert ReaderPanelInvocation.__tablename__ == "reader_panel_invocations"
+        mapper = inspect(ReaderPanelInvocation)
+
+        assert set(mapper.columns.keys()) == {
+            "id",
+            "session_id",
+            "phase",
+            "work_key",
+            "attempt",
+            "status",
+            "error_code",
+            "provider_calls",
+            "input_tokens",
+            "output_tokens",
+            "started_at",
+            "completed_at",
+            "created_at",
+        }
+        forbidden = {"prompt", "response", "content", "endpoint", "headers", "credential", "path"}
+        assert forbidden.isdisjoint(mapper.columns.keys())
+
     def test_workflow_type_includes_reader_panel(self) -> None:
         assert WorkflowType.READER_PANEL == "reader_panel"
 
@@ -140,15 +163,23 @@ class TestReaderPanelModelRelationships:
     def test_project_and_chapter_relationships(self) -> None:
         proj_mapper = inspect(Project)
         assert "reader_panel_sessions" in proj_mapper.relationships
-        assert proj_mapper.relationships["reader_panel_sessions"].target.name == "reader_panel_sessions"
+        assert (
+            proj_mapper.relationships["reader_panel_sessions"].target.name
+            == "reader_panel_sessions"
+        )
 
         chap_mapper = inspect(Chapter)
         assert "reader_panel_sessions" in chap_mapper.relationships
-        assert chap_mapper.relationships["reader_panel_sessions"].target.name == "reader_panel_sessions"
+        assert (
+            chap_mapper.relationships["reader_panel_sessions"].target.name
+            == "reader_panel_sessions"
+        )
 
         wf_mapper = inspect(WorkflowRun)
         assert "reader_panel_session" in wf_mapper.relationships
-        assert wf_mapper.relationships["reader_panel_session"].target.name == "reader_panel_sessions"
+        assert (
+            wf_mapper.relationships["reader_panel_session"].target.name == "reader_panel_sessions"
+        )
 
     def test_session_child_relationships(self) -> None:
         session_mapper = inspect(ReaderPanelSession)
@@ -157,6 +188,7 @@ class TestReaderPanelModelRelationships:
         assert "issues" in session_mapper.relationships
         assert "ballots" in session_mapper.relationships
         assert "messages" in session_mapper.relationships
+        assert "invocations" in session_mapper.relationships
         assert "project" in session_mapper.relationships
         assert "chapter" in session_mapper.relationships
         assert "workflow_run" in session_mapper.relationships
