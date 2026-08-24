@@ -51,7 +51,9 @@ class DeterministicReaderPanelProvider:
     def __init__(self, scenario: ReaderPanelFakeScenario = ReaderPanelFakeScenario.CLEAN) -> None:
         self.scenario = scenario
 
-    def generate_initial_reading(self, request: ReaderInitialReadingRequest) -> ReaderInitialReadingOutput:
+    def generate_initial_reading(
+        self, request: ReaderInitialReadingRequest
+    ) -> ReaderInitialReadingOutput:
         if self.scenario == ReaderPanelFakeScenario.MALFORMED_OUTPUT:
             raise ProviderInvalidOutputError()
 
@@ -95,7 +97,9 @@ class DeterministicReaderPanelProvider:
                     if is_risk_reader
                     else "Overall enjoyable read."
                 ),
-                continue_reading=ContinueReadingVote.MAYBE if is_risk_reader else ContinueReadingVote.YES,
+                continue_reading=ContinueReadingVote.MAYBE
+                if is_risk_reader
+                else ContinueReadingVote.YES,
                 confidence=Confidence.HIGH,
                 strengths=[
                     {
@@ -113,8 +117,15 @@ class DeterministicReaderPanelProvider:
                             else "Minor exposition drag."
                         ),
                         "severity": Severity.CRITICAL if is_risk_reader else Severity.MINOR,
-                        "evidence": [{"segment_ids": [first_seg if is_risk_reader else second_seg], "note": "Risk"}],
-                        "suggested_action": SuggestedAction.REWRITE_LOCAL if is_risk_reader else SuggestedAction.KEEP,
+                        "evidence": [
+                            {
+                                "segment_ids": [first_seg if is_risk_reader else second_seg],
+                                "note": "Risk",
+                            }
+                        ],
+                        "suggested_action": SuggestedAction.REWRITE_LOCAL
+                        if is_risk_reader
+                        else SuggestedAction.KEEP,
                     }
                 ],
             )
@@ -141,7 +152,9 @@ class DeterministicReaderPanelProvider:
                         "symptom": "Dialogue exposition slows combat momentum.",
                         "severity": Severity.SIGNIFICANT if is_critical else Severity.NONE,
                         "evidence": [{"segment_ids": [second_seg], "note": "Dialogue"}],
-                        "suggested_action": SuggestedAction.COMPRESS if is_critical else SuggestedAction.KEEP,
+                        "suggested_action": SuggestedAction.COMPRESS
+                        if is_critical
+                        else SuggestedAction.KEEP,
                     }
                 ],
             )
@@ -155,7 +168,9 @@ class DeterministicReaderPanelProvider:
                 concerns=[],
             )
 
-    def extract_issues(self, request: ModeratorIssueExtractionRequest) -> ModeratorIssueExtractionOutput:
+    def extract_issues(
+        self, request: ModeratorIssueExtractionRequest
+    ) -> ModeratorIssueExtractionOutput:
         if self.scenario == ReaderPanelFakeScenario.MALFORMED_OUTPUT:
             raise ProviderInvalidOutputError()
 
@@ -224,10 +239,14 @@ class DeterministicReaderPanelProvider:
             return ReaderBallotOutput(
                 issue_number=request.issue.issue_number,
                 severity=Severity.CRITICAL if is_risk_reader else Severity.MINOR,
-                suggested_action=SuggestedAction.REWRITE_LOCAL if is_risk_reader else SuggestedAction.KEEP,
+                suggested_action=SuggestedAction.REWRITE_LOCAL
+                if is_risk_reader
+                else SuggestedAction.KEEP,
                 confidence=Confidence.HIGH,
                 evidence=[EvidenceRef(segment_ids=[first_seg], note="Ballot evidence")],
-                reason="Severe risk of killing dramatic surprise." if is_risk_reader else "Not perceived as blocking.",
+                reason="Severe risk of killing dramatic surprise."
+                if is_risk_reader
+                else "Not perceived as blocking.",
             )
         elif self.scenario == ReaderPanelFakeScenario.DISAGREEMENT:
             is_critical = request.reader_profile_id in ("low_patience", "style_sensitive")
@@ -237,7 +256,9 @@ class DeterministicReaderPanelProvider:
                 suggested_action=SuggestedAction.COMPRESS if is_critical else SuggestedAction.KEEP,
                 confidence=Confidence.HIGH if is_critical else Confidence.MEDIUM,
                 evidence=[EvidenceRef(segment_ids=[first_seg], note="Ballot evidence")],
-                reason="Pacing suffers significantly." if is_critical else "Minor stylistic detail.",
+                reason="Pacing suffers significantly."
+                if is_critical
+                else "Minor stylistic detail.",
             )
         else:  # CLEAN or default
             return ReaderBallotOutput(
@@ -249,7 +270,9 @@ class DeterministicReaderPanelProvider:
                 reason="Minor polish would improve the scene.",
             )
 
-    def generate_discussion_turn(self, request: ReaderDiscussionTurnRequest) -> ReaderDiscussionTurnOutput:
+    def generate_discussion_turn(
+        self, request: ReaderDiscussionTurnRequest
+    ) -> ReaderDiscussionTurnOutput:
         if self.scenario == ReaderPanelFakeScenario.MALFORMED_OUTPUT:
             raise ProviderInvalidOutputError()
 
@@ -271,7 +294,9 @@ class DeterministicReaderPanelProvider:
                     if is_critical
                     else "I agree it could be tightened slightly."
                 ),
-                proposed_action="Compress dialogue by 30%." if is_critical else "Keep dialogue structure intact.",
+                proposed_action="Compress dialogue by 30%."
+                if is_critical
+                else "Keep dialogue structure intact.",
                 novelty=DiscussionNovelty.NEW_INTERPRETATION,
             )
         else:
@@ -284,7 +309,9 @@ class DeterministicReaderPanelProvider:
                 novelty=DiscussionNovelty.NEW_EVIDENCE,
             )
 
-    def summarize_discussion(self, request: ModeratorDiscussionSummaryRequest) -> ModeratorDiscussionSummaryOutput:
+    def summarize_discussion(
+        self, request: ModeratorDiscussionSummaryRequest
+    ) -> ModeratorDiscussionSummaryOutput:
         if self.scenario == ReaderPanelFakeScenario.MALFORMED_OUTPUT:
             raise ProviderInvalidOutputError()
 
@@ -327,12 +354,18 @@ class DeterministicReaderPanelProvider:
             return ReaderFinalBallotOutput(
                 issue_number=request.issue.issue_number,
                 severity=Severity.SIGNIFICANT if is_critical else Severity.MINOR,
-                suggested_action=SuggestedAction.COMPRESS if is_critical else SuggestedAction.CLARIFY,
+                suggested_action=SuggestedAction.COMPRESS
+                if is_critical
+                else SuggestedAction.CLARIFY,
                 confidence=Confidence.HIGH,
                 evidence=[EvidenceRef(segment_ids=[first_seg], note="Final ballot evidence")],
                 position_changed=True if not is_critical else False,
-                change_reason="Acknowledged peer points regarding dialogue pacing." if not is_critical else None,
-                remaining_disagreement="Still prefer moderate compression." if is_critical else None,
+                change_reason="Acknowledged peer points regarding dialogue pacing."
+                if not is_critical
+                else None,
+                remaining_disagreement="Still prefer moderate compression."
+                if is_critical
+                else None,
             )
         else:
             return ReaderFinalBallotOutput(
@@ -346,9 +379,16 @@ class DeterministicReaderPanelProvider:
                 remaining_disagreement=None,
             )
 
-    def synthesize_report(self, request: ModeratorReportSynthesisRequest) -> ModeratorReportSynthesisOutput:
+    def synthesize_report(
+        self, request: ModeratorReportSynthesisRequest
+    ) -> ModeratorReportSynthesisOutput:
         if self.scenario == ReaderPanelFakeScenario.MALFORMED_OUTPUT:
             raise ProviderInvalidOutputError()
+
+        def result(issue: ExtractedIssueItem, key: str, default: str) -> str:
+            return str(
+                request.final_consensus_results.get(issue.issue_number, {}).get(key, default)
+            )
 
         return ModeratorReportSynthesisOutput(
             executive_summary="Reader Panel evaluated chapter draft. Overall reader continuation willingness is strong.",
@@ -357,8 +397,14 @@ class DeterministicReaderPanelProvider:
                 KeyFindingItem(
                     issue_number=issue.issue_number,
                     title=issue.title,
-                    consensus_class=ConsensusClass.STRONG_CONSENSUS if self.scenario == ReaderPanelFakeScenario.CLEAN else ConsensusClass.POLARIZED,
-                    recommended_priority=EditorialDecision.MUST_FIX if issue.minority_risk else EditorialDecision.EXPERIMENT,
+                    consensus_class=result(
+                        issue, "consensus_class", ConsensusClass.INCONCLUSIVE.value
+                    ),
+                    recommended_priority=result(
+                        issue,
+                        "recommended_priority",
+                        EditorialDecision.MANUAL_REVIEW.value,
+                    ),
                     summary=issue.symptom,
                     evidence=issue.evidence,
                 )
@@ -366,11 +412,27 @@ class DeterministicReaderPanelProvider:
             ],
             actionable_recommendations=[
                 ActionableRecommendationItem(
-                    priority=EditorialDecision.MUST_FIX if issue.minority_risk else EditorialDecision.EXPERIMENT,
-                    target_segment_ids=[ev.segment_ids[0] for ev in issue.evidence if ev.segment_ids] or ["S001"],
-                    suggested_action=SuggestedAction.REWRITE_LOCAL if issue.minority_risk else SuggestedAction.COMPRESS,
+                    priority=result(
+                        issue,
+                        "recommended_priority",
+                        EditorialDecision.MANUAL_REVIEW.value,
+                    ),
+                    target_segment_ids=list(
+                        dict.fromkeys(
+                            segment_id
+                            for evidence in issue.evidence
+                            for segment_id in evidence.segment_ids
+                        )
+                    ),
+                    suggested_action=result(
+                        issue,
+                        "suggested_action",
+                        SuggestedAction.MANUAL_REVIEW.value,
+                    ),
                     instruction=f"Address {issue.title} according to reader panel feedback.",
                 )
                 for issue in request.extracted_issues
+                if result(issue, "suggested_action", SuggestedAction.MANUAL_REVIEW.value)
+                != SuggestedAction.KEEP.value
             ],
         )
