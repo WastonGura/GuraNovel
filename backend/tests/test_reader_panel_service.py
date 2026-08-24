@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from collections import defaultdict
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 import hashlib
 from threading import Event
@@ -49,7 +50,12 @@ from app.services.reader_panel_service import (
     ReaderPanelQuorumError,
     ReaderPanelService,
 )
-from app.workflows.reader_panel import PanelMode, ReaderPanelConfig, ReaderPanelStatus
+from app.workflows.reader_panel import (
+    PanelMode,
+    ReaderPanelConfig,
+    ReaderPanelStatus,
+    get_mode_preset_config,
+)
 from app.llm.errors import (
     ProviderConfigurationError,
     ProviderRateLimitedError,
@@ -108,6 +114,15 @@ class FakeAsyncSession:
         self.execute_options.append((stmt_str, dict(stmt.get_execution_options())))
         if "reader_panel_sessions" in stmt_str:
             sessions = list(self.storage[ReaderPanelSession].values())
+            if "ORDER BY reader_panel_sessions.created_at DESC" in stmt_str:
+                sessions.sort(
+                    key=lambda item: (
+                        getattr(item, "created_at", None)
+                        or datetime.min.replace(tzinfo=timezone.utc),
+                        str(item.id),
+                    ),
+                    reverse=True,
+                )
             return FakeExecuteResult(sessions)
         elif "reader_runs" in stmt_str:
             runs = list(self.storage[ReaderRun].values())
@@ -239,6 +254,196 @@ def setup_test_entities(
 
 @pytest.mark.anyio
 class TestReaderPanelServiceInitialization:
+    async def test_explicit_binding_is_validated_before_off_noop(
+        self,
+        fake_db_session: FakeAsyncSession,
+        test_project_id: UUID,
+        test_chapter_id: UUID,
+        test_document_id: UUID,
+        test_version_id: UUID,
+        sample_hash: str,
+        sample_segments: dict[str, str],
+    ) -> None:
+        setup_test_entities(
+            fake_db_session,
+            project_id=test_project_id,
+            chapter_id=test_chapter_id,
+            document_id=test_document_id,
+            version_id=test_version_id,
+            content_hash=sample_hash,
+            segments=sample_segments,
+        )
+        service = ReaderPanelService(fake_db_session)  # type: ignore[arg-type]
+
+        result = await service.initialize_session(
+            project_id=test_project_id,
+            chapter_id=test_chapter_id,
+            document_id=test_document_id,
+            document_version_id=test_version_id,
+            mode=PanelMode.OFF,
+        )
+
+        assert result.is_noop is True
+        assert result.document_id == test_document_id
+        assert result.document_version_id == test_version_id
+        assert result.source_hash == sample_hash
+        assert not fake_db_session.storage[ReaderPanelSession]
+        assert not fake_db_session.storage[WorkflowRun]
+
+        with pytest.raises(ReaderPanelNotFoundError):
+            await service.initialize_session(
+                project_id=test_project_id,
+                chapter_id=test_chapter_id,
+                document_id=uuid4(),
+                document_version_id=test_version_id,
+                mode=PanelMode.OFF,
+            )
+
+    async def test_idempotency_key_reuses_exact_request_and_rejects_conflict(
+        self,
+        fake_db_session: FakeAsyncSession,
+        test_project_id: UUID,
+        test_chapter_id: UUID,
+        test_document_id: UUID,
+        test_version_id: UUID,
+        sample_hash: str,
+        sample_segments: dict[str, str],
+    ) -> None:
+        setup_test_entities(
+            fake_db_session,
+            project_id=test_project_id,
+            chapter_id=test_chapter_id,
+            document_id=test_document_id,
+            version_id=test_version_id,
+            content_hash=sample_hash,
+            segments=sample_segments,
+        )
+        service = ReaderPanelService(fake_db_session)  # type: ignore[arg-type]
+        request = {
+            "project_id": test_project_id,
+            "chapter_id": test_chapter_id,
+            "document_id": test_document_id,
+            "document_version_id": test_version_id,
+            "mode": PanelMode.QUICK,
+            "idempotency_key": "client:chapter-1",
+            "test_goals": ["opening"],
+        }
+
+        first = await service.initialize_session(**request)
+        replay = await service.initialize_session(**request)
+
+        assert replay.session_id == first.session_id
+        assert fake_db_session.in_transaction() is False
+        assert len(fake_db_session.storage[ReaderPanelSession]) == 1
+        assert len(fake_db_session.storage[WorkflowRun]) == 1
+
+        with pytest.raises(ReaderPanelInvalidStateError):
+            await service.initialize_session(**{**request, "test_goals": ["ending"]})
+
+    async def test_without_key_reuses_only_the_complete_request_fingerprint(
+        self,
+        fake_db_session: FakeAsyncSession,
+        test_project_id: UUID,
+        test_chapter_id: UUID,
+        test_document_id: UUID,
+        test_version_id: UUID,
+        sample_hash: str,
+        sample_segments: dict[str, str],
+    ) -> None:
+        setup_test_entities(
+            fake_db_session,
+            project_id=test_project_id,
+            chapter_id=test_chapter_id,
+            document_id=test_document_id,
+            version_id=test_version_id,
+            content_hash=sample_hash,
+            segments=sample_segments,
+        )
+        service = ReaderPanelService(fake_db_session)  # type: ignore[arg-type]
+        request = {
+            "project_id": test_project_id,
+            "chapter_id": test_chapter_id,
+            "document_id": test_document_id,
+            "document_version_id": test_version_id,
+            "mode": PanelMode.QUICK,
+            "test_goals": ["opening"],
+            "target_audience": ["fantasy readers"],
+        }
+
+        first = await service.initialize_session(**request)
+        exact = await service.initialize_session(**request)
+        changed_goal = await service.initialize_session(**{**request, "test_goals": ["ending"]})
+        changed_config = await service.initialize_session(
+            **{
+                **request,
+                "config": replace(get_mode_preset_config(PanelMode.QUICK), max_ballot_issues=2),
+            }
+        )
+        changed_mode = await service.initialize_session(**{**request, "mode": PanelMode.STANDARD})
+
+        assert exact.session_id == first.session_id
+        assert (
+            len(
+                {
+                    first.session_id,
+                    changed_goal.session_id,
+                    changed_config.session_id,
+                    changed_mode.session_id,
+                }
+            )
+            == 4
+        )
+
+    async def test_without_key_selects_newest_matching_fingerprint_deterministically(
+        self,
+        fake_db_session: FakeAsyncSession,
+        test_project_id: UUID,
+        test_chapter_id: UUID,
+        test_document_id: UUID,
+        test_version_id: UUID,
+        sample_hash: str,
+        sample_segments: dict[str, str],
+    ) -> None:
+        setup_test_entities(
+            fake_db_session,
+            project_id=test_project_id,
+            chapter_id=test_chapter_id,
+            document_id=test_document_id,
+            version_id=test_version_id,
+            content_hash=sample_hash,
+            segments=sample_segments,
+        )
+        service = ReaderPanelService(fake_db_session)  # type: ignore[arg-type]
+        request = {
+            "project_id": test_project_id,
+            "chapter_id": test_chapter_id,
+            "document_id": test_document_id,
+            "document_version_id": test_version_id,
+            "mode": PanelMode.QUICK,
+        }
+        older = await service.initialize_session(**request, idempotency_key="client:older")
+        newer = await service.initialize_session(**request, idempotency_key="client:newer")
+        fake_db_session.storage[ReaderPanelSession][older.session_id].created_at = datetime(
+            2025, 1, 1, tzinfo=timezone.utc
+        )
+        fake_db_session.storage[ReaderPanelSession][newer.session_id].created_at = datetime(
+            2025, 1, 2, tzinfo=timezone.utc
+        )
+
+        selected = await service.initialize_session(**request)
+
+        assert selected.session_id == newer.session_id
+        candidates = [
+            statement
+            for statement, _ in fake_db_session.execute_options
+            if "FROM reader_panel_sessions" in statement
+        ]
+        assert any(
+            "ORDER BY reader_panel_sessions.created_at DESC, reader_panel_sessions.id DESC"
+            in statement
+            for statement in candidates
+        )
+
     async def test_mode_off_returns_noop_without_db_side_effects(
         self,
         fake_db_session: FakeAsyncSession,
@@ -339,6 +544,265 @@ class TestReaderPanelServiceInitialization:
                 chapter_id=test_chapter_id,
                 mode=PanelMode.STANDARD,
             )
+
+
+@pytest.mark.anyio
+class TestReaderPanelServiceApiProjection:
+    async def test_scoped_detail_is_safe_and_optional_rows_are_explicit(
+        self,
+        fake_db_session: FakeAsyncSession,
+        test_project_id: UUID,
+        test_chapter_id: UUID,
+        test_document_id: UUID,
+        test_version_id: UUID,
+        sample_hash: str,
+        sample_segments: dict[str, str],
+    ) -> None:
+        setup_test_entities(
+            fake_db_session,
+            project_id=test_project_id,
+            chapter_id=test_chapter_id,
+            document_id=test_document_id,
+            version_id=test_version_id,
+            content_hash=sample_hash,
+            segments=sample_segments,
+        )
+        service = ReaderPanelService(fake_db_session)  # type: ignore[arg-type]
+        initialized = await service.initialize_session(
+            project_id=test_project_id,
+            chapter_id=test_chapter_id,
+            document_id=test_document_id,
+            document_version_id=test_version_id,
+            mode=PanelMode.QUICK,
+        )
+        panel = fake_db_session.storage[ReaderPanelSession][initialized.session_id]
+        run = next(iter(fake_db_session.storage[ReaderRun].values()))
+        report = ReaderInitialReport(
+            reader_run_id=run.id,
+            session_id=panel.id,
+            overall_reaction="Strong hook.",
+            continue_reading="yes",
+            confidence="high",
+            strengths=[
+                {
+                    "summary": "Clear hook",
+                    "evidence": [{"segment_ids": ["S001"], "note": "Clear hook"}],
+                }
+            ],
+            reactions=[],
+            concerns=[],
+            locked=True,
+        )
+        fake_db_session.add(report)
+        fake_db_session.add(
+            ReaderPanelMessage(
+                session_id=panel.id,
+                issue_id=uuid4(),
+                round_number=1,
+                turn_number=1,
+                speaker_type="reader",
+                reader_run_id=run.id,
+                stance="support",
+                claim="The opening works.",
+                evidence=[{"segment_ids": ["S001"], "note": "Specific"}],
+                concession=None,
+                proposed_action="keep",
+                novelty="new_evidence",
+            )
+        )
+        fake_db_session.add(
+            ReaderPanelMessage(
+                session_id=panel.id,
+                issue_id=uuid4(),
+                round_number=1,
+                turn_number=2,
+                speaker_type="moderator",
+                reader_run_id=None,
+                stance=None,
+                claim="The round retains one disagreement.",
+                evidence=[{"segment_ids": ["S001"], "note": "Bound summary."}],
+                concession=None,
+                proposed_action="Compare the two readings.",
+                novelty="procedural",
+            )
+        )
+        review = ReviewReport(
+            project_id=test_project_id,
+            chapter_id=test_chapter_id,
+            workflow_run_id=panel.workflow_run_id,
+            review_mode="reader_panel",
+            reviewer_agent_role="moderator_agent",
+            target_document_id=test_document_id,
+            target_version_id=test_version_id,
+            passed=False,
+            summary="Editorial handoff.",
+            blocking_issues=[{"issue_number": 1, "title": "Opening clarity"}],
+            warnings=[],
+            notes=["Manual review only."],
+            suggested_actions=[
+                {
+                    "priority": "experiment",
+                    "target_segment_ids": ["S001"],
+                    "suggested_action": "clarify",
+                    "instruction": "Clarify the opening image.",
+                }
+            ],
+            raw_report={"provider_secret": "must-not-leak"},
+            report_document_id=None,
+        )
+        fake_db_session.add(review)
+        panel.review_report_id = review.id
+        fake_db_session.add(
+            ReaderPanelIssue(
+                session_id=panel.id,
+                issue_number=1,
+                title="Opening clarity",
+                category="clarity",
+                symptom="The opening image is ambiguous.",
+                root_cause_hypotheses=["The subject is introduced late."],
+                evidence=[{"segment_ids": ["S001"], "note": "Ambiguous subject."}],
+                source_reader_ids=["internal-reader-id"],
+                target_audience_relevance="high",
+                minority_risk=False,
+                discussion_status="closed",
+                consensus_class="strong_consensus",
+                recommended_priority="experiment",
+                final_tally={"raw": {"critical": 2}},
+            )
+        )
+
+        default = await service.get_scoped_session(
+            project_id=test_project_id,
+            chapter_id=test_chapter_id,
+            session_id=panel.id,
+        )
+
+        assert default["review_report"] == {
+            "summary": "Editorial handoff.",
+            "blocking_issues": [{"issue_number": 1, "title": "Opening clarity"}],
+            "warnings": [],
+            "notes": ["Manual review only."],
+            "suggested_actions": [
+                {
+                    "priority": "experiment",
+                    "target_segment_ids": ["S001"],
+                    "suggested_action": "clarify",
+                    "instruction": "Clarify the opening image.",
+                }
+            ],
+        }
+        assert default["issues"][0]["title"] == "Opening clarity"
+        assert "source_reader_ids" not in repr(default)
+        assert "final_tally" not in repr(default)
+        assert "initial_reports" not in default
+        assert "discussion_transcript" not in default
+        assert "raw_report" not in repr(default)
+
+        review.suggested_actions[0]["target_segment_ids"] = ["/tmp/private-segment"]
+        with pytest.raises(ReaderPanelInvalidStateError):
+            await service.get_scoped_session(test_project_id, test_chapter_id, panel.id)
+        review.suggested_actions[0]["target_segment_ids"] = ["S001"]
+
+        expanded = await service.get_scoped_session(
+            project_id=test_project_id,
+            chapter_id=test_chapter_id,
+            session_id=panel.id,
+            include_initial_reports=True,
+            include_transcript=True,
+            data_limit=10,
+        )
+        assert expanded["initial_reports"][0]["overall_reaction"] == "Strong hook."
+        assert expanded["discussion_transcript"][0]["claim"] == "The opening works."
+        assert expanded["discussion_transcript"][0]["stance"] == "support"
+        assert expanded["discussion_transcript"][1]["speaker_type"] == "moderator"
+        assert expanded["discussion_transcript"][1]["stance"] is None
+        assert "reader_run_id" not in repr(expanded)
+        assert "reader_profile_id" not in repr(expanded)
+
+        review.summary = "api_key=sk-123456789"
+        with pytest.raises(ReaderPanelInvalidStateError):
+            await service.get_scoped_session(test_project_id, test_chapter_id, panel.id)
+        review.summary = "Editorial handoff."
+        report.overall_reaction = "/tmp/private-reader-output"
+        with pytest.raises(ReaderPanelInvalidStateError):
+            await service.get_scoped_session(
+                test_project_id,
+                test_chapter_id,
+                panel.id,
+                include_initial_reports=True,
+            )
+        report.overall_reaction = "Strong hook."
+        message = next(iter(fake_db_session.storage[ReaderPanelMessage].values()))
+        message.claim = "x" * 4001
+        with pytest.raises(ReaderPanelInvalidStateError):
+            await service.get_scoped_session(
+                test_project_id,
+                test_chapter_id,
+                panel.id,
+                include_transcript=True,
+            )
+
+        with pytest.raises(ReaderPanelNotFoundError):
+            await service.get_scoped_session(
+                project_id=uuid4(),
+                chapter_id=test_chapter_id,
+                session_id=panel.id,
+            )
+
+    async def test_scoped_list_is_newest_first_and_bounded(
+        self,
+        fake_db_session: FakeAsyncSession,
+        test_project_id: UUID,
+        test_chapter_id: UUID,
+        test_document_id: UUID,
+        test_version_id: UUID,
+        sample_hash: str,
+        sample_segments: dict[str, str],
+    ) -> None:
+        setup_test_entities(
+            fake_db_session,
+            project_id=test_project_id,
+            chapter_id=test_chapter_id,
+            document_id=test_document_id,
+            version_id=test_version_id,
+            content_hash=sample_hash,
+            segments=sample_segments,
+        )
+        service = ReaderPanelService(fake_db_session)  # type: ignore[arg-type]
+        first = await service.initialize_session(
+            project_id=test_project_id,
+            chapter_id=test_chapter_id,
+            mode=PanelMode.QUICK,
+        )
+        first_panel = fake_db_session.storage[ReaderPanelSession][first.session_id]
+        first_panel.created_at = datetime(2025, 1, 1, tzinfo=timezone.utc)
+        first_panel.status = ReaderPanelStatus.FAILED.value
+        second = await service.initialize_session(
+            project_id=test_project_id,
+            chapter_id=test_chapter_id,
+            mode=PanelMode.QUICK,
+        )
+        fake_db_session.storage[ReaderPanelSession][second.session_id].created_at = datetime(
+            2025, 1, 2, tzinfo=timezone.utc
+        )
+
+        page = await service.list_scoped_sessions(
+            project_id=test_project_id,
+            chapter_id=test_chapter_id,
+            offset=0,
+            limit=1,
+        )
+
+        assert [item["session_id"] for item in page] == [second.session_id]
+        session_queries = [
+            statement
+            for statement, _ in fake_db_session.execute_options
+            if "reader_panel_sessions" in statement
+        ]
+        assert any(
+            "ORDER BY reader_panel_sessions.created_at DESC" in statement and "LIMIT" in statement
+            for statement in session_queries
+        )
 
 
 @pytest.mark.anyio

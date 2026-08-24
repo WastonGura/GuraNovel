@@ -33,6 +33,7 @@ from app.models import User
 from app.services.chapter_phase_session_source import ChapterPhaseSessionSource
 from app.services.chapter_production_v2_service import ChapterProductionV2Service
 from app.services.project_maintenance_service import ProjectMaintenanceComposition
+from app.services.reader_panel_service import ReaderPanelService
 from app.workspace import ProjectWorkspace
 
 
@@ -180,6 +181,12 @@ async def get_chapter_production_v2_service(
     return composition.create_service(session)
 
 
+async def get_reader_panel_service(
+    session: AsyncSession = Depends(get_db_session),
+) -> ReaderPanelService:
+    return ReaderPanelService(session)
+
+
 async def get_default_actor_user_id(session: AsyncSession = Depends(get_db_session)) -> UUID:
     """Resolve an actor user for server operations, creating a default if missing."""
     user = (await session.scalars(select(User).order_by(User.created_at.asc()).limit(1))).first()
@@ -201,4 +208,5 @@ __all__ = [
     "get_project_creation_composition",
     "get_project_maintenance_composition",
     "get_project_workspace",
+    "get_reader_panel_service",
 ]
