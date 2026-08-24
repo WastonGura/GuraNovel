@@ -1716,6 +1716,47 @@ class TestReaderPanelDiscussionRemediation:
             len(fake_db_session.storage[ReaderPanelBallot]),
         )
 
+    async def test_version_bound_initial_evidence_outside_issue_remains_valid(
+        self,
+        fake_db_session: FakeAsyncSession,
+        test_project_id: UUID,
+        test_chapter_id: UUID,
+        test_document_id: UUID,
+        test_version_id: UUID,
+        sample_hash: str,
+        sample_segments: dict[str, str],
+    ) -> None:
+        service, panel_session = await setup_initial_ballots_locked(
+            fake_db_session,
+            project_id=test_project_id,
+            chapter_id=test_chapter_id,
+            document_id=test_document_id,
+            version_id=test_version_id,
+            content_hash=sample_hash,
+            segments=sample_segments,
+        )
+        initial = next(
+            ballot
+            for ballot in fake_db_session.storage[ReaderPanelBallot].values()
+            if ballot.phase == "initial"
+        )
+        initial.evidence = [{"segment_ids": ["S002"], "note": "Version-bound support."}]
+        profile = next(
+            run.reader_profile_id
+            for run in panel_session.reader_runs
+            if run.id == initial.reader_run_id
+        )
+        provider = RecordingDiscussionProvider(fake_db_session)
+
+        result = await service.run_discussion_and_final_ballots(
+            session_id=panel_session.id,
+            provider=provider,
+        )
+
+        assert result.final_ballots_locked is True
+        request = next(item for item in provider.turn_requests if item.reader_profile_id == profile)
+        assert request.prior_ballot["evidence"] == []
+
     async def test_zero_round_limit_skips_discussion_but_collects_all_finals(
         self,
         fake_db_session: FakeAsyncSession,

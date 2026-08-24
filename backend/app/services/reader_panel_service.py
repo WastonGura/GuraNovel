@@ -1316,13 +1316,11 @@ class ReaderPanelService:
 
         issue_ids = {issue.id for issue in issues}
         run_ids = {run.id for run in eligible_runs}
-        bound_segments: dict[UUID, set[str]] = {}
         for issue in issues:
             evidence = issue.evidence
             if not isinstance(evidence, list) or not evidence:
                 await self._db.commit()
                 raise ReaderPanelInvalidStateError()
-            segment_ids: set[str] = set()
             for ref in evidence:
                 ref_ids = ref.get("segment_ids") if isinstance(ref, dict) else None
                 if (
@@ -1332,8 +1330,6 @@ class ReaderPanelService:
                 ):
                     await self._db.commit()
                     raise ReaderPanelInvalidStateError()
-                segment_ids.update(ref_ids)
-            bound_segments[issue.id] = segment_ids
 
         expected_initial_pairs = {(run.id, issue.id) for run in eligible_runs for issue in issues}
         if any(
@@ -1363,7 +1359,7 @@ class ReaderPanelService:
                 if (
                     not isinstance(ref_ids, list)
                     or not ref_ids
-                    or not set(ref_ids).issubset(bound_segments[pair[1]])
+                    or not set(ref_ids).issubset(all_segments)
                 ):
                     await self._db.commit()
                     raise ReaderPanelInvalidStateError()
