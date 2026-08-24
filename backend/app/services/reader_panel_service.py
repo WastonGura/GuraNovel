@@ -25,7 +25,14 @@ from app.agents.reader_panel_fakes import (
     ReaderPanelFakeScenario,
 )
 from app.core.errors import AppError
-from app.models.core import Chapter, Document, DocumentVersion, Project, WorkflowRun
+from app.models.core import (
+    Chapter,
+    Document,
+    DocumentVersion,
+    Project,
+    WorkflowEvent,
+    WorkflowRun,
+)
 from app.models.reader_panel import (
     ReaderInitialReport,
     ReaderPanelBallot,
@@ -456,41 +463,73 @@ class ReaderPanelService:
         panel_provider = provider or DeterministicReaderPanelProvider(
             scenario=ReaderPanelFakeScenario.CLEAN
         )
-        stmt = (
-            select(ReaderPanelSession)
-            .options(
-                selectinload(ReaderPanelSession.reader_runs).selectinload(ReaderRun.initial_report)
-            )
-            .where(ReaderPanelSession.id == session_id)
-        )
-        panel_session = (await self._db.execute(stmt)).scalars().first()
         compatible_statuses = {
             ReaderPanelStatus.INITIAL_REPORTS_LOCKED.value,
             ReaderPanelStatus.ISSUE_EXTRACTION.value,
             ReaderPanelStatus.INITIAL_BALLOTING.value,
             ReaderPanelStatus.INITIAL_BALLOTS_LOCKED.value,
         }
-        if (
-            panel_session is None
-            or panel_session.initial_reports_locked_at is None
-            or panel_session.status not in compatible_statuses
-        ):
-            raise ReaderPanelInvalidStateError()
 
+        async def lock_session() -> ReaderPanelSession:
+            stmt = (
+                select(ReaderPanelSession)
+                .options(
+                    selectinload(ReaderPanelSession.reader_runs).selectinload(
+                        ReaderRun.initial_report
+                    )
+                )
+                .where(ReaderPanelSession.id == session_id)
+                .with_for_update()
+                .execution_options(populate_existing=True)
+            )
+            locked = (await self._db.execute(stmt)).scalars().first()
+            if (
+                locked is None
+                or locked.initial_reports_locked_at is None
+                or locked.status not in compatible_statuses
+                or locked.chapter_id is None
+            ):
+                raise ReaderPanelInvalidStateError()
+            return locked
+
+        def eligible(session: ReaderPanelSession) -> list[ReaderRun]:
+            return [
+                run
+                for run in session.reader_runs
+                if run.status == "completed"
+                and run.initial_report is not None
+                and run.initial_report.locked
+                and run.initial_report.locked_at is not None
+                and run.initial_report.session_id == session.id
+                and run.initial_report.reader_run_id == run.id
+            ]
+
+        def source_snapshot(
+            session: ReaderPanelSession, eligible_runs: list[ReaderRun]
+        ) -> tuple[Any, ...]:
+            return (
+                session.document_version_id,
+                session.source_hash,
+                session.initial_reports_locked_at,
+                tuple(
+                    sorted(
+                        (
+                            str(run.id),
+                            str(run.initial_report.id),
+                            run.reader_profile_id,
+                            str(run.initial_report.locked_at),
+                        )
+                        for run in eligible_runs
+                    )
+                ),
+            )
+
+        panel_session = await lock_session()
         runs = list(panel_session.reader_runs)
-        eligible_runs = [
-            run
-            for run in runs
-            if run.status == "completed"
-            and run.initial_report is not None
-            and run.initial_report.locked
-            and run.initial_report.locked_at is not None
-            and run.initial_report.session_id == panel_session.id
-            and run.initial_report.reader_run_id == run.id
-        ]
-        if not eligible_runs or panel_session.chapter_id is None:
+        eligible_runs = eligible(panel_session)
+        if not eligible_runs:
             raise ReaderPanelInvalidStateError()
-
+        initial_source_snapshot = source_snapshot(panel_session, eligible_runs)
         doc_version = await self._db.get(DocumentVersion, panel_session.document_version_id)
         segments = (
             doc_version.metadata_.get("segments")
@@ -506,7 +545,6 @@ class ReaderPanelService:
         ):
             raise ReaderPanelInvalidStateError()
         segment_ids = set(segments)
-
         issues = (
             (
                 await self._db.execute(
@@ -518,9 +556,13 @@ class ReaderPanelService:
             .scalars()
             .all()
         )
-        if not issues:
+        needs_extraction = not issues and panel_session.status in {
+            ReaderPanelStatus.INITIAL_REPORTS_LOCKED.value,
+            ReaderPanelStatus.ISSUE_EXTRACTION.value,
+        }
+        if needs_extraction:
             report_payload = {
-                str(run.id): {
+                str(run.initial_report.id): {
                     "reader_profile_id": run.reader_profile_id,
                     "overall_reaction": run.initial_report.overall_reaction,
                     "continue_reading": run.initial_report.continue_reading,
@@ -539,12 +581,33 @@ class ReaderPanelService:
                 manuscript_segments=segments,
                 max_ballot_issues=panel_session.config_snapshot.get("max_ballot_issues", 8),
             )
-            profile_to_run_id = {run.reader_profile_id: str(run.id) for run in eligible_runs}
-            profile_to_run_id.update({str(run.id): str(run.id) for run in eligible_runs})
+            source_to_report_id = {
+                source.casefold(): str(run.initial_report.id)
+                for run in eligible_runs
+                for source in (
+                    run.reader_profile_id,
+                    str(run.id),
+                    str(run.initial_report.id),
+                )
+            }
+            provenance_tokens = {source.casefold() for source in source_to_report_id}
             max_issues = request.max_ballot_issues
             normalized: list[ExtractedIssueItem] | None = None
 
-            panel_session.status = ReaderPanelStatus.ISSUE_EXTRACTION.value
+            if panel_session.status == ReaderPanelStatus.INITIAL_REPORTS_LOCKED.value:
+                panel_session.status = ReaderPanelStatus.ISSUE_EXTRACTION.value
+                self._db.add(
+                    WorkflowEvent(
+                        workflow_run_id=panel_session.workflow_run_id,
+                        event_type="reader_panel.issue_extraction_started",
+                        node_name="issue_extraction",
+                        payload={
+                            "session_id": str(panel_session.id),
+                            "status": panel_session.status,
+                        },
+                        event_sequence=None,
+                    )
+                )
             await self._db.commit()
             for _ in range(2):
                 try:
@@ -560,14 +623,31 @@ class ReaderPanelService:
                     deduped: list[ExtractedIssueItem] = []
                     dedupe_indexes: dict[tuple[Any, ...], int] = {}
                     for extracted in output.issues:
-                        if not extracted.source_reader_ids or any(
-                            not set(ref.segment_ids).issubset(segment_ids)
-                            for ref in extracted.evidence
+                        text_fields = [
+                            extracted.title,
+                            extracted.category,
+                            extracted.symptom,
+                            *extracted.root_cause_hypotheses,
+                            *(ref.note for ref in extracted.evidence),
+                        ]
+                        if (
+                            not extracted.evidence
+                            or not extracted.source_reader_ids
+                            or any(
+                                not set(ref.segment_ids).issubset(segment_ids)
+                                for ref in extracted.evidence
+                            )
+                            or any(
+                                token in value.casefold()
+                                for token in provenance_tokens
+                                for value in text_fields
+                            )
                         ):
                             raise ValueError
                         try:
                             source_ids = [
-                                profile_to_run_id[source] for source in extracted.source_reader_ids
+                                source_to_report_id[source.casefold()]
+                                for source in extracted.source_reader_ids
                             ]
                         except KeyError as exc:
                             raise ValueError from exc
@@ -576,9 +656,11 @@ class ReaderPanelService:
                         symptom = " ".join(extracted.symptom.split())
                         locations = tuple(
                             sorted(
-                                segment_id
-                                for ref in extracted.evidence
-                                for segment_id in ref.segment_ids
+                                {
+                                    segment_id
+                                    for ref in extracted.evidence
+                                    for segment_id in ref.segment_ids
+                                }
                             )
                         )
                         key = (title.casefold(), category, symptom.casefold(), locations)
@@ -614,35 +696,101 @@ class ReaderPanelService:
                 except Exception:
                     continue
 
-            if normalized is None:
-                panel_session.status = ReaderPanelStatus.FAILED.value
-                panel_session.failure_reason = (
-                    "Issue extraction produced invalid structured output."
-                )
+            panel_session = await lock_session()
+            fresh_runs = eligible(panel_session)
+            if source_snapshot(panel_session, fresh_runs) != initial_source_snapshot:
                 await self._db.commit()
                 raise ReaderPanelInvalidStateError()
-
-            issues = []
-            for extracted in normalized:
-                issue = ReaderPanelIssue(
-                    id=uuid4(),
-                    session_id=panel_session.id,
-                    issue_number=extracted.issue_number,
-                    title=extracted.title,
-                    category=extracted.category,
-                    symptom=extracted.symptom,
-                    root_cause_hypotheses=extracted.root_cause_hypotheses,
-                    evidence=[ref.model_dump() for ref in extracted.evidence],
-                    source_reader_ids=extracted.source_reader_ids,
-                    target_audience_relevance=extracted.target_audience_relevance.value,
-                    minority_risk=extracted.minority_risk,
-                    discussion_status=extracted.discussion_status.value,
+            issues = (
+                (
+                    await self._db.execute(
+                        select(ReaderPanelIssue)
+                        .where(ReaderPanelIssue.session_id == panel_session.id)
+                        .order_by(ReaderPanelIssue.issue_number)
+                    )
                 )
-                self._db.add(issue)
-                issues.append(issue)
-            panel_session.status = ReaderPanelStatus.INITIAL_BALLOTING.value
+                .scalars()
+                .all()
+            )
+            if not issues and panel_session.status == ReaderPanelStatus.ISSUE_EXTRACTION.value:
+                if normalized is None:
+                    panel_session.status = ReaderPanelStatus.FAILED.value
+                    panel_session.failure_reason = (
+                        "Issue extraction produced invalid structured output."
+                    )
+                    self._db.add(
+                        WorkflowEvent(
+                            workflow_run_id=panel_session.workflow_run_id,
+                            event_type="reader_panel.failed",
+                            node_name="failed",
+                            payload={
+                                "session_id": str(panel_session.id),
+                                "status": panel_session.status,
+                                "reason_code": "invalid_issue_extraction",
+                            },
+                            event_sequence=None,
+                        )
+                    )
+                    await self._db.commit()
+                    raise ReaderPanelInvalidStateError()
+                for extracted in normalized:
+                    issue = ReaderPanelIssue(
+                        id=uuid4(),
+                        session_id=panel_session.id,
+                        issue_number=extracted.issue_number,
+                        title=extracted.title,
+                        category=extracted.category,
+                        symptom=extracted.symptom,
+                        root_cause_hypotheses=extracted.root_cause_hypotheses,
+                        evidence=[ref.model_dump() for ref in extracted.evidence],
+                        source_reader_ids=extracted.source_reader_ids,
+                        target_audience_relevance=extracted.target_audience_relevance.value,
+                        minority_risk=extracted.minority_risk,
+                        discussion_status=extracted.discussion_status.value,
+                    )
+                    self._db.add(issue)
+                    issues.append(issue)
+                panel_session.status = ReaderPanelStatus.INITIAL_BALLOTING.value
+                self._db.add(
+                    WorkflowEvent(
+                        workflow_run_id=panel_session.workflow_run_id,
+                        event_type="reader_panel.issues_extracted",
+                        node_name="initial_balloting",
+                        payload={
+                            "session_id": str(panel_session.id),
+                            "status": panel_session.status,
+                            "issue_count": len(issues),
+                        },
+                        event_sequence=None,
+                    )
+                )
             await self._db.commit()
 
+        panel_session = await lock_session()
+        eligible_runs = eligible(panel_session)
+        if source_snapshot(panel_session, eligible_runs) != initial_source_snapshot:
+            await self._db.commit()
+            raise ReaderPanelInvalidStateError()
+        if panel_session.status not in {
+            ReaderPanelStatus.INITIAL_BALLOTING.value,
+            ReaderPanelStatus.INITIAL_BALLOTS_LOCKED.value,
+        } or (panel_session.initial_ballots_locked_at is not None) != (
+            panel_session.status == ReaderPanelStatus.INITIAL_BALLOTS_LOCKED.value
+        ):
+            await self._db.commit()
+            raise ReaderPanelInvalidStateError()
+        runs = list(panel_session.reader_runs)
+        issues = (
+            (
+                await self._db.execute(
+                    select(ReaderPanelIssue)
+                    .where(ReaderPanelIssue.session_id == panel_session.id)
+                    .order_by(ReaderPanelIssue.issue_number)
+                )
+            )
+            .scalars()
+            .all()
+        )
         ballots = (
             (
                 await self._db.execute(
@@ -688,9 +836,13 @@ class ReaderPanelService:
                         output = panel_provider.generate_blind_ballot(request)
                         if type(output) is not ReaderBallotOutput:
                             raise TypeError
-                        if output.issue_number != issue.issue_number or any(
-                            not set(ref.segment_ids).issubset(segment_ids)
-                            for ref in output.evidence
+                        if (
+                            output.issue_number != issue.issue_number
+                            or not output.evidence
+                            or any(
+                                not set(ref.segment_ids).issubset(segment_ids)
+                                for ref in output.evidence
+                            )
                         ):
                             raise ValueError
                         valid_output = output
@@ -700,7 +852,54 @@ class ReaderPanelService:
                 if valid_output is not None:
                     pending.append((run, issue, valid_output))
 
+        panel_session = await lock_session()
+        eligible_runs = eligible(panel_session)
+        if source_snapshot(panel_session, eligible_runs) != initial_source_snapshot:
+            await self._db.commit()
+            raise ReaderPanelInvalidStateError()
+        if panel_session.status not in {
+            ReaderPanelStatus.INITIAL_BALLOTING.value,
+            ReaderPanelStatus.INITIAL_BALLOTS_LOCKED.value,
+        } or (panel_session.initial_ballots_locked_at is not None) != (
+            panel_session.status == ReaderPanelStatus.INITIAL_BALLOTS_LOCKED.value
+        ):
+            await self._db.commit()
+            raise ReaderPanelInvalidStateError()
+        issues = (
+            (
+                await self._db.execute(
+                    select(ReaderPanelIssue)
+                    .where(ReaderPanelIssue.session_id == panel_session.id)
+                    .order_by(ReaderPanelIssue.issue_number)
+                )
+            )
+            .scalars()
+            .all()
+        )
+        ballots = (
+            (
+                await self._db.execute(
+                    select(ReaderPanelBallot).where(
+                        ReaderPanelBallot.session_id == panel_session.id,
+                        ReaderPanelBallot.phase == "initial",
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        actual_pairs = {(ballot.reader_run_id, ballot.issue_id) for ballot in ballots}
+        valid_run_ids = {run.id for run in eligible_runs}
+        issues_by_id = {issue.id: issue for issue in issues}
         for run, issue, output in pending:
+            pair = (run.id, issue.id)
+            if (
+                panel_session.status == ReaderPanelStatus.INITIAL_BALLOTS_LOCKED.value
+                or run.id not in valid_run_ids
+                or issue.id not in issues_by_id
+                or pair in actual_pairs
+            ):
+                continue
             ballot = ReaderPanelBallot(
                 id=uuid4(),
                 session_id=panel_session.id,
@@ -717,15 +916,30 @@ class ReaderPanelService:
             )
             self._db.add(ballot)
             ballots.append(ballot)
-
-        actual_pairs = {(ballot.reader_run_id, ballot.issue_id) for ballot in ballots}
+            actual_pairs.add(pair)
         expected_pairs = {(run.id, issue.id) for run in eligible_runs for issue in issues}
         complete = expected_pairs.issubset(actual_pairs)
-        if complete:
+        if complete and panel_session.initial_ballots_locked_at is None:
             panel_session.initial_ballots_locked_at = datetime.now(timezone.utc)
             panel_session.status = ReaderPanelStatus.INITIAL_BALLOTS_LOCKED.value
             panel_session.degradation_reason = None
-        else:
+            self._db.add(
+                WorkflowEvent(
+                    workflow_run_id=panel_session.workflow_run_id,
+                    event_type="reader_panel.initial_ballots_locked",
+                    node_name="initial_ballots_locked",
+                    payload={
+                        "session_id": str(panel_session.id),
+                        "status": panel_session.status,
+                        "issue_count": len(issues),
+                        "ballot_count": len(actual_pairs & expected_pairs),
+                    },
+                    event_sequence=None,
+                )
+            )
+        elif (
+            not complete and panel_session.status != ReaderPanelStatus.INITIAL_BALLOTS_LOCKED.value
+        ):
             panel_session.status = ReaderPanelStatus.INITIAL_BALLOTING.value
             panel_session.degradation_reason = "One or more initial ballots were invalid."
         await self._db.commit()

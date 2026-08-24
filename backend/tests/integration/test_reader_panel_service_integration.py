@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 from uuid import uuid4
 import pytest
 from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.agents.reader_panel_contracts import (
     ExtractedIssueItem,
@@ -17,7 +18,7 @@ from app.agents.reader_panel_fakes import (
     DeterministicReaderPanelProvider,
     ReaderPanelFakeScenario,
 )
-from app.models.core import Chapter, Document, DocumentVersion, Project
+from app.models.core import Chapter, Document, DocumentVersion, Project, WorkflowEvent
 from app.models.reader_panel import (
     ReaderInitialReport,
     ReaderPanelBallot,
@@ -194,16 +195,30 @@ class TestReaderPanelServiceIntegration:
             assert r.locked is True
             assert r.locked_at is not None
 
-        # 4. Extract once, create one blind initial ballot per eligible reader, and lock.
+        # 4. Two independent sessions race safely: provider calls may repeat, rows may not.
         ballot_provider = PostgreSQLBallotProvider()
-        ballot_result = await service.collect_initial_ballots(
-            session_id=init_result.session_id,
-            provider=ballot_provider,
+        engine = async_session.bind
+        assert engine is not None
+        session_factory = async_sessionmaker(engine, expire_on_commit=False)
+
+        async def collect_concurrently():
+            async with session_factory() as concurrent_session:
+                return await ReaderPanelService(concurrent_session).collect_initial_ballots(
+                    session_id=init_result.session_id,
+                    provider=ballot_provider,
+                )
+
+        concurrent_results = await asyncio.gather(
+            collect_concurrently(),
+            collect_concurrently(),
         )
-        assert ballot_result.issue_count == 1
-        assert ballot_result.initial_ballot_count == 4
-        assert ballot_result.initial_ballots_locked is True
-        assert ballot_result.status == ReaderPanelStatus.INITIAL_BALLOTS_LOCKED.value
+        assert all(result.issue_count == 1 for result in concurrent_results)
+        assert all(result.initial_ballot_count == 4 for result in concurrent_results)
+        assert all(result.initial_ballots_locked for result in concurrent_results)
+        assert all(
+            result.status == ReaderPanelStatus.INITIAL_BALLOTS_LOCKED.value
+            for result in concurrent_results
+        )
 
         issues = (
             (
@@ -229,18 +244,43 @@ class TestReaderPanelServiceIntegration:
             .all()
         )
         assert len(issues) == 1
+        assert len(issues[0].source_reader_ids) == 1
+        assert issues[0].source_reader_ids[0] in {str(report.id) for report in reports}
         assert len(ballots) == 4
         assert len({(b.reader_run_id, b.issue_id, b.phase) for b in ballots}) == 4
         assert all(b.session_id == init_result.session_id for b in ballots)
+        events = (
+            (
+                await async_session.execute(
+                    select(WorkflowEvent).where(
+                        WorkflowEvent.workflow_run_id == init_result.workflow_run_id
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        assert len(events) == 3
+        assert {event.event_type for event in events} == {
+            "reader_panel.issue_extraction_started",
+            "reader_panel.issues_extracted",
+            "reader_panel.initial_ballots_locked",
+        }
 
         # PostgreSQL unique constraints and service replay both prevent duplicates.
+        calls_before_replay = (
+            ballot_provider.extraction_calls,
+            ballot_provider.ballot_calls,
+        )
         replay_result = await service.collect_initial_ballots(
             session_id=init_result.session_id,
             provider=ballot_provider,
         )
         assert replay_result.initial_ballot_count == 4
-        assert ballot_provider.extraction_calls == 1
-        assert ballot_provider.ballot_calls == 4
+        assert (
+            ballot_provider.extraction_calls,
+            ballot_provider.ballot_calls,
+        ) == calls_before_replay
         replay_ballots = (
             (
                 await async_session.execute(
