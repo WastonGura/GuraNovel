@@ -1002,6 +1002,7 @@ class ReaderPanelService:
         panel_session = (await self._db.execute(stmt)).scalars().first()
         if panel_session is None:
             raise ReaderPanelNotFoundError()
+        reader_runs = list(panel_session.reader_runs)
 
         # 2. Check staleness against live document version
         await self._refresh_stale_flag(panel_session)
@@ -1019,7 +1020,7 @@ class ReaderPanelService:
                     else "maybe",
                     "confidence": r.initial_report.confidence if r.initial_report else "medium",
                 }
-                for r in panel_session.reader_runs
+                for r in reader_runs
                 if r.initial_report is not None
             ]
             return ReaderPanelSessionResult(
@@ -1028,7 +1029,7 @@ class ReaderPanelService:
                 status=panel_session.status,
                 mode=panel_session.mode,
                 is_noop=False,
-                planned_readers=len(panel_session.reader_runs),
+                planned_readers=len(reader_runs),
                 completed_readers=len(reports_data),
                 initial_reports_locked=True,
                 stale=panel_session.stale,
@@ -1053,7 +1054,7 @@ class ReaderPanelService:
 
         # 4. Concurrently or sequentially run reader agents in mutual isolation
         collected_reports = []
-        for run in panel_session.reader_runs:
+        for run in reader_runs:
             if run.status == "completed" and run.initial_report is not None:
                 collected_reports.append(run.initial_report)
                 continue
@@ -1121,7 +1122,7 @@ class ReaderPanelService:
         # 5. Evaluate Quorum
         valid_count = len(collected_reports)
         min_valid = panel_session.config_snapshot.get("min_valid_readers", 1)
-        planned_count = len(panel_session.reader_runs)
+        planned_count = len(reader_runs)
 
         if valid_count >= min_valid:
             panel_session.status = ReaderPanelStatus.INITIAL_REPORTS_LOCKED.value
@@ -1141,7 +1142,7 @@ class ReaderPanelService:
                     else "maybe",
                     "confidence": r.initial_report.confidence if r.initial_report else "medium",
                 }
-                for r in panel_session.reader_runs
+                for r in reader_runs
                 if r.initial_report is not None
             ]
             return ReaderPanelSessionResult(

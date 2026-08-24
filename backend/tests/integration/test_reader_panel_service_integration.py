@@ -409,6 +409,7 @@ class TestReaderPanelServiceIntegration:
         )
 
         assert report_result.initial_reports_locked is True
+        assert report_result.planned_readers == 4
         assert report_result.completed_readers == 4
         assert report_result.status == ReaderPanelStatus.INITIAL_REPORTS_LOCKED.value
 
