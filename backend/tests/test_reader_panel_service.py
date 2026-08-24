@@ -763,10 +763,10 @@ class TestReaderPanelDiscussionBoundsAndAgenda:
 
         assert result.status == ReaderPanelStatus.FINAL_BALLOTS_LOCKED.value
         assert result.discussed_issue_count == 0
-        assert result.final_ballot_count == 0
+        assert result.final_ballot_count == 2
         assert provider.turn_requests == []
         assert provider.summary_requests == []
-        assert provider.final_requests == []
+        assert len(provider.final_requests) == 2
         assert all(
             issue.discussion_status == "skipped"
             for issue in fake_db_session.storage[ReaderPanelIssue].values()
@@ -838,6 +838,7 @@ class TestReaderPanelDiscussionBoundsAndAgenda:
                 root_cause_hypotheses=["Cause"],
                 evidence=[{"segment_ids": [f"S00{number}"], "note": "Bound."}],
                 source_reader_ids=[panel_session.reader_runs[0].reader_profile_id],
+                minority_risk=number == 2,
             )
             for number in (1, 2)
         ]
@@ -847,7 +848,7 @@ class TestReaderPanelDiscussionBoundsAndAgenda:
                 self.ballot_requests.append(request)
                 return ReaderBallotOutput(
                     issue_number=request.issue.issue_number,
-                    severity=("critical" if request.issue.issue_number == 2 else "minor"),
+                    severity=("critical" if request.issue.issue_number == 1 else "minor"),
                     suggested_action="clarify",
                     confidence="high",
                     evidence=[
@@ -884,6 +885,27 @@ class TestReaderPanelDiscussionBoundsAndAgenda:
 
         assert result.final_ballots_locked is True
         assert {request.issue.issue_number for request in provider.turn_requests} == {2}
+        assert {request.issue.issue_number for request in provider.final_requests} == {1, 2}
+        assert (
+            len(
+                [
+                    ballot
+                    for ballot in fake_db_session.storage[ReaderPanelBallot].values()
+                    if ballot.phase == "final"
+                ]
+            )
+            == 4
+        )
+        discussed_issue_ids = {
+            message.issue_id for message in fake_db_session.storage[ReaderPanelMessage].values()
+        }
+        assert discussed_issue_ids == {
+            next(
+                issue.id
+                for issue in fake_db_session.storage[ReaderPanelIssue].values()
+                if issue.issue_number == 2
+            )
+        }
         statuses = {
             issue.issue_number: issue.discussion_status
             for issue in fake_db_session.storage[ReaderPanelIssue].values()
@@ -1516,3 +1538,128 @@ class TestReaderPanelDiscussionAndFinalBallots:
         )
 
         assert result.initial_ballots_locked is True
+
+
+@pytest.mark.anyio
+class TestReaderPanelDiscussionContextValidation:
+    async def test_round_two_only_receives_previous_summary_and_current_round_turns(
+        self,
+        fake_db_session: FakeAsyncSession,
+        test_project_id: UUID,
+        test_chapter_id: UUID,
+        test_document_id: UUID,
+        test_version_id: UUID,
+        sample_hash: str,
+        sample_segments: dict[str, str],
+    ) -> None:
+        service, panel_session = await setup_initial_ballots_locked(
+            fake_db_session,
+            project_id=test_project_id,
+            chapter_id=test_chapter_id,
+            document_id=test_document_id,
+            version_id=test_version_id,
+            content_hash=sample_hash,
+            segments=sample_segments,
+        )
+
+        class TwoRoundProvider(RecordingDiscussionProvider):
+            def summarize_discussion(self, request: Any) -> ModeratorDiscussionSummaryOutput:
+                self.summary_requests.append(request)
+                return ModeratorDiscussionSummaryOutput(
+                    round_summary=f"Bounded summary round {request.round_number}.",
+                    remaining_disagreements=["One disagreement remains."],
+                    suggested_focus="Review the causal beat.",
+                    is_consensus_reached=request.round_number == 2,
+                )
+
+        provider = TwoRoundProvider(fake_db_session)
+        result = await service.run_discussion_and_final_ballots(
+            session_id=panel_session.id,
+            provider=provider,
+        )
+
+        assert result.final_ballots_locked is True
+        round_two = [request for request in provider.turn_requests if request.round_number == 2]
+        assert len(round_two) == 2
+        assert [message["speaker_type"] for message in round_two[0].prior_messages] == ["moderator"]
+        assert [message["speaker_type"] for message in round_two[1].prior_messages] == [
+            "moderator",
+            "reader",
+        ]
+        assert all(
+            message["round_number"] in {1, 2}
+            for request in round_two
+            for message in request.prior_messages
+        )
+        assert all(
+            "reader_run_id" not in message and "reader_profile_id" not in message
+            for request in round_two
+            for message in request.prior_messages
+        )
+
+    async def test_explicit_unknown_references_and_empty_evidence_are_repaired(
+        self,
+        fake_db_session: FakeAsyncSession,
+        test_project_id: UUID,
+        test_chapter_id: UUID,
+        test_document_id: UUID,
+        test_version_id: UUID,
+        sample_hash: str,
+        sample_segments: dict[str, str],
+    ) -> None:
+        service, panel_session = await setup_initial_ballots_locked(
+            fake_db_session,
+            project_id=test_project_id,
+            chapter_id=test_chapter_id,
+            document_id=test_document_id,
+            version_id=test_version_id,
+            content_hash=sample_hash,
+            segments=sample_segments,
+        )
+        foreign_uuid = str(uuid4())
+
+        class InvalidReferenceProvider(RecordingDiscussionProvider):
+            def __init__(self, db: FakeAsyncSession) -> None:
+                super().__init__(db)
+                self.turn_attempts = 0
+                self.summary_attempts = 0
+
+            def generate_discussion_turn(self, request: Any) -> ReaderDiscussionTurnOutput:
+                self.turn_requests.append(request)
+                self.turn_attempts += 1
+                if self.turn_attempts == 1:
+                    return ReaderDiscussionTurnOutput(
+                        stance="support",
+                        claim="See [S999] and ISSUE-999.",
+                        evidence=[],
+                        novelty="new_evidence",
+                    )
+                return super().generate_discussion_turn(request)
+
+            def summarize_discussion(self, request: Any) -> ModeratorDiscussionSummaryOutput:
+                self.summary_requests.append(request)
+                self.summary_attempts += 1
+                if self.summary_attempts == 1:
+                    return ModeratorDiscussionSummaryOutput(
+                        round_summary=f"Unknown ISSUE-999 reader {foreign_uuid}.",
+                        remaining_disagreements=["See S999."],
+                        suggested_focus="ROUND-99",
+                        is_consensus_reached=True,
+                    )
+                return super().summarize_discussion(request)
+
+        provider = InvalidReferenceProvider(fake_db_session)
+        result = await service.run_discussion_and_final_ballots(
+            session_id=panel_session.id,
+            provider=provider,
+        )
+
+        assert result.final_ballots_locked is True
+        assert provider.turn_attempts >= 2
+        assert provider.summary_attempts == 2
+        persisted_text = " ".join(
+            message.claim for message in fake_db_session.storage[ReaderPanelMessage].values()
+        )
+        assert "S999" not in persisted_text
+        assert "ISSUE-999" not in persisted_text
+        assert foreign_uuid not in persisted_text

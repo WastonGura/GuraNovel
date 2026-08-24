@@ -1079,6 +1079,50 @@ class ReaderPanelService:
                 discussion_status=issue.discussion_status,
             )
 
+        def references_are_scoped(
+            texts: list[str | None],
+            *,
+            issue: ReaderPanelIssue,
+            allowed_segment_ids: set[str],
+            round_number: int,
+            allowed_uuids: set[str],
+            forbidden_profiles: set[str],
+        ) -> bool:
+            joined = "\n".join(text for text in texts if text)
+            if any(
+                match.group(0).lower() not in allowed_uuids
+                for match in re.finditer(
+                    r"\b[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}\b",
+                    joined,
+                    re.IGNORECASE,
+                )
+            ):
+                return False
+            if any(
+                int(match.group(1)) != issue.issue_number
+                for match in re.finditer(r"\bISSUE-(\d+)\b", joined, re.IGNORECASE)
+            ):
+                return False
+            allowed_segments = {value.upper() for value in allowed_segment_ids}
+            if any(
+                match.group(0).upper() not in allowed_segments
+                for match in re.finditer(r"(?<![\w-])S\d+(?![\w-])", joined, re.IGNORECASE)
+            ):
+                return False
+            if any(
+                int(match.group(1)) not in {max(1, round_number - 1), round_number}
+                for match in re.finditer(r"\bROUND-(\d+)\b", joined, re.IGNORECASE)
+            ):
+                return False
+            return not any(
+                re.search(
+                    rf"(?<![\w-]){re.escape(profile)}(?![\w-])",
+                    joined,
+                    re.IGNORECASE,
+                )
+                for profile in forbidden_profiles
+            )
+
         async def reserve_call(
             request: Any,
             step: str,
@@ -1205,6 +1249,15 @@ class ReaderPanelService:
             [run for run in runs if run.session_id == session_id and run.status == "completed"],
             key=lambda run: (run.reader_profile_id, str(run.id)),
         )
+        reports = (
+            (
+                await self._db.execute(
+                    select(ReaderInitialReport).where(ReaderInitialReport.session_id == session_id)
+                )
+            )
+            .scalars()
+            .all()
+        )
         issues = await load_issues()
         ballots = await load_ballots()
         initial_ballots = [ballot for ballot in ballots if ballot.phase == "initial"]
@@ -1222,6 +1275,7 @@ class ReaderPanelService:
         ranked_issues = sorted(
             issues,
             key=lambda issue: (
+                -int(issue.minority_risk),
                 -max(
                     (
                         severity_rank.get(ballot.severity, 0)
@@ -1231,7 +1285,14 @@ class ReaderPanelService:
                     default=0,
                 ),
                 -relevance_rank.get(issue.target_audience_relevance, 0),
-                -int(issue.minority_risk),
+                -len(set(issue.source_reader_ids)),
+                -len(
+                    {
+                        ballot.suggested_action
+                        for ballot in initial_ballots
+                        if ballot.issue_id == issue.id and ballot.severity != "abstain"
+                    }
+                ),
                 issue.issue_number,
                 str(issue.id),
             ),
@@ -1342,6 +1403,26 @@ class ReaderPanelService:
                         for evidence in initial.evidence
                         if set(evidence.get("segment_ids", [])).issubset(allowed_segment_ids)
                     ]
+                    previous_summary = next(
+                        (
+                            message
+                            for message in reversed(issue_messages)
+                            if message.round_number == round_number - 1
+                            and message.speaker_type == "moderator"
+                        ),
+                        None,
+                    )
+                    context_messages = (
+                        [previous_summary] if previous_summary is not None else []
+                    ) + sorted(
+                        [
+                            message
+                            for message in issue_messages
+                            if message.round_number == round_number
+                            and message.speaker_type == "reader"
+                        ],
+                        key=lambda message: message.turn_number,
+                    )
                     prior_payload = [
                         {
                             "round_number": message.round_number,
@@ -1354,7 +1435,7 @@ class ReaderPanelService:
                             "proposed_action": message.proposed_action,
                             "novelty": message.novelty,
                         }
-                        for message in issue_messages[-100:]
+                        for message in context_messages
                     ]
                     request = ReaderDiscussionTurnRequest(
                         project_id=panel_session.project_id,
@@ -1388,9 +1469,43 @@ class ReaderPanelService:
                             break
                         try:
                             output = panel_provider.generate_discussion_turn(request)
-                            if type(output) is not ReaderDiscussionTurnOutput or any(
-                                not set(ref.segment_ids).issubset(allowed_segment_ids)
-                                for ref in output.evidence
+                            allowed_uuids = {
+                                str(panel_session.project_id).lower(),
+                                str(panel_session.chapter_id).lower(),
+                                str(panel_session.workflow_run_id).lower(),
+                                str(panel_session.id).lower(),
+                                str(agenda_issue.id).lower(),
+                                str(run.id).lower(),
+                                *(
+                                    str(report.id).lower()
+                                    for report in reports
+                                    if report.reader_run_id == run.id
+                                ),
+                            }
+                            if (
+                                type(output) is not ReaderDiscussionTurnOutput
+                                or not output.evidence
+                                or any(
+                                    not set(ref.segment_ids).issubset(allowed_segment_ids)
+                                    for ref in output.evidence
+                                )
+                                or not references_are_scoped(
+                                    [
+                                        output.claim,
+                                        output.concession,
+                                        output.proposed_action,
+                                        *(ref.note for ref in output.evidence),
+                                    ],
+                                    issue=agenda_issue,
+                                    allowed_segment_ids=allowed_segment_ids,
+                                    round_number=round_number,
+                                    allowed_uuids=allowed_uuids,
+                                    forbidden_profiles={
+                                        other.reader_profile_id
+                                        for other in eligible_runs
+                                        if other.id != run.id
+                                    },
+                                )
                             ):
                                 raise ValueError
                             valid_output = output
@@ -1514,7 +1629,26 @@ class ReaderPanelService:
                             break
                         try:
                             output = panel_provider.summarize_discussion(summary_request)
-                            if type(output) is not ModeratorDiscussionSummaryOutput:
+                            if type(
+                                output
+                            ) is not ModeratorDiscussionSummaryOutput or not references_are_scoped(
+                                [
+                                    output.round_summary,
+                                    *output.remaining_disagreements,
+                                    output.suggested_focus,
+                                ],
+                                issue=agenda_issue,
+                                allowed_segment_ids=allowed_segment_ids,
+                                round_number=round_number,
+                                allowed_uuids={
+                                    str(panel_session.project_id).lower(),
+                                    str(panel_session.chapter_id).lower(),
+                                    str(panel_session.workflow_run_id).lower(),
+                                    str(panel_session.id).lower(),
+                                    str(agenda_issue.id).lower(),
+                                },
+                                forbidden_profiles={run.reader_profile_id for run in eligible_runs},
+                            ):
                                 raise TypeError
                             summary_output = output
                             break
@@ -1616,7 +1750,7 @@ class ReaderPanelService:
         await self._db.commit()
 
         if panel_session.status == ReaderPanelStatus.FINAL_BALLOTING.value:
-            for agenda_issue in agenda:
+            for agenda_issue in issues:
                 allowed_segment_ids = {
                     segment_id
                     for evidence in agenda_issue.evidence
@@ -1693,6 +1827,41 @@ class ReaderPanelService:
                                     not set(ref.segment_ids).issubset(allowed_segment_ids)
                                     for ref in output.evidence
                                 )
+                                or not references_are_scoped(
+                                    [
+                                        output.change_reason,
+                                        output.remaining_disagreement,
+                                        *(ref.note for ref in output.evidence),
+                                    ],
+                                    issue=agenda_issue,
+                                    allowed_segment_ids=allowed_segment_ids,
+                                    round_number=max(
+                                        (
+                                            message.round_number
+                                            for message in messages
+                                            if message.issue_id == agenda_issue.id
+                                        ),
+                                        default=1,
+                                    ),
+                                    allowed_uuids={
+                                        str(panel_session.project_id).lower(),
+                                        str(panel_session.chapter_id).lower(),
+                                        str(panel_session.workflow_run_id).lower(),
+                                        str(panel_session.id).lower(),
+                                        str(agenda_issue.id).lower(),
+                                        str(run.id).lower(),
+                                        *(
+                                            str(report.id).lower()
+                                            for report in reports
+                                            if report.reader_run_id == run.id
+                                        ),
+                                    },
+                                    forbidden_profiles={
+                                        other.reader_profile_id
+                                        for other in eligible_runs
+                                        if other.id != run.id
+                                    },
+                                )
                             ):
                                 raise ValueError
                             valid_output = output
@@ -1731,7 +1900,7 @@ class ReaderPanelService:
         ballots = await load_ballots()
         messages = await load_messages()
         final_ballots = [ballot for ballot in ballots if ballot.phase == "final"]
-        expected_final_pairs = {(run.id, issue.id) for run in eligible_runs for issue in agenda}
+        expected_final_pairs = {(run.id, issue.id) for run in eligible_runs for issue in issues}
         actual_final_pairs = {(ballot.reader_run_id, ballot.issue_id) for ballot in final_ballots}
         final_complete = expected_final_pairs.issubset(actual_final_pairs)
         if (
@@ -1750,7 +1919,7 @@ class ReaderPanelService:
                     payload={
                         "session_id": str(panel_session.id),
                         "status": panel_session.status,
-                        "issue_count": len(agenda),
+                        "issue_count": len(issues),
                         "ballot_count": len(actual_final_pairs & expected_final_pairs),
                     },
                     event_sequence=None,

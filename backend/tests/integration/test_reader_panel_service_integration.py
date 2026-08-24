@@ -54,18 +54,28 @@ class PostgreSQLBallotProvider:
                     root_cause_hypotheses=["Setup is compressed"],
                     evidence=[{"segment_ids": ["S002"], "note": "Cauldron introduction."}],
                     source_reader_ids=[source_profile],
-                )
+                ),
+                ExtractedIssueItem(
+                    issue_number=9,
+                    title="Thin academy context",
+                    category="worldbuilding",
+                    symptom="The academy context arrives without orientation.",
+                    root_cause_hypotheses=["Setup is compressed"],
+                    evidence=[{"segment_ids": ["S001"], "note": "Academy introduction."}],
+                    source_reader_ids=[source_profile],
+                ),
             ]
         )
 
     def generate_blind_ballot(self, request) -> ReaderBallotOutput:
         self.ballot_calls += 1
+        segment_id = request.issue.evidence[0].segment_ids[0]
         return ReaderBallotOutput(
             issue_number=request.issue.issue_number,
             severity="minor",
             suggested_action="clarify",
             confidence="high",
-            evidence=[{"segment_ids": ["S002"], "note": "Bound segment."}],
+            evidence=[{"segment_ids": [segment_id], "note": "Bound segment."}],
             reason="A short setup would orient the reader.",
         )
 
@@ -256,8 +266,8 @@ class TestReaderPanelServiceIntegration:
             collect_concurrently(),
             collect_concurrently(),
         )
-        assert all(result.issue_count == 1 for result in concurrent_results)
-        assert all(result.initial_ballot_count == 4 for result in concurrent_results)
+        assert all(result.issue_count == 2 for result in concurrent_results)
+        assert all(result.initial_ballot_count == 8 for result in concurrent_results)
         assert all(result.initial_ballots_locked for result in concurrent_results)
         assert all(
             result.status == ReaderPanelStatus.INITIAL_BALLOTS_LOCKED.value
@@ -287,11 +297,13 @@ class TestReaderPanelServiceIntegration:
             .scalars()
             .all()
         )
-        assert len(issues) == 1
-        assert len(issues[0].source_reader_ids) == 1
-        assert issues[0].source_reader_ids[0] in {str(report.id) for report in reports}
-        assert len(ballots) == 4
-        assert len({(b.reader_run_id, b.issue_id, b.phase) for b in ballots}) == 4
+        assert len(issues) == 2
+        assert all(len(issue.source_reader_ids) == 1 for issue in issues)
+        assert all(
+            issue.source_reader_ids[0] in {str(report.id) for report in reports} for issue in issues
+        )
+        assert len(ballots) == 8
+        assert len({(b.reader_run_id, b.issue_id, b.phase) for b in ballots}) == 8
         assert all(b.session_id == init_result.session_id for b in ballots)
         events = (
             (
@@ -320,7 +332,7 @@ class TestReaderPanelServiceIntegration:
             session_id=init_result.session_id,
             provider=ballot_provider,
         )
-        assert replay_result.initial_ballot_count == 4
+        assert replay_result.initial_ballot_count == 8
         assert (
             ballot_provider.extraction_calls,
             ballot_provider.ballot_calls,
@@ -337,9 +349,17 @@ class TestReaderPanelServiceIntegration:
             .scalars()
             .all()
         )
-        assert len(replay_ballots) == 4
+        assert len(replay_ballots) == 8
 
         # 5. Discussion/final ballot recovery is also safe across two sessions.
+        session_for_agenda = await async_session.get(
+            ReaderPanelSession, init_result.session_id, populate_existing=True
+        )
+        assert session_for_agenda is not None
+        config_snapshot = dict(session_for_agenda.config_snapshot)
+        config_snapshot["max_discussion_issues"] = 1
+        session_for_agenda.config_snapshot = config_snapshot
+        await async_session.commit()
         discussion_provider = PostgreSQLDiscussionProvider()
 
         async def discuss_concurrently():
@@ -356,7 +376,7 @@ class TestReaderPanelServiceIntegration:
             discuss_concurrently(),
         )
         assert all(result.final_ballots_locked for result in discussion_results)
-        assert all(result.final_ballot_count == 4 for result in discussion_results)
+        assert all(result.final_ballot_count == 8 for result in discussion_results)
 
         messages = (
             (
@@ -383,8 +403,8 @@ class TestReaderPanelServiceIntegration:
         )
         assert len(messages) == 5
         assert len({(m.issue_id, m.round_number, m.turn_number) for m in messages}) == 5
-        assert len(final_ballots) == 4
-        assert len({(b.reader_run_id, b.issue_id, b.phase) for b in final_ballots}) == 4
+        assert len(final_ballots) == 8
+        assert len({(b.reader_run_id, b.issue_id, b.phase) for b in final_ballots}) == 8
         session_after_discussion = await async_session.get(
             ReaderPanelSession, init_result.session_id, populate_existing=True
         )
