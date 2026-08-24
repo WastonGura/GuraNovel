@@ -81,7 +81,9 @@ class TestDeterministicReaderPanelProvider:
         assert ballot_imm.severity in (Severity.NONE, Severity.MINOR)
 
     def test_minority_high_risk_scenario(self) -> None:
-        provider = DeterministicReaderPanelProvider(scenario=ReaderPanelFakeScenario.MINORITY_HIGH_RISK)
+        provider = DeterministicReaderPanelProvider(
+            scenario=ReaderPanelFakeScenario.MINORITY_HIGH_RISK
+        )
         issue = ExtractedIssueItem(
             issue_number=1,
             title="Premature twist revelation",
@@ -106,7 +108,9 @@ class TestDeterministicReaderPanelProvider:
         assert ballot.confidence == Confidence.HIGH
 
     def test_malformed_output_scenario_raises_safe_error(self) -> None:
-        provider = DeterministicReaderPanelProvider(scenario=ReaderPanelFakeScenario.MALFORMED_OUTPUT)
+        provider = DeterministicReaderPanelProvider(
+            scenario=ReaderPanelFakeScenario.MALFORMED_OUTPUT
+        )
         req = ReaderInitialReadingRequest(
             project_id=uuid4(),
             chapter_id=uuid4(),
@@ -119,7 +123,6 @@ class TestDeterministicReaderPanelProvider:
         )
         with pytest.raises(ProviderInvalidOutputError):
             provider.generate_initial_reading(req)
-
 
     def test_full_discussion_and_synthesis_cycle(self) -> None:
         provider = DeterministicReaderPanelProvider(scenario=ReaderPanelFakeScenario.CLEAN)
@@ -181,9 +184,18 @@ class TestDeterministicReaderPanelProvider:
             workflow_run_id=uuid4(),
             initial_reports={"general_immersive": {"overall_reaction": "Good."}},
             extracted_issues=[issue],
-            final_consensus_results={1: {"consensus_class": "strong_consensus"}},
+            final_consensus_results={
+                1: {
+                    "consensus_class": "weak_consensus",
+                    "recommended_priority": "manual_review",
+                    "suggested_action": "clarify",
+                }
+            },
             minority_risk_issues=[],
         )
         report_out = provider.synthesize_report(syn_req)
         assert report_out.executive_summary != ""
         assert len(report_out.key_findings) == 1
+        assert report_out.key_findings[0].consensus_class.value == "weak_consensus"
+        assert report_out.key_findings[0].recommended_priority.value == "manual_review"
+        assert report_out.actionable_recommendations[0].suggested_action.value == "clarify"

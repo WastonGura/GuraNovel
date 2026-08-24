@@ -21,7 +21,16 @@ from app.agents.reader_panel_fakes import (
     DeterministicReaderPanelProvider,
     ReaderPanelFakeScenario,
 )
-from app.models.core import Chapter, Document, DocumentVersion, Project, WorkflowEvent
+from app.models.core import (
+    ActionRequest,
+    Chapter,
+    Document,
+    DocumentVersion,
+    Project,
+    ReviewReport,
+    WorkflowEvent,
+    WorkflowRun,
+)
 from app.models.reader_panel import (
     ReaderInitialReport,
     ReaderPanelBallot,
@@ -118,6 +127,16 @@ class PostgreSQLDiscussionProvider:
             position_changed=True,
             change_reason="Discussion narrowed the change.",
         )
+
+
+class PostgreSQLReportProvider(DeterministicReaderPanelProvider):
+    def __init__(self) -> None:
+        super().__init__(scenario=ReaderPanelFakeScenario.CLEAN)
+        self.calls = 0
+
+    def synthesize_report(self, request):
+        self.calls += 1
+        return super().synthesize_report(request)
 
 
 @pytest.mark.integration
@@ -446,6 +465,141 @@ class TestReaderPanelServiceIntegration:
         assert event_types.count("reader_panel.discussion_round_completed") == 1
         assert event_types.count("reader_panel.discussion_completed") == 1
         assert event_types.count("reader_panel.final_ballots_locked") == 1
+
+        # 6. Report generation remains bound to the reviewed version, even after
+        # the chapter advances, and concurrent replay persists one canonical report.
+        newer_version_id = uuid4()
+        newer_content = f"{content}\n\nA later edit that must not be reviewed implicitly."
+        newer_version = DocumentVersion(
+            id=newer_version_id,
+            document_id=doc_id,
+            version_number=2,
+            source="writer_agent",
+            content_hash=hashlib.sha256(newer_content.encode("utf-8")).hexdigest(),
+            byte_size=len(newer_content.encode("utf-8")),
+            word_count=35,
+            file_path="chapters/001_v2.md",
+            metadata_={"segments": {**segments, "S003": "A later edit."}},
+        )
+        async_session.add(newer_version)
+        await async_session.flush()
+        doc.current_version_id = newer_version_id
+        await async_session.commit()
+        assert await service.reconcile_stale_status(session_id=init_result.session_id) is True
+
+        document_count_before = len((await async_session.execute(select(Document))).scalars().all())
+        version_count_before = len(
+            (await async_session.execute(select(DocumentVersion))).scalars().all()
+        )
+        action_count_before = len(
+            (await async_session.execute(select(ActionRequest))).scalars().all()
+        )
+        report_provider = PostgreSQLReportProvider()
+
+        async def report_concurrently():
+            async with session_factory() as concurrent_session:
+                return await ReaderPanelService(concurrent_session).generate_editor_handoff_report(
+                    session_id=init_result.session_id,
+                    provider=report_provider,
+                )
+
+        report_results = await asyncio.gather(
+            report_concurrently(),
+            report_concurrently(),
+        )
+        assert len(report_results) == 2
+        assert all(result.review_report_id is not None for result in report_results)
+        assert len({result.review_report_id for result in report_results}) == 1
+        assert all(result.status == ReaderPanelStatus.COMPLETED.value for result in report_results)
+        reports = (
+            (
+                await async_session.execute(
+                    select(ReviewReport).where(
+                        ReviewReport.workflow_run_id == init_result.workflow_run_id
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        assert len(reports) == 1
+        report = reports[0]
+        assert report.id == report_results[0].review_report_id
+        assert report.target_document_id == doc_id
+        assert report.target_version_id == version_id
+        assert report.raw_report["source_hash"] == content_hash
+        assert report.raw_report["stale"] is True
+        assert report.raw_report["automatic_application_allowed"] is False
+        assert [item["issue_number"] for item in report.raw_report["issues"]] == [1, 2]
+        assert report.passed is False
+        assert report.report_document_id is None
+        assert len((await async_session.execute(select(Document))).scalars().all()) == (
+            document_count_before
+        )
+        assert (
+            len((await async_session.execute(select(DocumentVersion))).scalars().all())
+            == version_count_before
+        )
+        assert len((await async_session.execute(select(ActionRequest))).scalars().all()) == (
+            action_count_before
+        )
+        completed_session = await async_session.get(
+            ReaderPanelSession,
+            init_result.session_id,
+            populate_existing=True,
+        )
+        assert completed_session is not None
+        completed_at = completed_session.completed_at
+        completed_workflow = await async_session.get(
+            WorkflowRun,
+            init_result.workflow_run_id,
+            populate_existing=True,
+        )
+        assert completed_workflow is not None
+        assert completed_workflow.status == ReaderPanelStatus.COMPLETED.value
+        assert completed_workflow.current_node == "completed"
+        assert completed_workflow.next_node is None
+        assert completed_workflow.awaiting_user is False
+        assert completed_workflow.completed_at == completed_at
+        assert all(
+            result.status == completed_session.status == completed_workflow.status
+            for result in report_results
+        )
+        assert report_provider.calls in {1, 2}
+        report_calls_before_replay = report_provider.calls
+        replay_report = await service.generate_editor_handoff_report(
+            session_id=init_result.session_id,
+            provider=report_provider,
+        )
+        assert replay_report.review_report_id == report.id
+        assert report_provider.calls == report_calls_before_replay
+        replayed_session = await async_session.get(
+            ReaderPanelSession,
+            init_result.session_id,
+            populate_existing=True,
+        )
+        assert replayed_session is not None
+        assert replayed_session.completed_at == completed_at
+        replayed_workflow = await async_session.get(
+            WorkflowRun,
+            init_result.workflow_run_id,
+            populate_existing=True,
+        )
+        assert replayed_workflow is not None
+        assert replayed_workflow.completed_at == completed_at
+        report_events = (
+            (
+                await async_session.execute(
+                    select(WorkflowEvent).where(
+                        WorkflowEvent.workflow_run_id == init_result.workflow_run_id,
+                        WorkflowEvent.event_type == "reader_panel.report_completed",
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        assert len(report_events) == 1
 
     async def test_cross_project_rejection_postgresql(
         self,

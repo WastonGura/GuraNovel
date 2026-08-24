@@ -13,6 +13,7 @@ from app.agents.reader_panel_fakes import (
     ReaderPanelFakeScenario,
 )
 from app.agents.reader_panel_contracts import (
+    EvidenceRef,
     ExtractedIssueItem,
     ModeratorDiscussionSummaryOutput,
     ModeratorIssueExtractionOutput,
@@ -21,10 +22,12 @@ from app.agents.reader_panel_contracts import (
     ReaderFinalBallotOutput,
 )
 from app.models.core import (
+    ActionRequest,
     Chapter,
     Document,
     DocumentVersion,
     Project,
+    ReviewReport,
     WorkflowEvent,
     WorkflowRun,
 )
@@ -65,9 +68,12 @@ class FakeAsyncSession:
     def __init__(self) -> None:
         self.storage: dict[type, dict[Any, Any]] = defaultdict(dict)
         self.transaction_active = False
+        self.get_options: list[tuple[type, dict[str, Any]]] = []
+        self.execute_options: list[tuple[str, dict[str, Any]]] = []
 
-    async def get(self, model_cls: type, pk: Any) -> Any | None:
+    async def get(self, model_cls: type, pk: Any, **kwargs: Any) -> Any | None:
         self.transaction_active = True
+        self.get_options.append((model_cls, kwargs))
         return self.storage[model_cls].get(pk)
 
     def add(self, obj: Any) -> None:
@@ -89,6 +95,7 @@ class FakeAsyncSession:
         self.transaction_active = True
         # Simple evaluation based on statement target table
         stmt_str = str(stmt)
+        self.execute_options.append((stmt_str, dict(stmt.get_execution_options())))
         if "reader_panel_sessions" in stmt_str:
             sessions = list(self.storage[ReaderPanelSession].values())
             return FakeExecuteResult(sessions)
@@ -112,6 +119,8 @@ class FakeAsyncSession:
             return FakeExecuteResult(wfs)
         elif "workflow_events" in stmt_str:
             return FakeExecuteResult(list(self.storage[WorkflowEvent].values()))
+        elif "review_reports" in stmt_str:
+            return FakeExecuteResult(list(self.storage[ReviewReport].values()))
         return FakeExecuteResult([])
 
 
@@ -960,6 +969,18 @@ class RecordingDiscussionProvider:
             change_reason="The discussion narrowed the fix.",
             remaining_disagreement=None,
         )
+
+
+class RecordingSynthesisProvider(DeterministicReaderPanelProvider):
+    def __init__(self, db: FakeAsyncSession) -> None:
+        super().__init__(scenario=ReaderPanelFakeScenario.CLEAN)
+        self.db = db
+        self.requests: list[Any] = []
+
+    def synthesize_report(self, request: Any) -> Any:
+        assert not self.db.in_transaction()
+        self.requests.append(request)
+        return super().synthesize_report(request)
 
 
 async def setup_initial_ballots_locked(
@@ -2031,3 +2052,822 @@ class TestReaderPanelDiscussionRemediation:
             ballot.reader_run_id == stale_run.id and ballot.phase == "final"
             for ballot in fake_db_session.storage[ReaderPanelBallot].values()
         )
+
+
+async def setup_final_ballots_locked(
+    db: FakeAsyncSession,
+    *,
+    project_id: UUID,
+    chapter_id: UUID,
+    document_id: UUID,
+    version_id: UUID,
+    content_hash: str,
+    segments: dict[str, str],
+) -> tuple[ReaderPanelService, ReaderPanelSession]:
+    service, panel_session = await setup_initial_ballots_locked(
+        db,
+        project_id=project_id,
+        chapter_id=chapter_id,
+        document_id=document_id,
+        version_id=version_id,
+        content_hash=content_hash,
+        segments=segments,
+    )
+    await service.run_discussion_and_final_ballots(
+        session_id=panel_session.id,
+        provider=RecordingDiscussionProvider(db),
+    )
+    return service, panel_session
+
+
+async def setup_two_issue_final_panel(
+    db: FakeAsyncSession,
+    *,
+    project_id: UUID,
+    chapter_id: UUID,
+    document_id: UUID,
+    version_id: UUID,
+    content_hash: str,
+    segments: dict[str, str],
+    shared_binding: bool,
+) -> tuple[ReaderPanelService, ReaderPanelSession]:
+    service, panel_session = await setup_locked_panel(
+        db,
+        project_id=project_id,
+        chapter_id=chapter_id,
+        document_id=document_id,
+        version_id=version_id,
+        content_hash=content_hash,
+        segments=segments,
+    )
+    source_profile = panel_session.reader_runs[0].reader_profile_id
+    extracted = [
+        ExtractedIssueItem(
+            issue_number=number,
+            title="Shared finding" if shared_binding else f"Finding {number}",
+            category=f"category_{number}",
+            symptom=f"Symptom {number}",
+            root_cause_hypotheses=[f"Cause {number}"],
+            evidence=[
+                {
+                    "segment_ids": ["S001" if shared_binding else f"S00{number}"],
+                    "note": f"Evidence {number}",
+                }
+            ],
+            source_reader_ids=[source_profile],
+        )
+        for number in (1, 2)
+    ]
+    await service.collect_initial_ballots(
+        session_id=panel_session.id,
+        provider=RecordingBallotProvider(extracted),
+    )
+    panel_session.issues = list(db.storage[ReaderPanelIssue].values())
+    panel_session.ballots = list(db.storage[ReaderPanelBallot].values())
+    panel_session.messages = []
+    panel_session.config_snapshot.update(
+        {
+            "max_discussion_issues": 2,
+            "max_rounds_per_issue": 1,
+            "max_total_model_calls": 30,
+            "max_input_tokens_per_call": 10_000,
+            "max_execution_seconds": 30,
+        }
+    )
+    await service.run_discussion_and_final_ballots(
+        session_id=panel_session.id,
+        provider=RecordingDiscussionProvider(db),
+    )
+    return service, panel_session
+
+
+@pytest.mark.anyio
+class TestReaderPanelEditorHandoffReport:
+    async def test_generates_version_bound_non_approval_report_idempotently(
+        self,
+        fake_db_session: FakeAsyncSession,
+        test_project_id: UUID,
+        test_chapter_id: UUID,
+        test_document_id: UUID,
+        test_version_id: UUID,
+        sample_hash: str,
+        sample_segments: dict[str, str],
+    ) -> None:
+        service, panel_session = await setup_initial_ballots_locked(
+            fake_db_session,
+            project_id=test_project_id,
+            chapter_id=test_chapter_id,
+            document_id=test_document_id,
+            version_id=test_version_id,
+            content_hash=sample_hash,
+            segments=sample_segments,
+        )
+        await service.run_discussion_and_final_ballots(
+            session_id=panel_session.id,
+            provider=RecordingDiscussionProvider(fake_db_session),
+        )
+
+        provider = RecordingSynthesisProvider(fake_db_session)
+        fake_db_session.get_options.clear()
+        fake_db_session.execute_options.clear()
+        first = await service.generate_editor_handoff_report(
+            session_id=panel_session.id,
+            provider=provider,
+        )
+        completed_at = panel_session.completed_at
+        second = await service.generate_editor_handoff_report(
+            session_id=panel_session.id,
+            provider=provider,
+        )
+
+        assert first.review_report_id is not None
+        assert second.review_report_id == first.review_report_id
+        assert panel_session.review_report_id == first.review_report_id
+        assert completed_at is not None
+        assert panel_session.completed_at == completed_at
+        assert panel_session.status == ReaderPanelStatus.COMPLETED.value
+        assert len(provider.requests) == 1
+        request = provider.requests[0]
+        assert list(request.initial_reports) == ["reader_1", "reader_2"]
+        report_ids = {
+            str(report.id) for report in fake_db_session.storage[ReaderInitialReport].values()
+        }
+        assert report_ids.isdisjoint(request.initial_reports)
+        for table in (
+            "reader_runs",
+            "reader_initial_reports",
+            "reader_panel_issues",
+            "reader_panel_ballots",
+        ):
+            matching = [
+                options
+                for statement, options in fake_db_session.execute_options
+                if table in statement
+            ]
+            assert matching and all(options.get("populate_existing") for options in matching)
+        for model in (Document, DocumentVersion, WorkflowRun, ReviewReport):
+            matching = [
+                options
+                for called_model, options in fake_db_session.get_options
+                if called_model is model
+            ]
+            assert matching and all(options.get("populate_existing") for options in matching)
+        workflow_run = fake_db_session.storage[WorkflowRun][panel_session.workflow_run_id]
+        assert workflow_run.status == ReaderPanelStatus.COMPLETED.value
+        assert workflow_run.current_node == "completed"
+        assert workflow_run.next_node is None
+        assert workflow_run.awaiting_user is False
+        assert workflow_run.completed_at == completed_at
+        reports = list(fake_db_session.storage[ReviewReport].values())
+        assert len(reports) == 1
+        report = reports[0]
+        assert report.passed is False
+        assert report.project_id == test_project_id
+        assert report.chapter_id == test_chapter_id
+        assert report.workflow_run_id == panel_session.workflow_run_id
+        assert report.target_document_id == test_document_id
+        assert report.target_version_id == test_version_id
+        assert report.report_document_id is None
+        assert report.raw_report["source_hash"] == sample_hash
+        assert report.raw_report["automatic_application_allowed"] is False
+        assert report.raw_report["provider_usage"] == {
+            "report_synthesis_calls": 1,
+            "total_panel_calls": None,
+            "input_tokens": None,
+            "output_tokens": None,
+        }
+        assert [item["issue_number"] for item in report.raw_report["issues"]] == [1]
+        serialized_report = str(report.raw_report)
+        assert all(
+            str(run.id) not in serialized_report and run.reader_profile_id not in serialized_report
+            for run in panel_session.reader_runs
+        )
+        assert len(fake_db_session.storage[Document]) == 1
+        assert len(fake_db_session.storage[DocumentVersion]) == 1
+        assert fake_db_session.storage[ActionRequest] == {}
+        event = next(
+            item
+            for item in fake_db_session.storage[WorkflowEvent].values()
+            if item.event_type == "reader_panel.report_completed"
+        )
+        assert set(event.payload) == {
+            "session_id",
+            "review_report_id",
+            "status",
+            "issue_count",
+            "valid_reader_count",
+            "failed_reader_count",
+        }
+        resumed = await service.initialize_session(
+            project_id=test_project_id,
+            chapter_id=test_chapter_id,
+            mode=PanelMode.QUICK,
+        )
+        assert resumed.review_report_id == report.id
+
+    async def test_polarized_minority_and_target_audience_tally_are_server_owned(
+        self,
+        fake_db_session: FakeAsyncSession,
+        test_project_id: UUID,
+        test_chapter_id: UUID,
+        test_document_id: UUID,
+        test_version_id: UUID,
+        sample_hash: str,
+        sample_segments: dict[str, str],
+    ) -> None:
+        service, panel_session = await setup_final_ballots_locked(
+            fake_db_session,
+            project_id=test_project_id,
+            chapter_id=test_chapter_id,
+            document_id=test_document_id,
+            version_id=test_version_id,
+            content_hash=sample_hash,
+            segments=sample_segments,
+        )
+        non_target = next(run for run in panel_session.reader_runs if not run.is_target_audience)
+        risk_ballot = next(
+            ballot
+            for ballot in fake_db_session.storage[ReaderPanelBallot].values()
+            if ballot.phase == "final" and ballot.reader_run_id == non_target.id
+        )
+        risk_ballot.severity = "critical"
+        risk_ballot.suggested_action = "rewrite_local"
+        risk_ballot.confidence = "high"
+        risk_ballot.remaining_disagreement = "The high-risk reader still sees a fatal reveal."
+        panel_session.stale = True
+
+        result = await service.generate_editor_handoff_report(
+            session_id=panel_session.id,
+            provider=RecordingSynthesisProvider(fake_db_session),
+        )
+
+        issue = next(iter(fake_db_session.storage[ReaderPanelIssue].values()))
+        assert result.status == ReaderPanelStatus.COMPLETED.value
+        assert issue.consensus_class == "polarized"
+        assert issue.recommended_priority == "must_fix"
+        assert issue.final_tally == {
+            "raw_distribution": {
+                "none": 0,
+                "minor": 1,
+                "significant": 0,
+                "critical": 1,
+                "abstain": 0,
+            },
+            "target_audience_distribution": {
+                "none": 0,
+                "minor": 1,
+                "significant": 0,
+                "critical": 0,
+                "abstain": 0,
+            },
+            "valid_votes": 2,
+            "total_votes": 2,
+            "target_audience_votes": 1,
+            "risk_flags": ["minority_high_risk"],
+        }
+        report = next(iter(fake_db_session.storage[ReviewReport].values()))
+        assert report.raw_report["stale"] is True
+        assert report.raw_report["automatic_application_allowed"] is False
+        assert report.raw_report["minority_issue_numbers"] == [1]
+        assert report.raw_report["issues"][0]["remaining_disagreements"] == [
+            "The high-risk reader still sees a fatal reveal."
+        ]
+        assert any("stale" in warning.lower() for warning in report.warnings)
+
+    @pytest.mark.parametrize(
+        "corruption",
+        [
+            "mode",
+            "role",
+            "artifact",
+            "schema",
+            "source_document",
+            "source_version",
+            "source_hash",
+            "automatic_application",
+        ],
+    )
+    async def test_replay_rejects_corrupt_canonical_report_without_provider_call(
+        self,
+        corruption: str,
+        fake_db_session: FakeAsyncSession,
+        test_project_id: UUID,
+        test_chapter_id: UUID,
+        test_document_id: UUID,
+        test_version_id: UUID,
+        sample_hash: str,
+        sample_segments: dict[str, str],
+    ) -> None:
+        service, panel_session = await setup_final_ballots_locked(
+            fake_db_session,
+            project_id=test_project_id,
+            chapter_id=test_chapter_id,
+            document_id=test_document_id,
+            version_id=test_version_id,
+            content_hash=sample_hash,
+            segments=sample_segments,
+        )
+        await service.generate_editor_handoff_report(
+            session_id=panel_session.id,
+            provider=RecordingSynthesisProvider(fake_db_session),
+        )
+        report = next(iter(fake_db_session.storage[ReviewReport].values()))
+        if corruption == "mode":
+            report.review_mode = "single_agent"
+        elif corruption == "role":
+            report.reviewer_agent_role = "reader_agent"
+        elif corruption == "artifact":
+            report.report_document_id = uuid4()
+        else:
+            key = {
+                "schema": "schema_version",
+                "source_document": "source_document_id",
+                "source_version": "source_version_id",
+                "source_hash": "source_hash",
+                "automatic_application": "automatic_application_allowed",
+            }[corruption]
+            raw_report = dict(report.raw_report)
+            raw_report[key] = True if corruption == "automatic_application" else "tampered"
+            report.raw_report = raw_report
+        provider = RecordingSynthesisProvider(fake_db_session)
+
+        with pytest.raises(ReaderPanelInvalidStateError):
+            await service.generate_editor_handoff_report(
+                session_id=panel_session.id,
+                provider=provider,
+            )
+
+        assert provider.requests == []
+
+    async def test_failed_sample_is_explicitly_degraded_not_full_panel(
+        self,
+        fake_db_session: FakeAsyncSession,
+        test_project_id: UUID,
+        test_chapter_id: UUID,
+        test_document_id: UUID,
+        test_version_id: UUID,
+        sample_hash: str,
+        sample_segments: dict[str, str],
+    ) -> None:
+        service, panel_session = await setup_final_ballots_locked(
+            fake_db_session,
+            project_id=test_project_id,
+            chapter_id=test_chapter_id,
+            document_id=test_document_id,
+            version_id=test_version_id,
+            content_hash=sample_hash,
+            segments=sample_segments,
+        )
+        fake_db_session.add(
+            ReaderRun(
+                id=uuid4(),
+                session_id=panel_session.id,
+                reader_profile_id="failed_reader",
+                status="failed",
+                is_target_audience=False,
+                retry_count=2,
+            )
+        )
+        await fake_db_session.commit()
+
+        result = await service.generate_editor_handoff_report(
+            session_id=panel_session.id,
+            provider=RecordingSynthesisProvider(fake_db_session),
+        )
+
+        assert result.status == ReaderPanelStatus.DEGRADED_COMPLETED.value
+        report = next(iter(fake_db_session.storage[ReviewReport].values()))
+        assert report.raw_report["sample"] == {
+            "requested": 3,
+            "valid": 2,
+            "failed": 1,
+            "complete": False,
+            "degradation_reason": "1 reader(s) unavailable.",
+        }
+        assert any("not a full panel" in warning for warning in report.warnings)
+        workflow_run = fake_db_session.storage[WorkflowRun][panel_session.workflow_run_id]
+        assert workflow_run.status == ReaderPanelStatus.DEGRADED_COMPLETED.value
+        assert workflow_run.completed_at == panel_session.completed_at
+
+    async def test_all_abstentions_are_inconclusive_with_zero_valid_votes(
+        self,
+        fake_db_session: FakeAsyncSession,
+        test_project_id: UUID,
+        test_chapter_id: UUID,
+        test_document_id: UUID,
+        test_version_id: UUID,
+        sample_hash: str,
+        sample_segments: dict[str, str],
+    ) -> None:
+        service, panel_session = await setup_final_ballots_locked(
+            fake_db_session,
+            project_id=test_project_id,
+            chapter_id=test_chapter_id,
+            document_id=test_document_id,
+            version_id=test_version_id,
+            content_hash=sample_hash,
+            segments=sample_segments,
+        )
+        for ballot in fake_db_session.storage[ReaderPanelBallot].values():
+            if ballot.phase == "final":
+                ballot.severity = "abstain"
+                ballot.suggested_action = "manual_review"
+
+        await service.generate_editor_handoff_report(
+            session_id=panel_session.id,
+            provider=RecordingSynthesisProvider(fake_db_session),
+        )
+
+        issue = next(iter(fake_db_session.storage[ReaderPanelIssue].values()))
+        assert issue.consensus_class == "inconclusive"
+        assert issue.recommended_priority == "manual_review"
+        assert issue.final_tally["valid_votes"] == 0
+        assert issue.final_tally["total_votes"] == 2
+
+    async def test_shared_recommendation_bindings_use_canonical_issue_order(
+        self,
+        fake_db_session: FakeAsyncSession,
+        test_project_id: UUID,
+        test_chapter_id: UUID,
+        test_document_id: UUID,
+        test_version_id: UUID,
+        sample_hash: str,
+        sample_segments: dict[str, str],
+    ) -> None:
+        service, panel_session = await setup_two_issue_final_panel(
+            fake_db_session,
+            project_id=test_project_id,
+            chapter_id=test_chapter_id,
+            document_id=test_document_id,
+            version_id=test_version_id,
+            content_hash=sample_hash,
+            segments=sample_segments,
+            shared_binding=True,
+        )
+
+        class NaturalWordingProvider(RecordingSynthesisProvider):
+            def synthesize_report(self, request: Any) -> Any:
+                output = super().synthesize_report(request)
+                recommendations = [
+                    recommendation.model_copy(
+                        update={"instruction": "Keep the hook, clarify the shared finding."}
+                    )
+                    for recommendation in output.actionable_recommendations
+                ]
+                return output.model_copy(update={"actionable_recommendations": recommendations})
+
+        result = await service.generate_editor_handoff_report(
+            session_id=panel_session.id,
+            provider=NaturalWordingProvider(fake_db_session),
+        )
+
+        assert result.status == ReaderPanelStatus.COMPLETED.value
+        report = next(iter(fake_db_session.storage[ReviewReport].values()))
+        assert len(report.suggested_actions) == 2
+        assert [action["target_segment_ids"] for action in report.suggested_actions] == [
+            ["S001"],
+            ["S001"],
+        ]
+        assert [action["suggested_action"] for action in report.suggested_actions] == [
+            "clarify",
+            "clarify",
+        ]
+
+    async def test_recommendation_instruction_cannot_reference_another_issue(
+        self,
+        fake_db_session: FakeAsyncSession,
+        test_project_id: UUID,
+        test_chapter_id: UUID,
+        test_document_id: UUID,
+        test_version_id: UUID,
+        sample_hash: str,
+        sample_segments: dict[str, str],
+    ) -> None:
+        service, panel_session = await setup_two_issue_final_panel(
+            fake_db_session,
+            project_id=test_project_id,
+            chapter_id=test_chapter_id,
+            document_id=test_document_id,
+            version_id=test_version_id,
+            content_hash=sample_hash,
+            segments=sample_segments,
+            shared_binding=False,
+        )
+
+        class CrossIssueProvider(RecordingSynthesisProvider):
+            def synthesize_report(self, request: Any) -> Any:
+                output = super().synthesize_report(request)
+                recommendations = list(output.actionable_recommendations)
+                recommendations[0] = recommendations[0].model_copy(
+                    update={"instruction": "Address Finding 1 after ISSUE-2."}
+                )
+                return output.model_copy(update={"actionable_recommendations": recommendations})
+
+        provider = CrossIssueProvider(fake_db_session)
+        with pytest.raises(ReaderPanelInvalidStateError):
+            await service.generate_editor_handoff_report(
+                session_id=panel_session.id,
+                provider=provider,
+            )
+
+        assert len(provider.requests) == 1
+        assert fake_db_session.storage[ReviewReport] == {}
+
+    async def test_custom_bracketed_segment_reference_is_allowed_when_bound(
+        self,
+        fake_db_session: FakeAsyncSession,
+        test_project_id: UUID,
+        test_chapter_id: UUID,
+        test_document_id: UUID,
+        test_version_id: UUID,
+        sample_hash: str,
+        sample_segments: dict[str, str],
+    ) -> None:
+        service, panel_session = await setup_final_ballots_locked(
+            fake_db_session,
+            project_id=test_project_id,
+            chapter_id=test_chapter_id,
+            document_id=test_document_id,
+            version_id=test_version_id,
+            content_hash=sample_hash,
+            segments=sample_segments,
+        )
+        version = fake_db_session.storage[DocumentVersion][test_version_id]
+        version.metadata_ = {"segments": {"intro_01": "A bound introduction."}}
+        for issue in fake_db_session.storage[ReaderPanelIssue].values():
+            issue.evidence = [{"segment_ids": ["intro_01"], "note": "Bound."}]
+        for ballot in fake_db_session.storage[ReaderPanelBallot].values():
+            ballot.evidence = [{"segment_ids": ["intro_01"], "note": "Bound."}]
+
+        class CustomSegmentProvider(RecordingSynthesisProvider):
+            def synthesize_report(self, request: Any) -> Any:
+                output = super().synthesize_report(request)
+                finding = output.key_findings[0].model_copy(update={"summary": "See [intro_01]."})
+                return output.model_copy(update={"key_findings": [finding]})
+
+        result = await service.generate_editor_handoff_report(
+            session_id=panel_session.id,
+            provider=CustomSegmentProvider(fake_db_session),
+        )
+
+        assert result.status == ReaderPanelStatus.COMPLETED.value
+
+    @pytest.mark.parametrize(
+        "corruption",
+        ["missing_final", "duplicate_final", "foreign_issue", "unbound_evidence"],
+    )
+    async def test_invalid_persisted_sample_fails_closed_before_synthesis(
+        self,
+        corruption: str,
+        fake_db_session: FakeAsyncSession,
+        test_project_id: UUID,
+        test_chapter_id: UUID,
+        test_document_id: UUID,
+        test_version_id: UUID,
+        sample_hash: str,
+        sample_segments: dict[str, str],
+    ) -> None:
+        service, panel_session = await setup_final_ballots_locked(
+            fake_db_session,
+            project_id=test_project_id,
+            chapter_id=test_chapter_id,
+            document_id=test_document_id,
+            version_id=test_version_id,
+            content_hash=sample_hash,
+            segments=sample_segments,
+        )
+        final = next(
+            ballot
+            for ballot in fake_db_session.storage[ReaderPanelBallot].values()
+            if ballot.phase == "final"
+        )
+        if corruption == "missing_final":
+            del fake_db_session.storage[ReaderPanelBallot][final.id]
+        elif corruption == "duplicate_final":
+            fake_db_session.add(
+                ReaderPanelBallot(
+                    id=uuid4(),
+                    session_id=final.session_id,
+                    reader_run_id=final.reader_run_id,
+                    issue_id=final.issue_id,
+                    phase=final.phase,
+                    severity=final.severity,
+                    suggested_action=final.suggested_action,
+                    confidence=final.confidence,
+                    evidence=final.evidence,
+                    position_changed=final.position_changed,
+                    change_reason=final.change_reason,
+                    remaining_disagreement=final.remaining_disagreement,
+                )
+            )
+        elif corruption == "foreign_issue":
+            final.issue_id = uuid4()
+        else:
+            final.evidence = [{"segment_ids": ["S999"], "note": "Unbound."}]
+        await fake_db_session.commit()
+        provider = RecordingSynthesisProvider(fake_db_session)
+
+        with pytest.raises(ReaderPanelInvalidStateError):
+            await service.generate_editor_handoff_report(
+                session_id=panel_session.id,
+                provider=provider,
+            )
+
+        assert provider.requests == []
+        assert fake_db_session.storage[ReviewReport] == {}
+        assert panel_session.review_report_id is None
+
+    @pytest.mark.parametrize(
+        "tampering",
+        [
+            "omission",
+            "addition",
+            "classification",
+            "priority",
+            "duplicate_recommendation",
+            "reference",
+            "summary_reference",
+            "bracket_reference",
+            "secret",
+        ],
+    )
+    async def test_rejects_moderator_tampering_without_persisting_output(
+        self,
+        tampering: str,
+        fake_db_session: FakeAsyncSession,
+        test_project_id: UUID,
+        test_chapter_id: UUID,
+        test_document_id: UUID,
+        test_version_id: UUID,
+        sample_hash: str,
+        sample_segments: dict[str, str],
+    ) -> None:
+        service, panel_session = await setup_final_ballots_locked(
+            fake_db_session,
+            project_id=test_project_id,
+            chapter_id=test_chapter_id,
+            document_id=test_document_id,
+            version_id=test_version_id,
+            content_hash=sample_hash,
+            segments=sample_segments,
+        )
+
+        class TamperingProvider(RecordingSynthesisProvider):
+            def synthesize_report(self, request: Any) -> Any:
+                output = super().synthesize_report(request)
+                finding = output.key_findings[0]
+                if tampering == "omission":
+                    return output.model_copy(update={"key_findings": []})
+                if tampering == "addition":
+                    injected = finding.model_copy(
+                        update={"issue_number": 99, "title": "Injected issue"}
+                    )
+                    return output.model_copy(update={"key_findings": [finding, injected]})
+                if tampering == "classification":
+                    changed = finding.model_copy(
+                        update={
+                            "consensus_class": type(finding.consensus_class)("strong_consensus")
+                        }
+                    )
+                    return output.model_copy(update={"key_findings": [changed]})
+                if tampering == "priority":
+                    recommendation = output.actionable_recommendations[0]
+                    changed = recommendation.model_copy(
+                        update={"priority": type(recommendation.priority)("must_fix")}
+                    )
+                    return output.model_copy(update={"actionable_recommendations": [changed]})
+                if tampering == "duplicate_recommendation":
+                    recommendation = output.actionable_recommendations[0]
+                    return output.model_copy(
+                        update={
+                            "actionable_recommendations": [
+                                recommendation,
+                                recommendation,
+                            ]
+                        }
+                    )
+                if tampering == "reference":
+                    changed = finding.model_copy(
+                        update={
+                            "evidence": [EvidenceRef(segment_ids=["S999"], note="Foreign segment.")]
+                        }
+                    )
+                    return output.model_copy(update={"key_findings": [changed]})
+                if tampering == "summary_reference":
+                    changed = finding.model_copy(update={"summary": "See ISSUE-99 at S999."})
+                    return output.model_copy(update={"key_findings": [changed]})
+                if tampering == "bracket_reference":
+                    changed = finding.model_copy(update={"summary": "See [foreign_01]."})
+                    return output.model_copy(update={"key_findings": [changed]})
+                return output.model_copy(
+                    update={"executive_summary": "Bearer token=super-secret-value"}
+                )
+
+        provider = TamperingProvider(fake_db_session)
+        with pytest.raises(ReaderPanelInvalidStateError):
+            await service.generate_editor_handoff_report(
+                session_id=panel_session.id,
+                provider=provider,
+            )
+
+        assert len(provider.requests) == 1
+        assert fake_db_session.storage[ReviewReport] == {}
+        assert panel_session.review_report_id is None
+        assert panel_session.status == ReaderPanelStatus.FINAL_BALLOTS_LOCKED.value
+
+    async def test_discards_synthesis_when_locked_ballot_changes_during_provider_call(
+        self,
+        fake_db_session: FakeAsyncSession,
+        test_project_id: UUID,
+        test_chapter_id: UUID,
+        test_document_id: UUID,
+        test_version_id: UUID,
+        sample_hash: str,
+        sample_segments: dict[str, str],
+    ) -> None:
+        service, panel_session = await setup_final_ballots_locked(
+            fake_db_session,
+            project_id=test_project_id,
+            chapter_id=test_chapter_id,
+            document_id=test_document_id,
+            version_id=test_version_id,
+            content_hash=sample_hash,
+            segments=sample_segments,
+        )
+
+        class MutatingProvider(RecordingSynthesisProvider):
+            def synthesize_report(self, request: Any) -> Any:
+                output = super().synthesize_report(request)
+                final = next(
+                    ballot
+                    for ballot in self.db.storage[ReaderPanelBallot].values()
+                    if ballot.phase == "final"
+                )
+                final.severity = "significant"
+                return output
+
+        provider = MutatingProvider(fake_db_session)
+        with pytest.raises(ReaderPanelInvalidStateError):
+            await service.generate_editor_handoff_report(
+                session_id=panel_session.id,
+                provider=provider,
+            )
+
+        assert len(provider.requests) == 1
+        assert fake_db_session.storage[ReviewReport] == {}
+        assert panel_session.status == ReaderPanelStatus.FINAL_BALLOTS_LOCKED.value
+
+    async def test_version_advance_during_synthesis_completes_stale_on_bound_version(
+        self,
+        fake_db_session: FakeAsyncSession,
+        test_project_id: UUID,
+        test_chapter_id: UUID,
+        test_document_id: UUID,
+        test_version_id: UUID,
+        sample_hash: str,
+        sample_segments: dict[str, str],
+    ) -> None:
+        service, panel_session = await setup_final_ballots_locked(
+            fake_db_session,
+            project_id=test_project_id,
+            chapter_id=test_chapter_id,
+            document_id=test_document_id,
+            version_id=test_version_id,
+            content_hash=sample_hash,
+            segments=sample_segments,
+        )
+        next_version_id = uuid4()
+        fake_db_session.add(
+            DocumentVersion(
+                id=next_version_id,
+                document_id=test_document_id,
+                version_number=2,
+                source="writer_agent",
+                content_hash="new-version-hash",
+                byte_size=16,
+                word_count=3,
+                file_path="chapters/001_v2.md",
+                metadata_={"segments": {"S001": "A newer version."}},
+            )
+        )
+        await fake_db_session.commit()
+
+        class AdvancingVersionProvider(RecordingSynthesisProvider):
+            def synthesize_report(self, request: Any) -> Any:
+                output = super().synthesize_report(request)
+                document = self.db.storage[Document][test_document_id]
+                document.current_version_id = next_version_id
+                return output
+
+        result = await service.generate_editor_handoff_report(
+            session_id=panel_session.id,
+            provider=AdvancingVersionProvider(fake_db_session),
+        )
+
+        assert result.status == ReaderPanelStatus.COMPLETED.value
+        assert result.stale is True
+        report = next(iter(fake_db_session.storage[ReviewReport].values()))
+        assert report.target_version_id == test_version_id
+        assert report.raw_report["source_version_id"] == str(test_version_id)
+        assert report.raw_report["stale"] is True
+        assert report.raw_report["automatic_application_allowed"] is False

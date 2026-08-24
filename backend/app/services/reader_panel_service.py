@@ -21,6 +21,8 @@ from app.agents.reader_panel_contracts import (
     ModeratorDiscussionSummaryRequest,
     ModeratorIssueExtractionOutput,
     ModeratorIssueExtractionRequest,
+    ModeratorReportSynthesisOutput,
+    ModeratorReportSynthesisRequest,
     ReaderBallotOutput,
     ReaderDiscussionTurnOutput,
     ReaderDiscussionTurnRequest,
@@ -38,6 +40,7 @@ from app.models.core import (
     Document,
     DocumentVersion,
     Project,
+    ReviewReport,
     WorkflowEvent,
     WorkflowRun,
 )
@@ -50,9 +53,16 @@ from app.models.reader_panel import (
     ReaderRun,
 )
 from app.workflows.reader_panel import (
+    BallotVote,
+    Confidence,
+    EditorHandoffDecision,
     PanelMode,
     ReaderPanelConfig,
     ReaderPanelStatus,
+    RiskFlag,
+    Severity,
+    SuggestedAction,
+    classify_issue_consensus,
     get_mode_preset_config,
     is_mode_off,
 )
@@ -121,6 +131,7 @@ class ReaderPanelSessionResult:
     discussed_issue_count: int = 0
     final_ballot_count: int = 0
     final_ballots_locked: bool = False
+    review_report_id: UUID | None = None
     stale: bool = False
     degradation_reason: str | None = None
     failure_reason: str | None = None
@@ -208,6 +219,7 @@ class ReaderPanelService:
                 planned_readers=len(runs),
                 completed_readers=len(completed_runs),
                 initial_reports_locked=existing_session.initial_reports_locked_at is not None,
+                review_report_id=existing_session.review_report_id,
                 stale=existing_session.stale,
                 degradation_reason=existing_session.degradation_reason,
                 failure_reason=existing_session.failure_reason,
@@ -2064,6 +2076,862 @@ class ReaderPanelService:
             stale=panel_session.stale,
             degradation_reason=panel_session.degradation_reason,
             failure_reason=panel_session.failure_reason,
+        )
+
+    async def generate_editor_handoff_report(
+        self,
+        *,
+        session_id: UUID,
+        provider: Any = None,
+    ) -> ReaderPanelSessionResult:
+        """Classifies locked final ballots and persists one non-approval editor handoff."""
+        panel_provider = provider or DeterministicReaderPanelProvider(
+            scenario=ReaderPanelFakeScenario.CLEAN
+        )
+        severity_values = {item.value for item in Severity}
+        action_values = {item.value for item in SuggestedAction}
+        confidence_values = {item.value for item in Confidence}
+
+        async def load_rows(model: type[Any]) -> list[Any]:
+            rows = (
+                (
+                    await self._db.execute(
+                        select(model)
+                        .where(model.session_id == session_id)
+                        .execution_options(populate_existing=True)
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            return [row for row in rows if row.session_id == session_id]
+
+        async def load_locked_snapshot() -> tuple[
+            ReaderPanelSession,
+            list[ReaderRun],
+            list[ReaderInitialReport],
+            list[ReaderPanelIssue],
+            list[ReaderPanelBallot],
+            DocumentVersion,
+            WorkflowRun,
+            tuple[Any, ...],
+        ]:
+            session_stmt = (
+                select(ReaderPanelSession)
+                .where(ReaderPanelSession.id == session_id)
+                .with_for_update()
+                .execution_options(populate_existing=True)
+            )
+            session = (await self._db.execute(session_stmt)).scalars().first()
+            if session is None:
+                raise ReaderPanelNotFoundError()
+            runs: list[ReaderRun] = await load_rows(ReaderRun)
+            reports: list[ReaderInitialReport] = await load_rows(ReaderInitialReport)
+            issues: list[ReaderPanelIssue] = sorted(
+                await load_rows(ReaderPanelIssue), key=lambda issue: issue.issue_number
+            )
+            ballots: list[ReaderPanelBallot] = await load_rows(ReaderPanelBallot)
+            version = await self._db.get(
+                DocumentVersion,
+                session.document_version_id,
+                populate_existing=True,
+            )
+            document = await self._db.get(
+                Document,
+                session.document_id,
+                populate_existing=True,
+            )
+            workflow_run = await self._db.get(
+                WorkflowRun,
+                session.workflow_run_id,
+                populate_existing=True,
+            )
+            workflow_metadata = (
+                workflow_run.metadata_
+                if workflow_run is not None and isinstance(workflow_run.metadata_, dict)
+                else {}
+            )
+            segments = (
+                version.metadata_.get("segments")
+                if version is not None and isinstance(version.metadata_, dict)
+                else None
+            )
+            if (
+                session.status
+                not in {
+                    ReaderPanelStatus.FINAL_BALLOTS_LOCKED.value,
+                    ReaderPanelStatus.REPORT_GENERATING.value,
+                    ReaderPanelStatus.COMPLETED.value,
+                    ReaderPanelStatus.DEGRADED_COMPLETED.value,
+                }
+                or session.final_ballots_locked_at is None
+                or version is None
+                or document is None
+                or workflow_run is None
+                or workflow_run.workflow_type != "reader_panel"
+                or document.project_id != session.project_id
+                or document.chapter_id != session.chapter_id
+                or workflow_run.project_id != session.project_id
+                or workflow_metadata.get("chapter_id") != str(session.chapter_id)
+                or workflow_metadata.get("document_id") != str(session.document_id)
+                or workflow_metadata.get("document_version_id") != str(session.document_version_id)
+                or workflow_metadata.get("source_hash") != session.source_hash
+                or workflow_metadata.get("mode") != session.mode
+                or version.document_id != session.document_id
+                or version.content_hash != session.source_hash
+                or not isinstance(segments, dict)
+                or not all(
+                    isinstance(key, str) and isinstance(value, str)
+                    for key, value in segments.items()
+                )
+            ):
+                raise ReaderPanelInvalidStateError()
+            if document.current_version_id != session.document_version_id:
+                session.stale = True
+            if (
+                session.status
+                in {
+                    ReaderPanelStatus.COMPLETED.value,
+                    ReaderPanelStatus.DEGRADED_COMPLETED.value,
+                }
+                and session.review_report_id is None
+            ):
+                raise ReaderPanelInvalidStateError()
+            if session.status in {
+                ReaderPanelStatus.COMPLETED.value,
+                ReaderPanelStatus.DEGRADED_COMPLETED.value,
+            }:
+                if (
+                    workflow_run.status != session.status
+                    or workflow_run.current_node != "completed"
+                    or workflow_run.next_node is not None
+                    or workflow_run.awaiting_user
+                    or workflow_run.completed_at is None
+                ):
+                    raise ReaderPanelInvalidStateError()
+            elif workflow_run.status != "running" or workflow_run.completed_at is not None:
+                raise ReaderPanelInvalidStateError()
+            run_ids = {run.id for run in runs}
+            issue_ids = {issue.id for issue in issues}
+            if (
+                len(run_ids) != len(runs)
+                or len(issue_ids) != len(issues)
+                or len({issue.issue_number for issue in issues}) != len(issues)
+            ):
+                raise ReaderPanelInvalidStateError()
+            eligible_runs = sorted(
+                [run for run in runs if run.status == "completed"],
+                key=lambda run: (run.reader_profile_id, str(run.id)),
+            )
+            reports_by_run: dict[UUID, list[ReaderInitialReport]] = {}
+            for report in reports:
+                reports_by_run.setdefault(report.reader_run_id, []).append(report)
+            if (
+                not eligible_runs
+                or any(run_id not in run_ids for run_id in reports_by_run)
+                or any(len(items) > 1 for items in reports_by_run.values())
+                or any(
+                    len(reports_by_run.get(run.id, [])) != 1
+                    or not reports_by_run[run.id][0].locked
+                    or reports_by_run[run.id][0].locked_at is None
+                    for run in eligible_runs
+                )
+            ):
+                raise ReaderPanelInvalidStateError()
+            segment_ids = set(segments)
+
+            def evidence_is_bound(evidence: Any) -> bool:
+                return (
+                    isinstance(evidence, list)
+                    and bool(evidence)
+                    and all(
+                        isinstance(ref, dict)
+                        and isinstance(ref.get("segment_ids"), list)
+                        and bool(ref["segment_ids"])
+                        and set(ref["segment_ids"]).issubset(segment_ids)
+                        for ref in evidence
+                    )
+                )
+
+            report_ids = {str(reports_by_run[run.id][0].id) for run in eligible_runs}
+            if any(
+                not evidence_is_bound(issue.evidence)
+                or not set(issue.source_reader_ids).issubset(report_ids)
+                for issue in issues
+            ):
+                raise ReaderPanelInvalidStateError()
+            eligible_ids = {run.id for run in eligible_runs}
+            expected_pairs = {(run.id, issue.id) for run in eligible_runs for issue in issues}
+            phase_pairs: dict[str, list[tuple[UUID, UUID]]] = {
+                "initial": [],
+                "final": [],
+            }
+            for ballot in ballots:
+                if (
+                    ballot.reader_run_id not in eligible_ids
+                    or ballot.issue_id not in issue_ids
+                    or ballot.phase not in phase_pairs
+                    or ballot.severity not in severity_values
+                    or ballot.suggested_action not in action_values
+                    or ballot.confidence not in confidence_values
+                    or not evidence_is_bound(ballot.evidence)
+                ):
+                    raise ReaderPanelInvalidStateError()
+                phase_pairs[ballot.phase].append((ballot.reader_run_id, ballot.issue_id))
+            if any(
+                len(pairs) != len(set(pairs)) or set(pairs) != expected_pairs
+                for pairs in phase_pairs.values()
+            ):
+                raise ReaderPanelInvalidStateError()
+            snapshot = (
+                session.project_id,
+                session.chapter_id,
+                session.workflow_run_id,
+                session.document_id,
+                session.document_version_id,
+                session.source_hash,
+                session.final_ballots_locked_at,
+                session.mode,
+                session.degradation_reason,
+                repr(session.config_snapshot),
+                repr(session.model_snapshot),
+                repr(session.prompt_snapshot),
+                repr(session.target_audience),
+                workflow_run.status,
+                workflow_run.current_node,
+                workflow_run.next_node,
+                workflow_run.awaiting_user,
+                workflow_run.completed_at,
+                tuple(
+                    (str(run.id), run.reader_profile_id, run.status, run.is_target_audience)
+                    for run in sorted(runs, key=lambda item: str(item.id))
+                ),
+                tuple(
+                    (
+                        str(report.id),
+                        str(report.reader_run_id),
+                        report.locked,
+                        str(report.locked_at),
+                        report.overall_reaction,
+                        report.continue_reading,
+                        report.confidence,
+                        repr(report.strengths),
+                        repr(report.reactions),
+                        repr(report.concerns),
+                    )
+                    for report in sorted(reports, key=lambda item: str(item.id))
+                ),
+                tuple(
+                    (
+                        str(issue.id),
+                        issue.issue_number,
+                        issue.title,
+                        issue.category,
+                        issue.symptom,
+                        repr(issue.root_cause_hypotheses),
+                        repr(issue.evidence),
+                        repr(issue.source_reader_ids),
+                        issue.target_audience_relevance,
+                        issue.minority_risk,
+                        issue.discussion_status,
+                    )
+                    for issue in issues
+                ),
+                tuple(
+                    sorted(
+                        (
+                            str(ballot.reader_run_id),
+                            str(ballot.issue_id),
+                            ballot.phase,
+                            ballot.severity,
+                            ballot.suggested_action,
+                            ballot.confidence,
+                            repr(ballot.evidence),
+                            ballot.position_changed,
+                            ballot.change_reason,
+                            ballot.remaining_disagreement,
+                        )
+                        for ballot in ballots
+                    )
+                ),
+            )
+            return session, runs, reports, issues, ballots, version, workflow_run, snapshot
+
+        def classify(
+            runs: list[ReaderRun],
+            issues: list[ReaderPanelIssue],
+            ballots: list[ReaderPanelBallot],
+        ) -> list[dict[str, Any]]:
+            run_by_id = {run.id: run for run in runs if run.status == "completed"}
+            initial_by_pair = {
+                (ballot.reader_run_id, ballot.issue_id): ballot
+                for ballot in ballots
+                if ballot.phase == "initial"
+            }
+            final_by_pair = {
+                (ballot.reader_run_id, ballot.issue_id): ballot
+                for ballot in ballots
+                if ballot.phase == "final"
+            }
+            classified = []
+            for issue in issues:
+                final_rows = [
+                    final_by_pair[(run_id, issue.id)] for run_id in sorted(run_by_id, key=str)
+                ]
+                minority_high_risk = any(
+                    ballot.severity == Severity.CRITICAL.value
+                    and ballot.confidence == Confidence.HIGH.value
+                    for ballot in final_rows
+                )
+                result = classify_issue_consensus(
+                    [
+                        BallotVote(
+                            reader_id=str(ballot.reader_run_id),
+                            severity=ballot.severity,
+                            suggested_action=ballot.suggested_action,
+                            confidence=ballot.confidence,
+                            is_target_audience=run_by_id[ballot.reader_run_id].is_target_audience,
+                            has_fatal_risk=(
+                                ballot.severity == Severity.CRITICAL.value
+                                and ballot.confidence == Confidence.HIGH.value
+                            ),
+                            position_changed=ballot.position_changed,
+                            change_reason=ballot.change_reason,
+                        )
+                        for ballot in final_rows
+                    ]
+                )
+                raw_distribution = {
+                    severity.value: result.severity_distribution.get(severity, 0)
+                    for severity in Severity
+                }
+                target_distribution = {
+                    severity.value: result.target_audience_distribution.get(severity, 0)
+                    for severity in Severity
+                }
+                consensus_class = result.consensus_class.value
+                priority = (
+                    result.recommended_priority.value
+                    if isinstance(result.recommended_priority, EditorHandoffDecision)
+                    else str(result.recommended_priority)
+                )
+                if minority_high_risk:
+                    priority = EditorHandoffDecision.MUST_FIX.value
+                risk_flags = [flag.value for flag in result.risk_flags]
+                if minority_high_risk and RiskFlag.MINORITY_HIGH_RISK.value not in risk_flags:
+                    risk_flags.append(RiskFlag.MINORITY_HIGH_RISK.value)
+                tally = {
+                    "raw_distribution": raw_distribution,
+                    "target_audience_distribution": target_distribution,
+                    "valid_votes": result.valid_votes,
+                    "total_votes": result.total_votes,
+                    "target_audience_votes": result.target_audience_votes,
+                    "risk_flags": sorted(risk_flags),
+                }
+                action_counts = {
+                    action: sum(ballot.suggested_action == action for ballot in final_rows)
+                    for action in action_values
+                }
+                top_action_count = max(action_counts.values())
+                top_actions = sorted(
+                    action for action, count in action_counts.items() if count == top_action_count
+                )
+                editor_action = (
+                    top_actions[0] if len(top_actions) == 1 else SuggestedAction.MANUAL_REVIEW.value
+                )
+                movements = []
+                for index, run in enumerate(
+                    sorted(
+                        run_by_id.values(), key=lambda item: (item.reader_profile_id, str(item.id))
+                    ),
+                    start=1,
+                ):
+                    initial = initial_by_pair[(run.id, issue.id)]
+                    final = final_by_pair[(run.id, issue.id)]
+                    movements.append(
+                        {
+                            "reader": f"reader_{index}",
+                            "is_target_audience": run.is_target_audience,
+                            "initial_severity": initial.severity,
+                            "final_severity": final.severity,
+                            "initial_action": initial.suggested_action,
+                            "final_action": final.suggested_action,
+                            "position_changed": final.position_changed,
+                        }
+                    )
+                classified.append(
+                    {
+                        "issue": issue,
+                        "consensus_class": consensus_class,
+                        "recommended_priority": priority,
+                        "final_tally": tally,
+                        "movements": movements,
+                        "remaining_disagreements": sorted(
+                            {
+                                ballot.remaining_disagreement
+                                for ballot in final_rows
+                                if ballot.remaining_disagreement
+                            }
+                        ),
+                        "minority_high_risk": minority_high_risk,
+                        "editor_action": editor_action,
+                        "suggested_actions": sorted(
+                            {
+                                ballot.suggested_action
+                                for ballot in final_rows
+                                if ballot.suggested_action != SuggestedAction.KEEP.value
+                            }
+                        ),
+                    }
+                )
+            priority_rank = {
+                EditorHandoffDecision.MUST_FIX.value: 0,
+                EditorHandoffDecision.MANUAL_REVIEW.value: 1,
+                EditorHandoffDecision.EXPERIMENT.value: 2,
+                EditorHandoffDecision.KEEP.value: 3,
+                EditorHandoffDecision.REJECTED.value: 4,
+            }
+            return sorted(
+                classified,
+                key=lambda item: (
+                    priority_rank.get(item["recommended_priority"], 99),
+                    item["issue"].issue_number,
+                ),
+            )
+
+        async def existing_report_id(session: ReaderPanelSession) -> UUID | None:
+            if session.review_report_id is None:
+                return None
+            report = await self._db.get(
+                ReviewReport,
+                session.review_report_id,
+                populate_existing=True,
+            )
+            raw_report = report.raw_report if report is not None else None
+            if (
+                report is None
+                or report.project_id != session.project_id
+                or report.chapter_id != session.chapter_id
+                or report.workflow_run_id != session.workflow_run_id
+                or report.target_document_id != session.document_id
+                or report.target_version_id != session.document_version_id
+                or report.passed
+                or report.review_mode != "reader_panel"
+                or report.reviewer_agent_role != "moderator_agent"
+                or report.report_document_id is not None
+                or not isinstance(raw_report, dict)
+                or raw_report.get("schema_version") != "reader_panel.editor_handoff.v1"
+                or raw_report.get("source_document_id") != str(session.document_id)
+                or raw_report.get("source_version_id") != str(session.document_version_id)
+                or raw_report.get("source_hash") != session.source_hash
+                or raw_report.get("automatic_application_allowed") is not False
+            ):
+                raise ReaderPanelInvalidStateError()
+            return report.id
+
+        (
+            session,
+            runs,
+            reports,
+            issues,
+            ballots,
+            _,
+            _,
+            source_snapshot,
+        ) = await load_locked_snapshot()
+        source_was_stale = session.stale
+        report_id = await existing_report_id(session)
+        if report_id is not None:
+            await self._db.commit()
+            return ReaderPanelSessionResult(
+                session_id=session.id,
+                workflow_run_id=session.workflow_run_id,
+                status=session.status,
+                mode=session.mode,
+                review_report_id=report_id,
+                stale=session.stale,
+                degradation_reason=session.degradation_reason,
+            )
+        classified = classify(runs, issues, ballots)
+        by_number = {item["issue"].issue_number: item for item in classified}
+        report_by_run = {report.reader_run_id: report for report in reports}
+        eligible_runs = sorted(
+            [run for run in runs if run.status == "completed"],
+            key=lambda run: (run.reader_profile_id, str(run.id)),
+        )
+        initial_reports = {
+            f"reader_{index}": {
+                "overall_reaction": report_by_run[run.id].overall_reaction,
+                "continue_reading": report_by_run[run.id].continue_reading,
+                "confidence": report_by_run[run.id].confidence,
+                "strengths": report_by_run[run.id].strengths,
+                "reactions": report_by_run[run.id].reactions,
+                "concerns": report_by_run[run.id].concerns,
+            }
+            for index, run in enumerate(eligible_runs, start=1)
+        }
+
+        def extracted_issue(item: dict[str, Any]) -> ExtractedIssueItem:
+            issue = item["issue"]
+            try:
+                return ExtractedIssueItem(
+                    issue_number=issue.issue_number,
+                    title=issue.title,
+                    category=issue.category,
+                    symptom=issue.symptom,
+                    root_cause_hypotheses=issue.root_cause_hypotheses,
+                    evidence=issue.evidence,
+                    source_reader_ids=[],
+                    target_audience_relevance=issue.target_audience_relevance,
+                    minority_risk=item["minority_high_risk"],
+                    discussion_status=issue.discussion_status,
+                )
+            except Exception:
+                raise ReaderPanelInvalidStateError() from None
+
+        def synthesis_request(**values: Any) -> ModeratorReportSynthesisRequest:
+            try:
+                return ModeratorReportSynthesisRequest(**values)
+            except Exception:
+                raise ReaderPanelInvalidStateError() from None
+
+        request = synthesis_request(
+            project_id=session.project_id,
+            chapter_id=session.chapter_id,
+            workflow_run_id=session.workflow_run_id,
+            initial_reports=initial_reports,
+            extracted_issues=[extracted_issue(item) for item in classified],
+            final_consensus_results={
+                number: {
+                    "consensus_class": item["consensus_class"],
+                    "recommended_priority": item["recommended_priority"],
+                    "suggested_action": (item["editor_action"]),
+                    **item["final_tally"],
+                }
+                for number, item in by_number.items()
+            },
+            minority_risk_issues=[
+                number for number, item in by_number.items() if item["minority_high_risk"]
+            ],
+        )
+        session.status = ReaderPanelStatus.REPORT_GENERATING.value
+        session.current_step = "report_generating"
+        await self._db.commit()
+        try:
+            output = panel_provider.synthesize_report(request)
+            if type(output) is not ModeratorReportSynthesisOutput:
+                raise TypeError
+            output = ModeratorReportSynthesisOutput.model_validate(output.model_dump(mode="python"))
+
+            def references_are_scoped(
+                texts: list[str],
+                *,
+                issue_numbers: set[int],
+                segment_ids: set[str],
+            ) -> bool:
+                joined = "\n".join(texts)
+                if re.search(
+                    r"(?<![0-9a-f])[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}(?![0-9a-f])",
+                    joined,
+                    re.IGNORECASE,
+                ):
+                    return False
+                if any(
+                    int(match.group(1)) not in issue_numbers
+                    for match in re.finditer(r"\bISSUE-(\d+)\b", joined, re.IGNORECASE)
+                ):
+                    return False
+                allowed_segments = {segment_id.upper() for segment_id in segment_ids}
+                if any(
+                    match.group(0).upper() not in allowed_segments
+                    for match in re.finditer(r"(?<![\w-])S\d+(?![\w-])", joined, re.IGNORECASE)
+                ):
+                    return False
+                for match in re.finditer(r"\[([A-Za-z0-9_-]{1,64})\]", joined):
+                    token = match.group(1)
+                    issue_match = re.fullmatch(r"ISSUE-(\d+)", token, re.IGNORECASE)
+                    if token.upper() not in allowed_segments and (
+                        issue_match is None or int(issue_match.group(1)) not in issue_numbers
+                    ):
+                        return False
+                return True
+
+            def canonical_segment_ids(item: dict[str, Any]) -> list[str]:
+                return list(
+                    dict.fromkeys(
+                        segment_id
+                        for ref in item["issue"].evidence
+                        for segment_id in ref["segment_ids"]
+                    )
+                )
+
+            all_segments = {
+                segment_id
+                for item in classified
+                for ref in item["issue"].evidence
+                for segment_id in ref["segment_ids"]
+            }
+            if not references_are_scoped(
+                [output.executive_summary, output.target_audience_appeal],
+                issue_numbers=set(by_number),
+                segment_ids=all_segments,
+            ):
+                raise ValueError("summary references")
+            findings = {finding.issue_number: finding for finding in output.key_findings}
+            if len(findings) != len(output.key_findings) or set(findings) != set(by_number):
+                raise ValueError("findings")
+            for number, finding in findings.items():
+                authoritative = by_number[number]
+                issue = authoritative["issue"]
+                allowed_segments = {
+                    segment_id for ref in issue.evidence for segment_id in ref["segment_ids"]
+                }
+                if (
+                    finding.title != issue.title
+                    or finding.consensus_class.value != authoritative["consensus_class"]
+                    or finding.recommended_priority.value != authoritative["recommended_priority"]
+                    or not finding.evidence
+                    or any(
+                        not set(ref.segment_ids).issubset(allowed_segments)
+                        for ref in finding.evidence
+                    )
+                    or not references_are_scoped(
+                        [finding.summary, *(ref.note for ref in finding.evidence)],
+                        issue_numbers={number},
+                        segment_ids=allowed_segments,
+                    )
+                ):
+                    raise ValueError("finding binding")
+            actionable = [
+                item for item in classified if item["editor_action"] != SuggestedAction.KEEP.value
+            ]
+            if len(output.actionable_recommendations) != len(actionable):
+                raise ValueError("recommendation count")
+            validated_recommendations = list(
+                zip(actionable, output.actionable_recommendations, strict=True)
+            )
+            for authoritative, recommendation in validated_recommendations:
+                issue = authoritative["issue"]
+                segment_ids = canonical_segment_ids(authoritative)
+                if not references_are_scoped(
+                    [recommendation.instruction],
+                    issue_numbers={issue.issue_number},
+                    segment_ids=set(segment_ids),
+                ):
+                    raise ValueError("recommendation references")
+                if (
+                    recommendation.priority.value != authoritative["recommended_priority"]
+                    or recommendation.suggested_action.value != authoritative["editor_action"]
+                    or recommendation.target_segment_ids != segment_ids
+                ):
+                    raise ValueError("recommendation binding")
+        except Exception:
+            failed, *_ = await load_locked_snapshot()
+            if failed.review_report_id is None:
+                failed.status = ReaderPanelStatus.FINAL_BALLOTS_LOCKED.value
+                failed.current_step = "final_ballots_locked"
+            await self._db.commit()
+            raise ReaderPanelInvalidStateError() from None
+
+        (
+            fresh_session,
+            fresh_runs,
+            fresh_reports,
+            fresh_issues,
+            fresh_ballots,
+            _,
+            fresh_workflow,
+            fresh_snapshot,
+        ) = await load_locked_snapshot()
+        report_id = await existing_report_id(fresh_session)
+        if report_id is not None:
+            await self._db.commit()
+            return ReaderPanelSessionResult(
+                session_id=fresh_session.id,
+                workflow_run_id=fresh_session.workflow_run_id,
+                status=fresh_session.status,
+                mode=fresh_session.mode,
+                review_report_id=report_id,
+                stale=fresh_session.stale,
+                degradation_reason=fresh_session.degradation_reason,
+            )
+        if fresh_snapshot != source_snapshot or (source_was_stale and not fresh_session.stale):
+            fresh_session.status = ReaderPanelStatus.FINAL_BALLOTS_LOCKED.value
+            fresh_session.current_step = "final_ballots_locked"
+            await self._db.commit()
+            raise ReaderPanelInvalidStateError()
+        classified = classify(fresh_runs, fresh_issues, fresh_ballots)
+        requested_readers = len(fresh_runs)
+        valid_readers = sum(run.status == "completed" for run in fresh_runs)
+        failed_readers = requested_readers - valid_readers
+        degraded = bool(failed_readers or fresh_session.degradation_reason)
+        degradation_reasons = [fresh_session.degradation_reason]
+        if failed_readers:
+            degradation_reasons.append(f"{failed_readers} reader(s) unavailable.")
+        degradation_reason = (
+            " ".join(dict.fromkeys(reason for reason in degradation_reasons if reason)) or None
+        )
+        fresh_session.degradation_reason = degradation_reason
+        report_issues = []
+        for item in classified:
+            issue = item["issue"]
+            issue.consensus_class = item["consensus_class"]
+            issue.recommended_priority = item["recommended_priority"]
+            issue.final_tally = item["final_tally"]
+            finding = findings[issue.issue_number]
+            report_issues.append(
+                {
+                    "issue_number": issue.issue_number,
+                    "title": issue.title,
+                    "category": issue.category,
+                    "symptom": issue.symptom,
+                    "consensus_class": item["consensus_class"],
+                    "recommended_priority": item["recommended_priority"],
+                    "final_tally": item["final_tally"],
+                    "evidence": issue.evidence,
+                    "initial_to_final_movement": item["movements"],
+                    "remaining_disagreements": item["remaining_disagreements"],
+                    "minority_findings": (
+                        [RiskFlag.MINORITY_HIGH_RISK.value] if item["minority_high_risk"] else []
+                    ),
+                    "suggested_editorial_actions": item["suggested_actions"],
+                    "moderator_summary": finding.summary,
+                }
+            )
+        raw_report = {
+            "schema_version": "reader_panel.editor_handoff.v1",
+            "source_document_id": str(fresh_session.document_id),
+            "source_version_id": str(fresh_session.document_version_id),
+            "source_hash": fresh_session.source_hash,
+            "mode": fresh_session.mode,
+            "target_audience": fresh_session.target_audience,
+            "automatic_application_allowed": False,
+            "stale": fresh_session.stale,
+            "sample": {
+                "requested": requested_readers,
+                "valid": valid_readers,
+                "failed": failed_readers,
+                "complete": failed_readers == 0,
+                "degradation_reason": degradation_reason,
+            },
+            "issues": report_issues,
+            "minority_issue_numbers": [
+                item["issue"].issue_number for item in classified if item["minority_high_risk"]
+            ],
+            "moderator_wording": {
+                "executive_summary": output.executive_summary,
+                "target_audience_appeal": output.target_audience_appeal,
+            },
+            "provider_usage": {
+                "report_synthesis_calls": 1,
+                "total_panel_calls": None,
+                "input_tokens": None,
+                "output_tokens": None,
+            },
+        }
+        warnings = []
+        if fresh_session.stale:
+            warnings.append("Source version is stale; automatic application is prohibited.")
+        if failed_readers:
+            warnings.append(
+                f"Panel completed with {failed_readers} unavailable reader(s); this is not a full panel."
+            )
+        warnings.extend(
+            f"ISSUE-{item['issue'].issue_number} retains a high-risk minority finding."
+            for item in classified
+            if item["minority_high_risk"]
+        )
+        fresh_actionable = [
+            item for item in classified if item["editor_action"] != SuggestedAction.KEEP.value
+        ]
+        suggested_actions = [
+            {
+                "priority": item["recommended_priority"],
+                "target_segment_ids": canonical_segment_ids(item),
+                "suggested_action": item["editor_action"],
+                "instruction": recommendation.instruction,
+            }
+            for item, recommendation in zip(
+                fresh_actionable,
+                output.actionable_recommendations,
+                strict=True,
+            )
+        ]
+        review_report = ReviewReport(
+            id=uuid4(),
+            project_id=fresh_session.project_id,
+            chapter_id=fresh_session.chapter_id,
+            workflow_run_id=fresh_session.workflow_run_id,
+            review_mode="reader_panel",
+            reviewer_agent_role="moderator_agent",
+            target_document_id=fresh_session.document_id,
+            target_version_id=fresh_session.document_version_id,
+            passed=False,
+            summary=output.executive_summary,
+            blocking_issues=[
+                {
+                    "issue_number": item["issue"].issue_number,
+                    "title": item["issue"].title,
+                }
+                for item in classified
+                if item["recommended_priority"] == EditorHandoffDecision.MUST_FIX.value
+            ],
+            warnings=warnings,
+            notes=[finding.summary for finding in output.key_findings],
+            suggested_actions=suggested_actions,
+            raw_report=raw_report,
+            report_document_id=None,
+        )
+        self._db.add(review_report)
+        fresh_session.review_report_id = review_report.id
+        fresh_session.status = (
+            ReaderPanelStatus.DEGRADED_COMPLETED.value
+            if degraded
+            else ReaderPanelStatus.COMPLETED.value
+        )
+        completed_at = (
+            fresh_session.completed_at or fresh_workflow.completed_at or datetime.now(timezone.utc)
+        )
+        fresh_session.completed_at = completed_at
+        fresh_session.current_step = "completed"
+        fresh_workflow.status = fresh_session.status
+        fresh_workflow.current_node = "completed"
+        fresh_workflow.next_node = None
+        fresh_workflow.awaiting_user = False
+        fresh_workflow.completed_at = completed_at
+        self._db.add(
+            WorkflowEvent(
+                workflow_run_id=fresh_session.workflow_run_id,
+                event_type="reader_panel.report_completed",
+                node_name="completed",
+                payload={
+                    "session_id": str(fresh_session.id),
+                    "review_report_id": str(review_report.id),
+                    "status": fresh_session.status,
+                    "issue_count": len(classified),
+                    "valid_reader_count": valid_readers,
+                    "failed_reader_count": failed_readers,
+                },
+                event_sequence=None,
+            )
+        )
+        await self._db.commit()
+        return ReaderPanelSessionResult(
+            session_id=fresh_session.id,
+            workflow_run_id=fresh_session.workflow_run_id,
+            status=fresh_session.status,
+            mode=fresh_session.mode,
+            planned_readers=requested_readers,
+            completed_readers=valid_readers,
+            initial_reports_locked=True,
+            issue_count=len(classified),
+            initial_ballot_count=len([b for b in fresh_ballots if b.phase == "initial"]),
+            initial_ballots_locked=True,
+            final_ballot_count=len([b for b in fresh_ballots if b.phase == "final"]),
+            final_ballots_locked=True,
+            review_report_id=review_report.id,
+            stale=fresh_session.stale,
+            degradation_reason=degradation_reason,
         )
 
     async def reconcile_stale_status(self, *, session_id: UUID) -> bool:
