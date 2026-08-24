@@ -11,8 +11,11 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.agents.reader_panel_contracts import (
     ExtractedIssueItem,
+    ModeratorDiscussionSummaryOutput,
     ModeratorIssueExtractionOutput,
     ReaderBallotOutput,
+    ReaderDiscussionTurnOutput,
+    ReaderFinalBallotOutput,
 )
 from app.agents.reader_panel_fakes import (
     DeterministicReaderPanelProvider,
@@ -23,6 +26,7 @@ from app.models.reader_panel import (
     ReaderInitialReport,
     ReaderPanelBallot,
     ReaderPanelIssue,
+    ReaderPanelMessage,
     ReaderPanelSession,
 )
 from app.services.reader_panel_service import (
@@ -50,19 +54,69 @@ class PostgreSQLBallotProvider:
                     root_cause_hypotheses=["Setup is compressed"],
                     evidence=[{"segment_ids": ["S002"], "note": "Cauldron introduction."}],
                     source_reader_ids=[source_profile],
-                )
+                ),
+                ExtractedIssueItem(
+                    issue_number=9,
+                    title="Thin academy context",
+                    category="worldbuilding",
+                    symptom="The academy context arrives without orientation.",
+                    root_cause_hypotheses=["Setup is compressed"],
+                    evidence=[{"segment_ids": ["S001"], "note": "Academy introduction."}],
+                    source_reader_ids=[source_profile],
+                ),
             ]
         )
 
     def generate_blind_ballot(self, request) -> ReaderBallotOutput:
         self.ballot_calls += 1
+        segment_id = request.issue.evidence[0].segment_ids[0]
         return ReaderBallotOutput(
             issue_number=request.issue.issue_number,
             severity="minor",
             suggested_action="clarify",
             confidence="high",
-            evidence=[{"segment_ids": ["S002"], "note": "Bound segment."}],
+            evidence=[{"segment_ids": [segment_id], "note": "Bound segment."}],
             reason="A short setup would orient the reader.",
+        )
+
+
+class PostgreSQLDiscussionProvider:
+    def __init__(self) -> None:
+        self.turn_calls = 0
+        self.summary_calls = 0
+        self.final_calls = 0
+
+    def generate_discussion_turn(self, request) -> ReaderDiscussionTurnOutput:
+        self.turn_calls += 1
+        segment_id = next(iter(request.manuscript_segments))
+        return ReaderDiscussionTurnOutput(
+            stance="support",
+            claim="One causal beat would clarify the transition.",
+            evidence=[{"segment_ids": [segment_id], "note": "Bound issue evidence."}],
+            proposed_action="Clarify the transition.",
+            novelty="new_interpretation",
+        )
+
+    def summarize_discussion(self, request) -> ModeratorDiscussionSummaryOutput:
+        self.summary_calls += 1
+        return ModeratorDiscussionSummaryOutput(
+            round_summary="Readers support a small clarification.",
+            remaining_disagreements=[],
+            suggested_focus="Add one causal beat.",
+            is_consensus_reached=True,
+        )
+
+    def generate_final_ballot(self, request) -> ReaderFinalBallotOutput:
+        self.final_calls += 1
+        segment_id = next(iter(request.manuscript_segments))
+        return ReaderFinalBallotOutput(
+            issue_number=request.issue.issue_number,
+            severity="minor",
+            suggested_action="clarify",
+            confidence="high",
+            evidence=[{"segment_ids": [segment_id], "note": "Bound issue evidence."}],
+            position_changed=True,
+            change_reason="Discussion narrowed the change.",
         )
 
 
@@ -212,8 +266,8 @@ class TestReaderPanelServiceIntegration:
             collect_concurrently(),
             collect_concurrently(),
         )
-        assert all(result.issue_count == 1 for result in concurrent_results)
-        assert all(result.initial_ballot_count == 4 for result in concurrent_results)
+        assert all(result.issue_count == 2 for result in concurrent_results)
+        assert all(result.initial_ballot_count == 8 for result in concurrent_results)
         assert all(result.initial_ballots_locked for result in concurrent_results)
         assert all(
             result.status == ReaderPanelStatus.INITIAL_BALLOTS_LOCKED.value
@@ -243,11 +297,13 @@ class TestReaderPanelServiceIntegration:
             .scalars()
             .all()
         )
-        assert len(issues) == 1
-        assert len(issues[0].source_reader_ids) == 1
-        assert issues[0].source_reader_ids[0] in {str(report.id) for report in reports}
-        assert len(ballots) == 4
-        assert len({(b.reader_run_id, b.issue_id, b.phase) for b in ballots}) == 4
+        assert len(issues) == 2
+        assert all(len(issue.source_reader_ids) == 1 for issue in issues)
+        assert all(
+            issue.source_reader_ids[0] in {str(report.id) for report in reports} for issue in issues
+        )
+        assert len(ballots) == 8
+        assert len({(b.reader_run_id, b.issue_id, b.phase) for b in ballots}) == 8
         assert all(b.session_id == init_result.session_id for b in ballots)
         events = (
             (
@@ -276,7 +332,7 @@ class TestReaderPanelServiceIntegration:
             session_id=init_result.session_id,
             provider=ballot_provider,
         )
-        assert replay_result.initial_ballot_count == 4
+        assert replay_result.initial_ballot_count == 8
         assert (
             ballot_provider.extraction_calls,
             ballot_provider.ballot_calls,
@@ -293,7 +349,103 @@ class TestReaderPanelServiceIntegration:
             .scalars()
             .all()
         )
-        assert len(replay_ballots) == 4
+        assert len(replay_ballots) == 8
+
+        # 5. Discussion/final ballot recovery is also safe across two sessions.
+        session_for_agenda = await async_session.get(
+            ReaderPanelSession, init_result.session_id, populate_existing=True
+        )
+        assert session_for_agenda is not None
+        config_snapshot = dict(session_for_agenda.config_snapshot)
+        config_snapshot["max_discussion_issues"] = 1
+        session_for_agenda.config_snapshot = config_snapshot
+        await async_session.commit()
+        discussion_provider = PostgreSQLDiscussionProvider()
+
+        async def discuss_concurrently():
+            async with session_factory() as concurrent_session:
+                return await ReaderPanelService(
+                    concurrent_session
+                ).run_discussion_and_final_ballots(
+                    session_id=init_result.session_id,
+                    provider=discussion_provider,
+                )
+
+        discussion_results = await asyncio.gather(
+            discuss_concurrently(),
+            discuss_concurrently(),
+        )
+        assert all(result.final_ballots_locked for result in discussion_results)
+        assert all(result.final_ballot_count == 8 for result in discussion_results)
+
+        messages = (
+            (
+                await async_session.execute(
+                    select(ReaderPanelMessage).where(
+                        ReaderPanelMessage.session_id == init_result.session_id
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        final_ballots = (
+            (
+                await async_session.execute(
+                    select(ReaderPanelBallot).where(
+                        ReaderPanelBallot.session_id == init_result.session_id,
+                        ReaderPanelBallot.phase == "final",
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        assert len(messages) == 5
+        assert len({(m.issue_id, m.round_number, m.turn_number) for m in messages}) == 5
+        assert len(final_ballots) == 8
+        assert len({(b.reader_run_id, b.issue_id, b.phase) for b in final_ballots}) == 8
+        session_after_discussion = await async_session.get(
+            ReaderPanelSession, init_result.session_id, populate_existing=True
+        )
+        assert session_after_discussion is not None
+        first_locked_at = session_after_discussion.final_ballots_locked_at
+        calls_before_final_replay = (
+            discussion_provider.turn_calls,
+            discussion_provider.summary_calls,
+            discussion_provider.final_calls,
+        )
+        final_replay = await service.run_discussion_and_final_ballots(
+            session_id=init_result.session_id,
+            provider=discussion_provider,
+        )
+        assert final_replay.final_ballots_locked is True
+        assert (
+            discussion_provider.turn_calls,
+            discussion_provider.summary_calls,
+            discussion_provider.final_calls,
+        ) == calls_before_final_replay
+        replay_session = await async_session.get(
+            ReaderPanelSession, init_result.session_id, populate_existing=True
+        )
+        assert replay_session is not None
+        assert replay_session.final_ballots_locked_at == first_locked_at
+        lifecycle_events = (
+            (
+                await async_session.execute(
+                    select(WorkflowEvent).where(
+                        WorkflowEvent.workflow_run_id == init_result.workflow_run_id
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        event_types = [event.event_type for event in lifecycle_events]
+        assert event_types.count("reader_panel.discussion_started") == 1
+        assert event_types.count("reader_panel.discussion_round_completed") == 1
+        assert event_types.count("reader_panel.discussion_completed") == 1
+        assert event_types.count("reader_panel.final_ballots_locked") == 1
 
     async def test_cross_project_rejection_postgresql(
         self,

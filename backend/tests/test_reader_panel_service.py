@@ -14,8 +14,11 @@ from app.agents.reader_panel_fakes import (
 )
 from app.agents.reader_panel_contracts import (
     ExtractedIssueItem,
+    ModeratorDiscussionSummaryOutput,
     ModeratorIssueExtractionOutput,
     ReaderBallotOutput,
+    ReaderDiscussionTurnOutput,
+    ReaderFinalBallotOutput,
 )
 from app.models.core import (
     Chapter,
@@ -29,6 +32,7 @@ from app.models.reader_panel import (
     ReaderInitialReport,
     ReaderPanelBallot,
     ReaderPanelIssue,
+    ReaderPanelMessage,
     ReaderPanelSession,
     ReaderRun,
 )
@@ -98,6 +102,8 @@ class FakeAsyncSession:
             return FakeExecuteResult(list(self.storage[ReaderPanelIssue].values()))
         elif "reader_panel_ballots" in stmt_str:
             return FakeExecuteResult(list(self.storage[ReaderPanelBallot].values()))
+        elif "reader_panel_messages" in stmt_str:
+            return FakeExecuteResult(list(self.storage[ReaderPanelMessage].values()))
         elif "documents" in stmt_str:
             docs = list(self.storage[Document].values())
             return FakeExecuteResult(docs)
@@ -725,6 +731,468 @@ class TestReaderPanelInitialBallots:
             for event in fake_db_session.storage[WorkflowEvent].values()
         )
 
+
+@pytest.mark.anyio
+class TestReaderPanelDiscussionBoundsAndAgenda:
+    async def test_empty_agenda_skips_providers_and_locks_empty_final_phase(
+        self,
+        fake_db_session: FakeAsyncSession,
+        test_project_id: UUID,
+        test_chapter_id: UUID,
+        test_document_id: UUID,
+        test_version_id: UUID,
+        sample_hash: str,
+        sample_segments: dict[str, str],
+    ) -> None:
+        service, panel_session = await setup_initial_ballots_locked(
+            fake_db_session,
+            project_id=test_project_id,
+            chapter_id=test_chapter_id,
+            document_id=test_document_id,
+            version_id=test_version_id,
+            content_hash=sample_hash,
+            segments=sample_segments,
+        )
+        panel_session.config_snapshot["max_discussion_issues"] = 0
+        provider = RecordingDiscussionProvider(fake_db_session)
+
+        result = await service.run_discussion_and_final_ballots(
+            session_id=panel_session.id,
+            provider=provider,
+        )
+
+        assert result.status == ReaderPanelStatus.FINAL_BALLOTS_LOCKED.value
+        assert result.discussed_issue_count == 0
+        assert result.final_ballot_count == 2
+        assert provider.turn_requests == []
+        assert provider.summary_requests == []
+        assert len(provider.final_requests) == 2
+        assert all(
+            issue.discussion_status == "skipped"
+            for issue in fake_db_session.storage[ReaderPanelIssue].values()
+        )
+
+    async def test_malformed_discussion_turn_retries_once_and_remains_incomplete(
+        self,
+        fake_db_session: FakeAsyncSession,
+        test_project_id: UUID,
+        test_chapter_id: UUID,
+        test_document_id: UUID,
+        test_version_id: UUID,
+        sample_hash: str,
+        sample_segments: dict[str, str],
+    ) -> None:
+        service, panel_session = await setup_initial_ballots_locked(
+            fake_db_session,
+            project_id=test_project_id,
+            chapter_id=test_chapter_id,
+            document_id=test_document_id,
+            version_id=test_version_id,
+            content_hash=sample_hash,
+            segments=sample_segments,
+        )
+
+        class MalformedDiscussionProvider(RecordingDiscussionProvider):
+            def generate_discussion_turn(self, request: Any) -> Any:
+                assert not self.db.in_transaction()
+                self.turn_requests.append(request)
+                return object()
+
+        provider = MalformedDiscussionProvider(fake_db_session)
+        result = await service.run_discussion_and_final_ballots(
+            session_id=panel_session.id,
+            provider=provider,
+        )
+
+        assert len(provider.turn_requests) == 2
+        assert result.status == ReaderPanelStatus.DISCUSSING.value
+        assert result.discussion_message_count == 0
+        assert result.final_ballot_count == 0
+        assert panel_session.final_ballots_locked_at is None
+
+    async def test_agenda_prefers_server_owned_initial_severity(
+        self,
+        fake_db_session: FakeAsyncSession,
+        test_project_id: UUID,
+        test_chapter_id: UUID,
+        test_document_id: UUID,
+        test_version_id: UUID,
+        sample_hash: str,
+        sample_segments: dict[str, str],
+    ) -> None:
+        service, panel_session = await setup_locked_panel(
+            fake_db_session,
+            project_id=test_project_id,
+            chapter_id=test_chapter_id,
+            document_id=test_document_id,
+            version_id=test_version_id,
+            content_hash=sample_hash,
+            segments=sample_segments,
+        )
+        extracted = [
+            ExtractedIssueItem(
+                issue_number=number,
+                title=f"Issue {number}",
+                category="clarity",
+                symptom=f"Symptom {number}",
+                root_cause_hypotheses=["Cause"],
+                evidence=[{"segment_ids": [f"S00{number}"], "note": "Bound."}],
+                source_reader_ids=[panel_session.reader_runs[0].reader_profile_id],
+                minority_risk=number == 2,
+            )
+            for number in (1, 2)
+        ]
+
+        class PriorityBallotProvider(RecordingBallotProvider):
+            def generate_blind_ballot(self, request: Any) -> ReaderBallotOutput:
+                self.ballot_requests.append(request)
+                return ReaderBallotOutput(
+                    issue_number=request.issue.issue_number,
+                    severity=("critical" if request.issue.issue_number == 1 else "minor"),
+                    suggested_action="clarify",
+                    confidence="high",
+                    evidence=[
+                        {
+                            "segment_ids": [f"S00{request.issue.issue_number}"],
+                            "note": "Bound.",
+                        }
+                    ],
+                    reason="Priority evidence.",
+                )
+
+        await service.collect_initial_ballots(
+            session_id=panel_session.id,
+            provider=PriorityBallotProvider(extracted),
+        )
+        panel_session.issues = list(fake_db_session.storage[ReaderPanelIssue].values())
+        panel_session.ballots = list(fake_db_session.storage[ReaderPanelBallot].values())
+        panel_session.messages = []
+        panel_session.config_snapshot.update(
+            {
+                "max_discussion_issues": 1,
+                "max_rounds_per_issue": 1,
+                "max_total_model_calls": 20,
+                "max_input_tokens_per_call": 10_000,
+                "max_execution_seconds": 30,
+            }
+        )
+        provider = RecordingDiscussionProvider(fake_db_session)
+
+        result = await service.run_discussion_and_final_ballots(
+            session_id=panel_session.id,
+            provider=provider,
+        )
+
+        assert result.final_ballots_locked is True
+        assert {request.issue.issue_number for request in provider.turn_requests} == {2}
+        assert {request.issue.issue_number for request in provider.final_requests} == {1, 2}
+        assert (
+            len(
+                [
+                    ballot
+                    for ballot in fake_db_session.storage[ReaderPanelBallot].values()
+                    if ballot.phase == "final"
+                ]
+            )
+            == 4
+        )
+        discussed_issue_ids = {
+            message.issue_id for message in fake_db_session.storage[ReaderPanelMessage].values()
+        }
+        assert discussed_issue_ids == {
+            next(
+                issue.id
+                for issue in fake_db_session.storage[ReaderPanelIssue].values()
+                if issue.issue_number == 2
+            )
+        }
+        statuses = {
+            issue.issue_number: issue.discussion_status
+            for issue in fake_db_session.storage[ReaderPanelIssue].values()
+        }
+        assert statuses == {1: "skipped", 2: "closed"}
+
+
+class RecordingDiscussionProvider:
+    def __init__(self, db: FakeAsyncSession, *, malformed_final_profile: str | None = None) -> None:
+        self.db = db
+        self.malformed_final_profile = malformed_final_profile
+        self.turn_requests: list[Any] = []
+        self.summary_requests: list[Any] = []
+        self.final_requests: list[Any] = []
+
+    def generate_discussion_turn(self, request: Any) -> ReaderDiscussionTurnOutput:
+        assert not self.db.in_transaction()
+        self.turn_requests.append(request)
+        segment_id = next(iter(request.manuscript_segments))
+        return ReaderDiscussionTurnOutput(
+            stance="support",
+            claim="The transition needs one concrete causal beat.",
+            evidence=[{"segment_ids": [segment_id], "note": "Opening transition."}],
+            concession=None,
+            proposed_action="Clarify the causal transition.",
+            novelty="new_interpretation",
+        )
+
+    def summarize_discussion(self, request: Any) -> ModeratorDiscussionSummaryOutput:
+        assert not self.db.in_transaction()
+        self.summary_requests.append(request)
+        return ModeratorDiscussionSummaryOutput(
+            round_summary="Readers agree that one causal beat would clarify the opening.",
+            remaining_disagreements=[],
+            suggested_focus="Add one causal beat.",
+            is_consensus_reached=True,
+        )
+
+    def generate_final_ballot(self, request: Any) -> Any:
+        assert not self.db.in_transaction()
+        self.final_requests.append(request)
+        if request.reader_profile_id == self.malformed_final_profile:
+            return object()
+        segment_id = next(iter(request.manuscript_segments))
+        return ReaderFinalBallotOutput(
+            issue_number=request.issue.issue_number,
+            severity="minor",
+            suggested_action="clarify",
+            confidence="high",
+            evidence=[{"segment_ids": [segment_id], "note": "Bound opening evidence."}],
+            position_changed=True,
+            change_reason="The discussion narrowed the fix.",
+            remaining_disagreement=None,
+        )
+
+
+async def setup_initial_ballots_locked(
+    db: FakeAsyncSession,
+    *,
+    project_id: UUID,
+    chapter_id: UUID,
+    document_id: UUID,
+    version_id: UUID,
+    content_hash: str,
+    segments: dict[str, str],
+) -> tuple[ReaderPanelService, ReaderPanelSession]:
+    service, panel_session = await setup_locked_panel(
+        db,
+        project_id=project_id,
+        chapter_id=chapter_id,
+        document_id=document_id,
+        version_id=version_id,
+        content_hash=content_hash,
+        segments=segments,
+    )
+    await service.collect_initial_ballots(
+        session_id=panel_session.id,
+        provider=RecordingBallotProvider(
+            [
+                ExtractedIssueItem(
+                    issue_number=1,
+                    title="Unclear opening",
+                    category="clarity",
+                    symptom="The opening link is unclear.",
+                    root_cause_hypotheses=["Missing transition"],
+                    evidence=[{"segment_ids": ["S001"], "note": "Opening."}],
+                    source_reader_ids=[panel_session.reader_runs[0].reader_profile_id],
+                )
+            ]
+        ),
+    )
+    panel_session.issues = list(db.storage[ReaderPanelIssue].values())
+    panel_session.ballots = list(db.storage[ReaderPanelBallot].values())
+    panel_session.messages = []
+    panel_session.config_snapshot.update(
+        {
+            "max_discussion_issues": 1,
+            "max_rounds_per_issue": 2,
+            "max_total_model_calls": 20,
+            "max_input_tokens_per_call": 10_000,
+            "max_execution_seconds": 30,
+        }
+    )
+    return service, panel_session
+
+
+@pytest.mark.anyio
+class TestReaderPanelDiscussionAndFinalBallots:
+    async def test_discusses_issue_in_isolation_and_locks_immutable_final_ballots(
+        self,
+        fake_db_session: FakeAsyncSession,
+        test_project_id: UUID,
+        test_chapter_id: UUID,
+        test_document_id: UUID,
+        test_version_id: UUID,
+        sample_hash: str,
+        sample_segments: dict[str, str],
+    ) -> None:
+        service, panel_session = await setup_initial_ballots_locked(
+            fake_db_session,
+            project_id=test_project_id,
+            chapter_id=test_chapter_id,
+            document_id=test_document_id,
+            version_id=test_version_id,
+            content_hash=sample_hash,
+            segments=sample_segments,
+        )
+        provider = RecordingDiscussionProvider(fake_db_session)
+
+        result = await service.run_discussion_and_final_ballots(
+            session_id=panel_session.id,
+            provider=provider,
+        )
+
+        messages = list(fake_db_session.storage[ReaderPanelMessage].values())
+        ballots = list(fake_db_session.storage[ReaderPanelBallot].values())
+        initial_ballots = [ballot for ballot in ballots if ballot.phase == "initial"]
+        final_ballots = [ballot for ballot in ballots if ballot.phase == "final"]
+        assert result.status == ReaderPanelStatus.FINAL_BALLOTS_LOCKED.value
+        assert result.discussion_message_count == 3
+        assert result.final_ballot_count == 2
+        assert result.final_ballots_locked is True
+        assert len(messages) == 3
+        assert [(m.round_number, m.turn_number) for m in messages] == [(1, 1), (1, 2), (1, 3)]
+        assert [m.speaker_type for m in messages] == ["reader", "reader", "moderator"]
+        assert messages[-1].reader_run_id is None
+        assert messages[-1].stance is None
+        assert messages[-1].novelty == "procedural"
+        assert len(initial_ballots) == 2
+        assert len(final_ballots) == 2
+        assert {ballot.reader_run_id for ballot in final_ballots} == {
+            run.id for run in panel_session.reader_runs
+        }
+        assert all(ballot.position_changed is True for ballot in final_ballots)
+        assert all(
+            request.manuscript_segments == {"S001": sample_segments["S001"]}
+            for request in provider.turn_requests
+        )
+        assert all(
+            request.manuscript_segments == {"S001": sample_segments["S001"]}
+            for request in provider.final_requests
+        )
+        for request in provider.turn_requests:
+            payload = request.model_dump(mode="json")
+            other_profiles = {
+                run.reader_profile_id
+                for run in panel_session.reader_runs
+                if run.reader_profile_id != request.reader_profile_id
+            }
+            assert not any(profile in str(payload) for profile in other_profiles)
+            assert request.prior_ballot is not None
+        event_types = [
+            event.event_type for event in fake_db_session.storage[WorkflowEvent].values()
+        ]
+        assert event_types[-4:] == [
+            "reader_panel.discussion_started",
+            "reader_panel.discussion_round_completed",
+            "reader_panel.discussion_completed",
+            "reader_panel.final_ballots_locked",
+        ]
+        locked_at = panel_session.final_ballots_locked_at
+        calls = (
+            len(provider.turn_requests),
+            len(provider.summary_requests),
+            len(provider.final_requests),
+        )
+        event_count = len(fake_db_session.storage[WorkflowEvent])
+
+        replay = await service.run_discussion_and_final_ballots(
+            session_id=panel_session.id,
+            provider=provider,
+        )
+
+        assert replay.final_ballots_locked is True
+        assert panel_session.final_ballots_locked_at == locked_at
+        assert len(fake_db_session.storage[ReaderPanelMessage]) == 3
+        assert len(fake_db_session.storage[ReaderPanelBallot]) == 4
+        assert calls == (
+            len(provider.turn_requests),
+            len(provider.summary_requests),
+            len(provider.final_requests),
+        )
+        assert len(fake_db_session.storage[WorkflowEvent]) == event_count
+
+    async def test_cancelled_entry_has_zero_provider_or_write_side_effects(
+        self,
+        fake_db_session: FakeAsyncSession,
+        test_project_id: UUID,
+        test_chapter_id: UUID,
+        test_document_id: UUID,
+        test_version_id: UUID,
+        sample_hash: str,
+        sample_segments: dict[str, str],
+    ) -> None:
+        service, panel_session = await setup_initial_ballots_locked(
+            fake_db_session,
+            project_id=test_project_id,
+            chapter_id=test_chapter_id,
+            document_id=test_document_id,
+            version_id=test_version_id,
+            content_hash=sample_hash,
+            segments=sample_segments,
+        )
+        panel_session.status = ReaderPanelStatus.CANCELLED.value
+        provider = RecordingDiscussionProvider(fake_db_session)
+        before = (
+            len(fake_db_session.storage[ReaderPanelMessage]),
+            len(fake_db_session.storage[ReaderPanelBallot]),
+            len(fake_db_session.storage[WorkflowEvent]),
+        )
+
+        result = await service.run_discussion_and_final_ballots(
+            session_id=panel_session.id,
+            provider=provider,
+        )
+
+        assert result.status == ReaderPanelStatus.CANCELLED.value
+        assert provider.turn_requests == []
+        assert provider.summary_requests == []
+        assert provider.final_requests == []
+        assert before == (
+            len(fake_db_session.storage[ReaderPanelMessage]),
+            len(fake_db_session.storage[ReaderPanelBallot]),
+            len(fake_db_session.storage[WorkflowEvent]),
+        )
+
+    async def test_malformed_final_ballot_remains_missing_and_phase_unlocked(
+        self,
+        fake_db_session: FakeAsyncSession,
+        test_project_id: UUID,
+        test_chapter_id: UUID,
+        test_document_id: UUID,
+        test_version_id: UUID,
+        sample_hash: str,
+        sample_segments: dict[str, str],
+    ) -> None:
+        service, panel_session = await setup_initial_ballots_locked(
+            fake_db_session,
+            project_id=test_project_id,
+            chapter_id=test_chapter_id,
+            document_id=test_document_id,
+            version_id=test_version_id,
+            content_hash=sample_hash,
+            segments=sample_segments,
+        )
+        missing_profile = panel_session.reader_runs[0].reader_profile_id
+        provider = RecordingDiscussionProvider(
+            fake_db_session,
+            malformed_final_profile=missing_profile,
+        )
+
+        result = await service.run_discussion_and_final_ballots(
+            session_id=panel_session.id,
+            provider=provider,
+        )
+
+        final_ballots = [
+            ballot
+            for ballot in fake_db_session.storage[ReaderPanelBallot].values()
+            if ballot.phase == "final"
+        ]
+        assert len(provider.final_requests) == 3  # two attempts for one reader, one success
+        assert len(final_ballots) == 1
+        assert result.status == ReaderPanelStatus.FINAL_BALLOTING.value
+        assert result.final_ballots_locked is False
+        assert panel_session.final_ballots_locked_at is None
+
     async def test_retries_invalid_outputs_once_and_keeps_missing_ballot_unlocked(
         self,
         fake_db_session: FakeAsyncSession,
@@ -1070,3 +1538,496 @@ class TestReaderPanelInitialBallots:
         )
 
         assert result.initial_ballots_locked is True
+
+
+@pytest.mark.anyio
+class TestReaderPanelDiscussionContextValidation:
+    async def test_round_two_only_receives_previous_summary_and_current_round_turns(
+        self,
+        fake_db_session: FakeAsyncSession,
+        test_project_id: UUID,
+        test_chapter_id: UUID,
+        test_document_id: UUID,
+        test_version_id: UUID,
+        sample_hash: str,
+        sample_segments: dict[str, str],
+    ) -> None:
+        service, panel_session = await setup_initial_ballots_locked(
+            fake_db_session,
+            project_id=test_project_id,
+            chapter_id=test_chapter_id,
+            document_id=test_document_id,
+            version_id=test_version_id,
+            content_hash=sample_hash,
+            segments=sample_segments,
+        )
+
+        class TwoRoundProvider(RecordingDiscussionProvider):
+            def summarize_discussion(self, request: Any) -> ModeratorDiscussionSummaryOutput:
+                self.summary_requests.append(request)
+                return ModeratorDiscussionSummaryOutput(
+                    round_summary=f"Bounded summary round {request.round_number}.",
+                    remaining_disagreements=["One disagreement remains."],
+                    suggested_focus="Review the causal beat.",
+                    is_consensus_reached=request.round_number == 2,
+                )
+
+        provider = TwoRoundProvider(fake_db_session)
+        result = await service.run_discussion_and_final_ballots(
+            session_id=panel_session.id,
+            provider=provider,
+        )
+
+        assert result.final_ballots_locked is True
+        round_two = [request for request in provider.turn_requests if request.round_number == 2]
+        assert len(round_two) == 2
+        assert [message["speaker_type"] for message in round_two[0].prior_messages] == ["moderator"]
+        assert [message["speaker_type"] for message in round_two[1].prior_messages] == [
+            "moderator",
+            "reader",
+        ]
+        assert all(
+            message["round_number"] in {1, 2}
+            for request in round_two
+            for message in request.prior_messages
+        )
+        assert all(
+            "reader_run_id" not in message and "reader_profile_id" not in message
+            for request in round_two
+            for message in request.prior_messages
+        )
+
+    async def test_explicit_unknown_references_and_empty_evidence_are_repaired(
+        self,
+        fake_db_session: FakeAsyncSession,
+        test_project_id: UUID,
+        test_chapter_id: UUID,
+        test_document_id: UUID,
+        test_version_id: UUID,
+        sample_hash: str,
+        sample_segments: dict[str, str],
+    ) -> None:
+        service, panel_session = await setup_initial_ballots_locked(
+            fake_db_session,
+            project_id=test_project_id,
+            chapter_id=test_chapter_id,
+            document_id=test_document_id,
+            version_id=test_version_id,
+            content_hash=sample_hash,
+            segments=sample_segments,
+        )
+        foreign_uuid = str(uuid4())
+
+        class InvalidReferenceProvider(RecordingDiscussionProvider):
+            def __init__(self, db: FakeAsyncSession) -> None:
+                super().__init__(db)
+                self.turn_attempts = 0
+                self.summary_attempts = 0
+
+            def generate_discussion_turn(self, request: Any) -> ReaderDiscussionTurnOutput:
+                self.turn_requests.append(request)
+                self.turn_attempts += 1
+                if self.turn_attempts == 1:
+                    return ReaderDiscussionTurnOutput(
+                        stance="support",
+                        claim="See [S999] and ISSUE-999.",
+                        evidence=[],
+                        novelty="new_evidence",
+                    )
+                return super().generate_discussion_turn(request)
+
+            def summarize_discussion(self, request: Any) -> ModeratorDiscussionSummaryOutput:
+                self.summary_requests.append(request)
+                self.summary_attempts += 1
+                if self.summary_attempts == 1:
+                    return ModeratorDiscussionSummaryOutput(
+                        round_summary=f"Unknown ISSUE-999 reader {foreign_uuid}.",
+                        remaining_disagreements=["See S999."],
+                        suggested_focus="ROUND-99",
+                        is_consensus_reached=True,
+                    )
+                return super().summarize_discussion(request)
+
+        provider = InvalidReferenceProvider(fake_db_session)
+        result = await service.run_discussion_and_final_ballots(
+            session_id=panel_session.id,
+            provider=provider,
+        )
+
+        assert result.final_ballots_locked is True
+        assert provider.turn_attempts >= 2
+        assert provider.summary_attempts == 2
+        persisted_text = " ".join(
+            message.claim for message in fake_db_session.storage[ReaderPanelMessage].values()
+        )
+        assert "S999" not in persisted_text
+        assert "ISSUE-999" not in persisted_text
+        assert foreign_uuid not in persisted_text
+
+
+@pytest.mark.anyio
+class TestReaderPanelDiscussionRemediation:
+    async def test_invalid_initial_snapshot_fails_before_any_mutation(
+        self,
+        fake_db_session: FakeAsyncSession,
+        test_project_id: UUID,
+        test_chapter_id: UUID,
+        test_document_id: UUID,
+        test_version_id: UUID,
+        sample_hash: str,
+        sample_segments: dict[str, str],
+    ) -> None:
+        service, panel_session = await setup_initial_ballots_locked(
+            fake_db_session,
+            project_id=test_project_id,
+            chapter_id=test_chapter_id,
+            document_id=test_document_id,
+            version_id=test_version_id,
+            content_hash=sample_hash,
+            segments=sample_segments,
+        )
+        initial = next(
+            ballot
+            for ballot in fake_db_session.storage[ReaderPanelBallot].values()
+            if ballot.phase == "initial"
+        )
+        initial.evidence = []
+        provider = RecordingDiscussionProvider(fake_db_session)
+        before = (
+            panel_session.status,
+            len(fake_db_session.storage[WorkflowEvent]),
+            len(fake_db_session.storage[ReaderPanelMessage]),
+            len(fake_db_session.storage[ReaderPanelBallot]),
+        )
+
+        with pytest.raises(ReaderPanelInvalidStateError):
+            await service.run_discussion_and_final_ballots(
+                session_id=panel_session.id,
+                provider=provider,
+            )
+
+        assert provider.turn_requests == []
+        assert provider.summary_requests == []
+        assert provider.final_requests == []
+        assert before == (
+            panel_session.status,
+            len(fake_db_session.storage[WorkflowEvent]),
+            len(fake_db_session.storage[ReaderPanelMessage]),
+            len(fake_db_session.storage[ReaderPanelBallot]),
+        )
+
+    async def test_version_bound_initial_evidence_outside_issue_remains_valid(
+        self,
+        fake_db_session: FakeAsyncSession,
+        test_project_id: UUID,
+        test_chapter_id: UUID,
+        test_document_id: UUID,
+        test_version_id: UUID,
+        sample_hash: str,
+        sample_segments: dict[str, str],
+    ) -> None:
+        service, panel_session = await setup_initial_ballots_locked(
+            fake_db_session,
+            project_id=test_project_id,
+            chapter_id=test_chapter_id,
+            document_id=test_document_id,
+            version_id=test_version_id,
+            content_hash=sample_hash,
+            segments=sample_segments,
+        )
+        initial = next(
+            ballot
+            for ballot in fake_db_session.storage[ReaderPanelBallot].values()
+            if ballot.phase == "initial"
+        )
+        initial.evidence = [{"segment_ids": ["S002"], "note": "Version-bound support."}]
+        profile = next(
+            run.reader_profile_id
+            for run in panel_session.reader_runs
+            if run.id == initial.reader_run_id
+        )
+        provider = RecordingDiscussionProvider(fake_db_session)
+
+        result = await service.run_discussion_and_final_ballots(
+            session_id=panel_session.id,
+            provider=provider,
+        )
+
+        assert result.final_ballots_locked is True
+        request = next(item for item in provider.turn_requests if item.reader_profile_id == profile)
+        assert request.prior_ballot["evidence"] == []
+
+    async def test_zero_round_limit_skips_discussion_but_collects_all_finals(
+        self,
+        fake_db_session: FakeAsyncSession,
+        test_project_id: UUID,
+        test_chapter_id: UUID,
+        test_document_id: UUID,
+        test_version_id: UUID,
+        sample_hash: str,
+        sample_segments: dict[str, str],
+    ) -> None:
+        service, panel_session = await setup_initial_ballots_locked(
+            fake_db_session,
+            project_id=test_project_id,
+            chapter_id=test_chapter_id,
+            document_id=test_document_id,
+            version_id=test_version_id,
+            content_hash=sample_hash,
+            segments=sample_segments,
+        )
+        panel_session.config_snapshot["max_rounds_per_issue"] = 0
+        provider = RecordingDiscussionProvider(fake_db_session)
+
+        result = await service.run_discussion_and_final_ballots(
+            session_id=panel_session.id,
+            provider=provider,
+        )
+
+        assert result.final_ballots_locked is True
+        assert provider.turn_requests == []
+        assert provider.summary_requests == []
+        assert len(provider.final_requests) == 2
+        assert len(fake_db_session.storage[ReaderPanelMessage]) == 0
+        assert {issue.discussion_status for issue in panel_session.issues} == {"skipped"}
+
+    async def test_cjk_request_exhausts_conservative_input_budget_before_provider(
+        self,
+        fake_db_session: FakeAsyncSession,
+        test_project_id: UUID,
+        test_chapter_id: UUID,
+        test_document_id: UUID,
+        test_version_id: UUID,
+        sample_hash: str,
+        sample_segments: dict[str, str],
+    ) -> None:
+        service, panel_session = await setup_initial_ballots_locked(
+            fake_db_session,
+            project_id=test_project_id,
+            chapter_id=test_chapter_id,
+            document_id=test_document_id,
+            version_id=test_version_id,
+            content_hash=sample_hash,
+            segments=sample_segments,
+        )
+        version = await fake_db_session.get(DocumentVersion, panel_session.document_version_id)
+        assert version is not None
+        version.metadata_["segments"]["S001"] = "界" * 600
+        panel_session.config_snapshot["max_input_tokens_per_call"] = 1_000
+        provider = RecordingDiscussionProvider(fake_db_session)
+
+        await service.run_discussion_and_final_ballots(
+            session_id=panel_session.id,
+            provider=provider,
+        )
+
+        assert provider.turn_requests == []
+        assert provider.summary_requests == []
+        assert provider.final_requests == []
+
+    async def test_bracketed_custom_segment_reference_is_repaired(
+        self,
+        fake_db_session: FakeAsyncSession,
+        test_project_id: UUID,
+        test_chapter_id: UUID,
+        test_document_id: UUID,
+        test_version_id: UUID,
+        sample_hash: str,
+        sample_segments: dict[str, str],
+    ) -> None:
+        service, panel_session = await setup_initial_ballots_locked(
+            fake_db_session,
+            project_id=test_project_id,
+            chapter_id=test_chapter_id,
+            document_id=test_document_id,
+            version_id=test_version_id,
+            content_hash=sample_hash,
+            segments=sample_segments,
+        )
+        version = await fake_db_session.get(DocumentVersion, panel_session.document_version_id)
+        assert version is not None
+        version.metadata_["segments"] = {"intro_01": "A bound introduction."}
+        issue = panel_session.issues[0]
+        issue.evidence = [{"segment_ids": ["intro_01"], "note": "Bound."}]
+        for ballot in panel_session.ballots:
+            ballot.evidence = [{"segment_ids": ["intro_01"], "note": "Bound."}]
+
+        class CustomSegmentProvider(RecordingDiscussionProvider):
+            def __init__(self, db: FakeAsyncSession) -> None:
+                super().__init__(db)
+                self.attempts = 0
+
+            def generate_discussion_turn(self, request: Any) -> ReaderDiscussionTurnOutput:
+                self.turn_requests.append(request)
+                self.attempts += 1
+                if self.attempts == 1:
+                    return ReaderDiscussionTurnOutput(
+                        stance="support",
+                        claim="Compare [other_99].",
+                        evidence=[{"segment_ids": ["intro_01"], "note": "Bound."}],
+                    )
+                return ReaderDiscussionTurnOutput(
+                    stance="support",
+                    claim="The bound introduction needs a causal beat.",
+                    evidence=[{"segment_ids": ["intro_01"], "note": "Bound."}],
+                )
+
+        provider = CustomSegmentProvider(fake_db_session)
+        await service.run_discussion_and_final_ballots(
+            session_id=panel_session.id,
+            provider=provider,
+        )
+
+        assert provider.attempts >= 2
+        assert all(
+            "other_99" not in message.claim
+            for message in fake_db_session.storage[ReaderPanelMessage].values()
+        )
+
+    @pytest.mark.parametrize("identity_kind", ["profile", "embedded_uuid"])
+    async def test_reader_output_cannot_disclose_own_identity(
+        self,
+        identity_kind: str,
+        fake_db_session: FakeAsyncSession,
+        test_project_id: UUID,
+        test_chapter_id: UUID,
+        test_document_id: UUID,
+        test_version_id: UUID,
+        sample_hash: str,
+        sample_segments: dict[str, str],
+    ) -> None:
+        service, panel_session = await setup_initial_ballots_locked(
+            fake_db_session,
+            project_id=test_project_id,
+            chapter_id=test_chapter_id,
+            document_id=test_document_id,
+            version_id=test_version_id,
+            content_hash=sample_hash,
+            segments=sample_segments,
+        )
+
+        class OwnIdentityProvider(RecordingDiscussionProvider):
+            def __init__(self, db: FakeAsyncSession) -> None:
+                super().__init__(db)
+                self.rejected_text: str | None = None
+
+            def generate_discussion_turn(self, request: Any) -> ReaderDiscussionTurnOutput:
+                self.turn_requests.append(request)
+                matching_run = next(
+                    run
+                    for run in panel_session.reader_runs
+                    if run.reader_profile_id == request.reader_profile_id
+                )
+                if self.rejected_text is None:
+                    self.rejected_text = (
+                        request.reader_profile_id
+                        if identity_kind == "profile"
+                        else f"reader_{matching_run.id}"
+                    )
+                    return ReaderDiscussionTurnOutput(
+                        stance="support",
+                        claim=f"Identity {self.rejected_text} supports this.",
+                        evidence=[{"segment_ids": ["S001"], "note": "Bound."}],
+                    )
+                return super().generate_discussion_turn(request)
+
+        provider = OwnIdentityProvider(fake_db_session)
+        await service.run_discussion_and_final_ballots(
+            session_id=panel_session.id,
+            provider=provider,
+        )
+
+        assert len(provider.turn_requests) >= 2
+        assert provider.rejected_text is not None
+        persisted = " ".join(
+            message.claim for message in fake_db_session.storage[ReaderPanelMessage].values()
+        )
+        assert provider.rejected_text not in persisted
+        assert all(
+            provider.rejected_text not in str(request.prior_messages)
+            for request in provider.turn_requests[1:]
+        )
+
+    async def test_concurrent_close_discards_stale_moderator_summary(
+        self,
+        fake_db_session: FakeAsyncSession,
+        test_project_id: UUID,
+        test_chapter_id: UUID,
+        test_document_id: UUID,
+        test_version_id: UUID,
+        sample_hash: str,
+        sample_segments: dict[str, str],
+    ) -> None:
+        service, panel_session = await setup_initial_ballots_locked(
+            fake_db_session,
+            project_id=test_project_id,
+            chapter_id=test_chapter_id,
+            document_id=test_document_id,
+            version_id=test_version_id,
+            content_hash=sample_hash,
+            segments=sample_segments,
+        )
+
+        class ConcurrentCloseProvider(RecordingDiscussionProvider):
+            def summarize_discussion(self, request: Any) -> ModeratorDiscussionSummaryOutput:
+                self.summary_requests.append(request)
+                panel_session.issues[0].discussion_status = "closed"
+                return super().summarize_discussion(request)
+
+        provider = ConcurrentCloseProvider(fake_db_session)
+        await service.run_discussion_and_final_ballots(
+            session_id=panel_session.id,
+            provider=provider,
+        )
+
+        assert not any(
+            message.speaker_type == "moderator"
+            for message in fake_db_session.storage[ReaderPanelMessage].values()
+        )
+        assert not any(
+            event.event_type == "reader_panel.discussion_round_completed"
+            for event in fake_db_session.storage[WorkflowEvent].values()
+        )
+
+    async def test_stale_reader_run_discards_turn_and_final_outputs(
+        self,
+        fake_db_session: FakeAsyncSession,
+        test_project_id: UUID,
+        test_chapter_id: UUID,
+        test_document_id: UUID,
+        test_version_id: UUID,
+        sample_hash: str,
+        sample_segments: dict[str, str],
+    ) -> None:
+        service, panel_session = await setup_initial_ballots_locked(
+            fake_db_session,
+            project_id=test_project_id,
+            chapter_id=test_chapter_id,
+            document_id=test_document_id,
+            version_id=test_version_id,
+            content_hash=sample_hash,
+            segments=sample_segments,
+        )
+        stale_run = panel_session.reader_runs[0]
+
+        class StaleRunProvider(RecordingDiscussionProvider):
+            def generate_discussion_turn(self, request: Any) -> ReaderDiscussionTurnOutput:
+                output = super().generate_discussion_turn(request)
+                if request.reader_profile_id == stale_run.reader_profile_id:
+                    stale_run.status = "failed"
+                return output
+
+        provider = StaleRunProvider(fake_db_session)
+        await service.run_discussion_and_final_ballots(
+            session_id=panel_session.id,
+            provider=provider,
+        )
+
+        assert not any(
+            message.reader_run_id == stale_run.id
+            for message in fake_db_session.storage[ReaderPanelMessage].values()
+        )
+        assert not any(
+            ballot.reader_run_id == stale_run.id and ballot.phase == "final"
+            for ballot in fake_db_session.storage[ReaderPanelBallot].values()
+        )
