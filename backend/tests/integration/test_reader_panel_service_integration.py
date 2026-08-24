@@ -8,17 +8,61 @@ import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.agents.reader_panel_contracts import (
+    ExtractedIssueItem,
+    ModeratorIssueExtractionOutput,
+    ReaderBallotOutput,
+)
 from app.agents.reader_panel_fakes import (
     DeterministicReaderPanelProvider,
     ReaderPanelFakeScenario,
 )
 from app.models.core import Chapter, Document, DocumentVersion, Project
-from app.models.reader_panel import ReaderInitialReport, ReaderPanelSession
+from app.models.reader_panel import (
+    ReaderInitialReport,
+    ReaderPanelBallot,
+    ReaderPanelIssue,
+    ReaderPanelSession,
+)
 from app.services.reader_panel_service import (
     ReaderPanelNotFoundError,
     ReaderPanelService,
 )
 from app.workflows.reader_panel import PanelMode, ReaderPanelStatus
+
+
+class PostgreSQLBallotProvider:
+    def __init__(self) -> None:
+        self.extraction_calls = 0
+        self.ballot_calls = 0
+
+    def extract_issues(self, request) -> ModeratorIssueExtractionOutput:
+        self.extraction_calls += 1
+        source_profile = next(iter(request.reader_initial_reports.values()))["reader_profile_id"]
+        return ModeratorIssueExtractionOutput(
+            issues=[
+                ExtractedIssueItem(
+                    issue_number=7,
+                    title="Abrupt introduction",
+                    category="pacing",
+                    symptom="The cauldron appears before its importance is established.",
+                    root_cause_hypotheses=["Setup is compressed"],
+                    evidence=[{"segment_ids": ["S002"], "note": "Cauldron introduction."}],
+                    source_reader_ids=[source_profile],
+                )
+            ]
+        )
+
+    def generate_blind_ballot(self, request) -> ReaderBallotOutput:
+        self.ballot_calls += 1
+        return ReaderBallotOutput(
+            issue_number=request.issue.issue_number,
+            severity="minor",
+            suggested_action="clarify",
+            confidence="high",
+            evidence=[{"segment_ids": ["S002"], "note": "Bound segment."}],
+            reason="A short setup would orient the reader.",
+        )
 
 
 @pytest.mark.integration
@@ -133,18 +177,83 @@ class TestReaderPanelServiceIntegration:
 
         # Verify DB reports
         reports = (
-            await async_session.execute(
-                select(ReaderInitialReport).where(
-                    ReaderInitialReport.session_id == init_result.session_id
+            (
+                await async_session.execute(
+                    select(ReaderInitialReport).where(
+                        ReaderInitialReport.session_id == init_result.session_id
+                    )
                 )
             )
-        ).scalars().all()
+            .scalars()
+            .all()
+        )
         assert len(reports) == 4
         for r in reports:
             assert r.continue_reading == "yes"
             assert r.confidence == "high"
             assert r.locked is True
             assert r.locked_at is not None
+
+        # 4. Extract once, create one blind initial ballot per eligible reader, and lock.
+        ballot_provider = PostgreSQLBallotProvider()
+        ballot_result = await service.collect_initial_ballots(
+            session_id=init_result.session_id,
+            provider=ballot_provider,
+        )
+        assert ballot_result.issue_count == 1
+        assert ballot_result.initial_ballot_count == 4
+        assert ballot_result.initial_ballots_locked is True
+        assert ballot_result.status == ReaderPanelStatus.INITIAL_BALLOTS_LOCKED.value
+
+        issues = (
+            (
+                await async_session.execute(
+                    select(ReaderPanelIssue).where(
+                        ReaderPanelIssue.session_id == init_result.session_id
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        ballots = (
+            (
+                await async_session.execute(
+                    select(ReaderPanelBallot).where(
+                        ReaderPanelBallot.session_id == init_result.session_id,
+                        ReaderPanelBallot.phase == "initial",
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        assert len(issues) == 1
+        assert len(ballots) == 4
+        assert len({(b.reader_run_id, b.issue_id, b.phase) for b in ballots}) == 4
+        assert all(b.session_id == init_result.session_id for b in ballots)
+
+        # PostgreSQL unique constraints and service replay both prevent duplicates.
+        replay_result = await service.collect_initial_ballots(
+            session_id=init_result.session_id,
+            provider=ballot_provider,
+        )
+        assert replay_result.initial_ballot_count == 4
+        assert ballot_provider.extraction_calls == 1
+        assert ballot_provider.ballot_calls == 4
+        replay_ballots = (
+            (
+                await async_session.execute(
+                    select(ReaderPanelBallot).where(
+                        ReaderPanelBallot.session_id == init_result.session_id,
+                        ReaderPanelBallot.phase == "initial",
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        assert len(replay_ballots) == 4
 
     async def test_cross_project_rejection_postgresql(
         self,
