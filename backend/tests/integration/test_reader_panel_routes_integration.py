@@ -15,7 +15,6 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.api.deps import get_db_session, get_reader_panel_service
-from app.api.schemas_reader_panel import ReaderPanelDetailResponse
 from app.main import create_app
 from app.models.core import Chapter, Document, DocumentVersion, Project, ReviewReport, WorkflowRun
 from app.models.reader_panel import ReaderPanelSession
@@ -231,15 +230,6 @@ async def test_reader_panel_http_stale_terminal_and_safe_editorial_projection(
     await async_session.flush()
     panel.review_report_id = report.id
     await async_session.commit()
-
-    diagnostic_factory = async_sessionmaker(async_session.bind, expire_on_commit=False)
-    async with diagnostic_factory() as diagnostic_session:
-        projection = await ReaderPanelService(diagnostic_session).get_scoped_session(
-            project.id, chapter.id, panel.id
-        )
-        validated = ReaderPanelDetailResponse.model_validate(projection)
-        assert validated.review_report is not None
-        assert validated.review_report.summary == "One pacing experiment is recommended."
 
     response = await reader_panel_client.get(f"{base}/{panel.id}")
     assert response.status_code == 200, response.text

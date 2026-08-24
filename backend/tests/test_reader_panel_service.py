@@ -86,6 +86,7 @@ class FakeAsyncSession:
         self.transaction_active = False
         self.get_options: list[tuple[type, dict[str, Any]]] = []
         self.execute_options: list[tuple[str, dict[str, Any]]] = []
+        self.refresh_calls: list[tuple[Any, list[str] | None]] = []
 
     async def get(self, model_cls: type, pk: Any, **kwargs: Any) -> Any | None:
         self.transaction_active = True
@@ -100,6 +101,10 @@ class FakeAsyncSession:
 
     async def flush(self) -> None:
         self.transaction_active = True
+
+    async def refresh(self, obj: Any, attribute_names: list[str] | None = None) -> None:
+        self.transaction_active = True
+        self.refresh_calls.append((obj, attribute_names))
 
     async def commit(self) -> None:
         self.transaction_active = False
@@ -677,6 +682,11 @@ class TestReaderPanelServiceApiProjection:
             session_id=panel.id,
         )
 
+        assert fake_db_session.refresh_calls[-1] == (
+            panel,
+            ["created_at", "updated_at", "completed_at"],
+        )
+
         assert default["review_report"] == {
             "summary": "Editorial handoff.",
             "blocking_issues": [{"issue_number": 1, "title": "Opening clarity"}],
@@ -794,6 +804,10 @@ class TestReaderPanelServiceApiProjection:
         )
 
         assert [item["session_id"] for item in page] == [second.session_id]
+        assert fake_db_session.refresh_calls[-1] == (
+            fake_db_session.storage[ReaderPanelSession][second.session_id],
+            ["created_at", "updated_at", "completed_at"],
+        )
         session_queries = [
             statement
             for statement, _ in fake_db_session.execute_options

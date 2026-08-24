@@ -1386,6 +1386,8 @@ class ReaderPanelService:
         panel = await self._scoped_panel(
             project_id=project_id, chapter_id=chapter_id, session_id=session_id
         )
+        await self._db.flush()
+        await self._db.refresh(panel, attribute_names=["created_at", "updated_at", "completed_at"])
         result = await self._api_projection(
             panel,
             include_initial_reports=include_initial_reports,
@@ -1447,6 +1449,11 @@ class ReaderPanelService:
         page = panels[:limit]
         for panel in page:
             await self._refresh_stale_flag(panel)
+        await self._db.flush()
+        for panel in page:
+            await self._db.refresh(
+                panel, attribute_names=["created_at", "updated_at", "completed_at"]
+            )
         result = [
             await self._api_projection(
                 panel,
