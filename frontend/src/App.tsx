@@ -29,6 +29,7 @@ import ConceptGate from './ConceptGate'
 import ProjectCreationForm from './ProjectCreationForm'
 import ProjectMaintenancePage from './ProjectMaintenancePage'
 import { ChapterProductionV2Workbench } from './ChapterProductionV2Workbench'
+import { ReaderPanelWorkbench } from './ReaderPanelWorkbench'
 
 const requestError = 'This workspace could not be loaded. Try again.'
 
@@ -510,6 +511,29 @@ function ProjectCreationPage() {
   )
 }
 
+function ReaderPanelPage() {
+  const {
+    projectId = '', chapterId = '', documentId = '', documentVersionId = '', sessionId,
+  } = useParams()
+  const navigate = useNavigate()
+  const basePath = `/projects/${encodeURIComponent(projectId)}/chapters/${encodeURIComponent(chapterId)}/documents/${encodeURIComponent(documentId)}/versions/${encodeURIComponent(documentVersionId)}/reader-panel`
+
+  return <section className="page reader-panel-page" aria-labelledby="route-title">
+    <Link className="back-link" to={`/projects/${encodeURIComponent(projectId)}/chapters/${encodeURIComponent(chapterId)}`}>Back to chapter</Link>
+    <p className="eyebrow">Reader diagnostics</p>
+    <h1 id="route-title">Reader Panel</h1>
+    <ReaderPanelWorkbench
+      key={`${projectId}:${chapterId}:${documentId}:${documentVersionId}:${sessionId ?? 'start'}`}
+      projectId={projectId}
+      chapterId={chapterId}
+      documentId={documentId}
+      documentVersionId={documentVersionId}
+      sessionId={sessionId}
+      onSessionStarted={(startedSessionId) => navigate(`${basePath}/${encodeURIComponent(startedSessionId)}`, { replace: true })}
+    />
+  </section>
+}
+
 function NotFound() {
   return <section className="page" aria-labelledby="route-title"><h1 id="route-title">Page not found</h1><p className="muted">The requested workspace does not exist.</p><Link to="/">Return to projects</Link></section>
 }
@@ -520,7 +544,7 @@ export default function App() {
       <header className="topbar" aria-label="GuraNovel workbench"><Link className="wordmark" to="/">GuraNovel</Link><span className="workspace-name">Creative workbench</span></header>
       <div className="workspace">
         <nav aria-label="Workbench navigation"><Link to="/">Projects</Link><span>Approvals</span><span>Documents</span></nav>
-        <main><Routes><Route path="/" element={<ProjectListPage />} /><Route path="/projects/:projectId" element={<ProjectWorkspace />} /><Route path="/projects/:projectId/chapters/:chapterId" element={<ChapterWorkspace />} /><Route path="/projects/:projectId/creation/start" element={<ProjectCreationPage />} /><Route path="/projects/:projectId/creation/:workflowRunId/gate" element={<ConceptGatePage />} /><Route path="/projects/:projectId/maintenance" element={<ProjectMaintenancePage mode="history" />} /><Route path="/projects/:projectId/maintenance/start" element={<ProjectMaintenancePage mode="start" />} /><Route path="/projects/:projectId/maintenance/:workflowRunId/status" element={<ProjectMaintenancePage mode="handoff" />} /><Route path="/projects/:projectId/maintenance/:workflowRunId" element={<ProjectMaintenancePage mode="gate" />} /><Route path="*" element={<NotFound />} /></Routes></main>
+        <main><Routes><Route path="/" element={<ProjectListPage />} /><Route path="/projects/:projectId" element={<ProjectWorkspace />} /><Route path="/projects/:projectId/chapters/:chapterId" element={<ChapterWorkspace />} /><Route path="/projects/:projectId/chapters/:chapterId/documents/:documentId/versions/:documentVersionId/reader-panel" element={<ReaderPanelPage />} /><Route path="/projects/:projectId/chapters/:chapterId/documents/:documentId/versions/:documentVersionId/reader-panel/:sessionId" element={<ReaderPanelPage />} /><Route path="/projects/:projectId/creation/start" element={<ProjectCreationPage />} /><Route path="/projects/:projectId/creation/:workflowRunId/gate" element={<ConceptGatePage />} /><Route path="/projects/:projectId/maintenance" element={<ProjectMaintenancePage mode="history" />} /><Route path="/projects/:projectId/maintenance/start" element={<ProjectMaintenancePage mode="start" />} /><Route path="/projects/:projectId/maintenance/:workflowRunId/status" element={<ProjectMaintenancePage mode="handoff" />} /><Route path="/projects/:projectId/maintenance/:workflowRunId" element={<ProjectMaintenancePage mode="gate" />} /><Route path="*" element={<NotFound />} /></Routes></main>
       </div>
     </div>
   )

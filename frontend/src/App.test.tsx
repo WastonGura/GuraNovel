@@ -30,6 +30,22 @@ vi.mock('./api/client', () => ({
   resolveChapterProductionAction: vi.fn(),
 }))
 
+vi.mock('./ReaderPanelWorkbench', () => ({
+  ReaderPanelWorkbench: ({
+    projectId, chapterId, documentId, documentVersionId, sessionId, onSessionStarted,
+  }: {
+    projectId: string
+    chapterId: string
+    documentId: string
+    documentVersionId: string
+    sessionId?: string
+    onSessionStarted?: (sessionId: string) => void
+  }) => <section aria-label="Reader Panel test page">
+    <p>{[projectId, chapterId, documentId, documentVersionId, sessionId ?? 'start'].join('|')}</p>
+    {!sessionId && <button type="button" onClick={() => onSessionStarted?.('server-session-id')}>Mock start panel</button>}
+  </section>,
+}))
+
 import * as api from './api/client'
 
 const mockedApi = vi.mocked(api)
@@ -115,6 +131,32 @@ describe('application shell', () => {
     expect(screen.getByRole('banner', { name: 'GuraNovel workbench' })).toBeInTheDocument()
     expect(screen.getByRole('navigation', { name: 'Workbench navigation' })).toBeInTheDocument()
     expect(screen.getByRole('main')).toBeInTheDocument()
+  })
+})
+
+describe('reader panel routes', () => {
+  const startPath = '/projects/project-1/chapters/chapter-1/documents/document-1/versions/version-1/reader-panel'
+
+  it('restores the exact document-version identity from a deep link and returns to the chapter', () => {
+    renderApp(startPath)
+    expect(screen.getByRole('region', { name: 'Reader Panel test page' })).toHaveTextContent(
+      'project-1|chapter-1|document-1|version-1|start',
+    )
+    expect(screen.getByRole('link', { name: 'Back to chapter' })).toHaveAttribute(
+      'href', '/projects/project-1/chapters/chapter-1',
+    )
+  })
+
+  it('updates the URL from the server session ID and restores a session deep link on refresh', async () => {
+    const view = renderApp(startPath)
+    fireEvent.click(screen.getByRole('button', { name: 'Mock start panel' }))
+    await waitFor(() => expect(screen.getByTestId('location')).toHaveTextContent(`${startPath}/server-session-id`))
+
+    view.unmount()
+    renderApp(`${startPath}/session-from-url`)
+    expect(screen.getByRole('region', { name: 'Reader Panel test page' })).toHaveTextContent(
+      'project-1|chapter-1|document-1|version-1|session-from-url',
+    )
   })
 })
 

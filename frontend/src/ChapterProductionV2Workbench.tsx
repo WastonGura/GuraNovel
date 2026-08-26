@@ -875,14 +875,20 @@ export function ChapterProductionV2Workbench({
               )}
             </dl>
           </div>
-          <button
-            type="button"
-            onClick={handleFinalize}
-            disabled={submitting}
-            aria-busy={submitting}
-          >
-            {submitting ? 'Finalizing chapter…' : 'Finalize chapter'}
-          </button>
+          <div className="approval-actions">
+            {document_id && document_version_id && <a
+              className="reader-panel-entry"
+              href={`/projects/${encodeURIComponent(projectId)}/chapters/${encodeURIComponent(chapterId)}/documents/${encodeURIComponent(document_id)}/versions/${encodeURIComponent(document_version_id)}/reader-panel`}
+            >Open Reader Panel</a>}
+            <button
+              type="button"
+              onClick={handleFinalize}
+              disabled={submitting}
+              aria-busy={submitting}
+            >
+              {submitting ? 'Finalizing chapter…' : 'Finalize chapter'}
+            </button>
+          </div>
         </section>
       )}
 
