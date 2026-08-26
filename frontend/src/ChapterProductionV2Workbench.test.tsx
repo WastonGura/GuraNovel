@@ -391,6 +391,11 @@ describe('ChapterProductionV2Workbench', () => {
 
     expect(await screen.findByRole('region', { name: 'Revision ready for finalization' })).toBeInTheDocument()
 
+    expect(screen.getByRole('link', { name: 'Open Reader Panel' })).toHaveAttribute(
+      'href',
+      `/projects/${ids.project}/chapters/${ids.chapter}/documents/${ids.document}/versions/${ids.version}/reader-panel`,
+    )
+
     const finalizeBtn = screen.getByRole('button', { name: 'Finalize chapter' })
     fireEvent.click(finalizeBtn)
 
@@ -420,6 +425,7 @@ describe('ChapterProductionV2Workbench', () => {
     expect(await screen.findByRole('region', { name: 'Chapter production completed' })).toBeInTheDocument()
     expect(screen.getByText(ids.finalDoc)).toBeInTheDocument()
     expect(screen.getAllByText(ids.finalVer).length).toBeGreaterThan(0)
+    expect(screen.queryByRole('link', { name: 'Open Reader Panel' })).not.toBeInTheDocument()
   })
 
   it('handles FAILED state with reconciliation and resume buttons', async () => {
