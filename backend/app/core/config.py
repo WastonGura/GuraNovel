@@ -38,6 +38,7 @@ class Settings(BaseSettings):
     database_url: str = "postgresql+asyncpg://postgres:postgres@localhost:5432/guranovel"
     workspace_base_dir: Path = Path.home() / ".local" / "share" / "guranovel" / "workspaces"
     chapter_generation_provider: Literal["fake", "openai_compatible"] = "fake"
+    reader_panel_mode: Literal["off", "quick", "standard", "panel"] = "off"
     openai_compatible_base_url: str | None = None
     openai_compatible_api_key: SecretStr | None = None
     openai_compatible_model: str | None = None
