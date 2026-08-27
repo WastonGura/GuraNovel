@@ -36,6 +36,7 @@ from app.models.core import (
     WorkflowEvent,
     WorkflowRun,
 )
+from app.models.enums import WorkflowType
 from app.models.reader_panel import (
     ReaderInitialReport,
     ReaderPanelBallot,
@@ -283,7 +284,7 @@ def setup_ready_pair(
         id=uuid4(),
         project_id=project_id,
         chapter_id=chapter_id,
-        workflow_type="chapter_production_v2",
+        workflow_type=WorkflowType.CHAPTER_PRODUCTION.value,
         status="REVISION_READY",
         current_node="REVISION_READY",
         awaiting_user=False,
@@ -631,7 +632,7 @@ class TestReaderPanelServiceInitialization:
                 mode=PanelMode.PANEL,
             )
 
-    async def test_revision_ready_requires_chapter_production_v2_run(
+    async def test_revision_ready_rejects_project_maintenance_run(
         self,
         fake_db_session: FakeAsyncSession,
         test_project_id: UUID,
@@ -650,7 +651,7 @@ class TestReaderPanelServiceInitialization:
             content_hash=sample_hash,
             segments=sample_segments,
         )
-        chapter_run.workflow_type = "reader_panel"
+        chapter_run.workflow_type = WorkflowType.PROJECT_MAINTENANCE.value
 
         with pytest.raises(ReaderPanelInvalidStateError):
             await ReaderPanelService(fake_db_session).initialize_from_revision_ready(  # type: ignore[arg-type]

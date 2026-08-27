@@ -51,6 +51,7 @@ from app.models.core import (
     WorkflowEvent,
     WorkflowRun,
 )
+from app.models.enums import WorkflowType
 from app.models.reader_panel import (
     ReaderInitialReport,
     ReaderPanelBallot,
@@ -878,7 +879,7 @@ class ReaderPanelService:
             panel_mode is PanelMode.OFF
             or project_id is None
             or chapter_id is None
-            or chapter_workflow_run.workflow_type != "chapter_production_v2"
+            or chapter_workflow_run.workflow_type != WorkflowType.CHAPTER_PRODUCTION.value
             or status_value != "REVISION_READY"
             or state.current_node != "REVISION_READY"
             or tuple(state.semantic_ready_key) != key
@@ -903,7 +904,7 @@ class ReaderPanelService:
         )
         if (
             locked_run is None
-            or locked_run.workflow_type != "chapter_production_v2"
+            or locked_run.workflow_type != WorkflowType.CHAPTER_PRODUCTION.value
             or locked_run.project_id != project_id
             or locked_run.chapter_id != chapter_id
             or locked_run.status != "REVISION_READY"
