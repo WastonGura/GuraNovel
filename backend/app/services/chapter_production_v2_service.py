@@ -117,6 +117,7 @@ from app.services.revision_readiness_store import (
     RevisionReadinessStore,
     _ReviewStateReferences,
 )
+from app.services.reader_panel_service import ReaderPanelService, ReaderPanelServiceError
 from app.workflows.chapter_production import (
     ChapterActionBinding,
     ChapterActionDecision,
@@ -128,6 +129,7 @@ from app.workflows.chapter_production import (
     ChapterReviewPolicyBinding,
     ChapterReviewStage,
 )
+from app.workflows.reader_panel import PanelMode
 from app.workspace.hashing import sha256_content
 
 
@@ -281,6 +283,7 @@ class ChapterProductionV2Service:
         lore_agent: LoreChapterFinalAgent | None = None,
         chief_editor_required: bool = True,
         phase_session_source: ChapterPhaseSessionSource | None = None,
+        reader_panel_mode: PanelMode | str = PanelMode.OFF,
     ) -> None:
         if type(chief_editor_required) is not bool:
             raise _invalid() from None
@@ -291,6 +294,11 @@ class ChapterProductionV2Service:
         self.chief_editor_agent = chief_editor_agent
         self.lore_agent = lore_agent
         self.chief_editor_required = chief_editor_required
+        try:
+            self._reader_panel_mode = PanelMode(reader_panel_mode)
+        except (TypeError, ValueError):
+            raise _invalid() from None
+        self._reader_panel = ReaderPanelService(session)
         self._phase_session_source = phase_session_source
         self._phase_sessions = (
             ChapterPhaseSessionLease(phase_session_source)
@@ -387,6 +395,7 @@ class ChapterProductionV2Service:
             lore_agent=self.lore_agent,
             chief_editor_required=self.chief_editor_required,
             phase_session_source=self._phase_session_source,
+            reader_panel_mode=self._reader_panel_mode,
         )
 
     async def resolve_author_action(
@@ -975,13 +984,31 @@ class ChapterProductionV2Service:
         document: Document,
         version: DocumentVersion,
     ) -> ChapterProductionState:
-        return await self._readiness.enter(
+        ready = await self._readiness.enter(
             run=run,
             checkpoint=checkpoint,
             state=state,
             document=document,
             version=version,
         )
+        if self._reader_panel_mode is PanelMode.OFF:
+            return ready
+        matches = [
+            pair
+            for pair in await self._readiness.validated_pairs(run)
+            if pair.state.semantic_ready_key == ready.semantic_ready_key
+        ]
+        if len(matches) != 1:
+            raise ChapterProductionV2ReconciliationError() from None
+        try:
+            await self._reader_panel.initialize_from_revision_ready(
+                chapter_workflow_run=run,
+                ready_pair=matches[0],
+                mode=self._reader_panel_mode,
+            )
+        except ReaderPanelServiceError:
+            raise ChapterProductionV2ReconciliationError() from None
+        return ready
 
     async def _validated_ready_pairs_locked(
         self, run: WorkflowRun

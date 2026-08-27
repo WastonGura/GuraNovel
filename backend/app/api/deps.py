@@ -34,6 +34,7 @@ from app.services.chapter_phase_session_source import ChapterPhaseSessionSource
 from app.services.chapter_production_v2_service import ChapterProductionV2Service
 from app.services.project_maintenance_service import ProjectMaintenanceComposition
 from app.services.reader_panel_service import ReaderPanelService
+from app.workflows.reader_panel import PanelMode
 from app.workspace import ProjectWorkspace
 
 
@@ -115,6 +116,7 @@ class ChapterProductionV2Composition:
         lore_agent: LoreChapterFinalAgent | None = None,
         chief_editor_required: bool = True,
         phase_session_source: ChapterPhaseSessionSource | None = None,
+        reader_panel_mode: PanelMode = PanelMode.OFF,
     ) -> None:
         self.writer_agent = writer_agent
         self.revision_agent = revision_agent
@@ -123,6 +125,7 @@ class ChapterProductionV2Composition:
         self.lore_agent = lore_agent
         self.chief_editor_required = chief_editor_required
         self.phase_session_source = phase_session_source
+        self.reader_panel_mode = reader_panel_mode
 
     def create_service(self, session: AsyncSession) -> ChapterProductionV2Service:
         phase_source = self.phase_session_source
@@ -150,6 +153,7 @@ class ChapterProductionV2Composition:
             lore_agent=self.lore_agent,
             chief_editor_required=self.chief_editor_required,
             phase_session_source=phase_source,
+            reader_panel_mode=self.reader_panel_mode,
         )
 
 
@@ -171,6 +175,7 @@ def get_chapter_production_v2_composition() -> ChapterProductionV2Composition:
         lore_agent=LoreChapterFinalAgent(review_provider),
         chief_editor_required=True,
         phase_session_source=phase_source,
+        reader_panel_mode=PanelMode(settings.reader_panel_mode),
     )
 
 

@@ -1,8 +1,12 @@
+import inspect
+
 import httpx
 import pytest
 from pydantic import ValidationError
 
+import app.api.deps as deps_module
 from app.api.deps import get_chapter_generation_composition
+from app.api.deps import get_chapter_production_v2_composition
 from app.core.config import Settings
 from app.llm import (
     ChapterGenerationProvenance,
@@ -27,6 +31,26 @@ def test_fake_configuration_needs_no_real_provider_values() -> None:
     composition = get_chapter_generation_composition(make_settings())
     assert isinstance(composition.provider, FakeChapterGenerationProvider)
     assert composition.provenance.provider_kind == "fake"
+
+
+@pytest.mark.parametrize("mode", ["off", "quick", "standard", "panel"])
+def test_reader_panel_integration_mode_is_server_owned_and_forwarded(
+    monkeypatch: pytest.MonkeyPatch, mode: str
+) -> None:
+    monkeypatch.setattr(deps_module, "settings", make_settings(reader_panel_mode=mode))
+
+    composition = get_chapter_production_v2_composition()
+
+    assert composition.reader_panel_mode.value == mode
+    assert "configured_settings" not in inspect.signature(
+        get_chapter_production_v2_composition
+    ).parameters
+
+
+def test_reader_panel_integration_defaults_off_and_rejects_unknown_modes() -> None:
+    assert make_settings().reader_panel_mode == "off"
+    with pytest.raises(ValidationError):
+        make_settings(reader_panel_mode="automatic")
 
 
 def test_fake_configuration_ignores_ambient_real_provider_values(

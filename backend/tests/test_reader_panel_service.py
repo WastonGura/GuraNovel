@@ -8,6 +8,7 @@ from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 import hashlib
 from threading import Event
+from types import SimpleNamespace
 from typing import Any
 from uuid import UUID, uuid4
 import pytest
@@ -87,6 +88,7 @@ class FakeAsyncSession:
         self.get_options: list[tuple[type, dict[str, Any]]] = []
         self.execute_options: list[tuple[str, dict[str, Any]]] = []
         self.refresh_calls: list[tuple[Any, list[str] | None]] = []
+        self.commit_calls = 0
 
     async def get(self, model_cls: type, pk: Any, **kwargs: Any) -> Any | None:
         self.transaction_active = True
@@ -107,6 +109,7 @@ class FakeAsyncSession:
         self.refresh_calls.append((obj, attribute_names))
 
     async def commit(self) -> None:
+        self.commit_calls += 1
         self.transaction_active = False
 
     def in_transaction(self) -> bool:
@@ -257,8 +260,489 @@ def setup_test_entities(
     return project, chapter, doc, doc_version
 
 
+def setup_ready_pair(
+    db: FakeAsyncSession,
+    *,
+    project_id: UUID,
+    chapter_id: UUID,
+    document_id: UUID,
+    version_id: UUID,
+    content_hash: str,
+    segments: dict[str, str],
+) -> tuple[WorkflowRun, SimpleNamespace]:
+    setup_test_entities(
+        db,
+        project_id=project_id,
+        chapter_id=chapter_id,
+        document_id=document_id,
+        version_id=version_id,
+        content_hash=content_hash,
+        segments=segments,
+    )
+    chapter_run = WorkflowRun(
+        id=uuid4(),
+        project_id=project_id,
+        chapter_id=chapter_id,
+        workflow_type="chapter_production_v2",
+        status="REVISION_READY",
+        current_node="REVISION_READY",
+        awaiting_user=False,
+    )
+    db.add(chapter_run)
+    ready_state = SimpleNamespace(
+        status="REVISION_READY",
+        current_node="REVISION_READY",
+        semantic_ready_key=(str(chapter_run.id), str(version_id), "chapter-quality-v1"),
+        document_id=str(document_id),
+        document_version_id=str(version_id),
+        content_hash=content_hash,
+        review_policy_version="chapter-quality-v1",
+        chief_editor_required=True,
+        editor_report_id=str(uuid4()),
+        chief_editor_report_id=str(uuid4()),
+        lore_report_id=str(uuid4()),
+    )
+    return chapter_run, SimpleNamespace(
+        state=ready_state,
+        checkpoint=SimpleNamespace(
+            workflow_run_id=chapter_run.id,
+            node_name="REVISION_READY",
+        ),
+        event=SimpleNamespace(node_name="REVISION_READY"),
+    )
+
+
 @pytest.mark.anyio
 class TestReaderPanelServiceInitialization:
+    async def test_revision_ready_initialization_uses_exact_key_without_committing(
+        self,
+        fake_db_session: FakeAsyncSession,
+        test_project_id: UUID,
+        test_chapter_id: UUID,
+        test_document_id: UUID,
+        test_version_id: UUID,
+        sample_hash: str,
+        sample_segments: dict[str, str],
+    ) -> None:
+        chapter_run, pair = setup_ready_pair(
+            fake_db_session,
+            project_id=test_project_id,
+            chapter_id=test_chapter_id,
+            document_id=test_document_id,
+            version_id=test_version_id,
+            content_hash=sample_hash,
+            segments=sample_segments,
+        )
+        ready_key = (str(chapter_run.id), str(test_version_id), "chapter-quality-v1")
+        ready_state = pair.state
+        service = ReaderPanelService(fake_db_session)  # type: ignore[arg-type]
+
+        first = await service.initialize_from_revision_ready(
+            chapter_workflow_run=chapter_run,
+            ready_pair=pair,
+            mode=PanelMode.QUICK,
+        )
+        replay = await service.initialize_from_revision_ready(
+            chapter_workflow_run=chapter_run,
+            ready_pair=pair,
+            mode=PanelMode.PANEL,
+        )
+
+        assert replay.session_id == first.session_id
+        assert replay.mode == PanelMode.QUICK.value
+        assert replay.planned_readers == 2
+        assert fake_db_session.commit_calls == 0
+        sessions = list(fake_db_session.storage[ReaderPanelSession].values())
+        panel_runs = [
+            run
+            for run in fake_db_session.storage[WorkflowRun].values()
+            if run.workflow_type == "reader_panel"
+        ]
+        assert len(sessions) == len(panel_runs) == 1
+        assert "reader_panel_idempotency_key" not in panel_runs[0].metadata_
+        assert panel_runs[0].metadata_["reader_panel_revision_ready_key"] == list(ready_key)
+        assert panel_runs[0].metadata_["reader_panel_revision_ready_binding"] == {
+            "chapter_workflow_run_id": str(chapter_run.id),
+            "project_id": str(test_project_id),
+            "chapter_id": str(test_chapter_id),
+            "document_id": str(test_document_id),
+            "document_version_id": str(test_version_id),
+            "source_hash": sample_hash,
+            "review_policy_version": "chapter-quality-v1",
+            "chief_editor_required": True,
+            "editor_report_id": ready_state.editor_report_id,
+            "chief_editor_report_id": ready_state.chief_editor_report_id,
+            "lore_report_id": ready_state.lore_report_id,
+        }
+
+    @pytest.mark.parametrize(
+        ("mode", "readers", "ballot", "discussion", "rounds", "minimum"),
+        [
+            (PanelMode.QUICK, 2, 3, 2, 1, 2),
+            (PanelMode.STANDARD, 4, 6, 4, 2, 3),
+            (PanelMode.PANEL, 6, 8, 6, 3, 4),
+        ],
+    )
+    async def test_revision_ready_uses_existing_mode_presets(
+        self,
+        fake_db_session: FakeAsyncSession,
+        test_project_id: UUID,
+        test_chapter_id: UUID,
+        test_document_id: UUID,
+        test_version_id: UUID,
+        sample_hash: str,
+        sample_segments: dict[str, str],
+        mode: PanelMode,
+        readers: int,
+        ballot: int,
+        discussion: int,
+        rounds: int,
+        minimum: int,
+    ) -> None:
+        chapter_run, pair = setup_ready_pair(
+            fake_db_session,
+            project_id=test_project_id,
+            chapter_id=test_chapter_id,
+            document_id=test_document_id,
+            version_id=test_version_id,
+            content_hash=sample_hash,
+            segments=sample_segments,
+        )
+
+        result = await ReaderPanelService(fake_db_session).initialize_from_revision_ready(  # type: ignore[arg-type]
+            chapter_workflow_run=chapter_run,
+            ready_pair=pair,
+            mode=mode,
+        )
+
+        panel = fake_db_session.storage[ReaderPanelSession][result.session_id]
+        assert result.planned_readers == readers
+        assert panel.config_snapshot["max_ballot_issues"] == ballot
+        assert panel.config_snapshot["max_discussion_issues"] == discussion
+        assert panel.config_snapshot["max_rounds_per_issue"] == rounds
+        assert panel.config_snapshot["min_valid_readers"] == minimum
+
+    async def test_revision_ready_rejects_stale_duplicate_and_orphan_claims(
+        self,
+        fake_db_session: FakeAsyncSession,
+        test_project_id: UUID,
+        test_chapter_id: UUID,
+        test_document_id: UUID,
+        test_version_id: UUID,
+        sample_hash: str,
+        sample_segments: dict[str, str],
+    ) -> None:
+        chapter_run, pair = setup_ready_pair(
+            fake_db_session,
+            project_id=test_project_id,
+            chapter_id=test_chapter_id,
+            document_id=test_document_id,
+            version_id=test_version_id,
+            content_hash=sample_hash,
+            segments=sample_segments,
+        )
+        service = ReaderPanelService(fake_db_session)  # type: ignore[arg-type]
+        document = fake_db_session.storage[Document][test_document_id]
+        chapter_run.status = "COMPLETED"
+        with pytest.raises(ReaderPanelInvalidStateError):
+            await service.initialize_from_revision_ready(
+                chapter_workflow_run=chapter_run,
+                ready_pair=pair,
+                mode=PanelMode.QUICK,
+            )
+        chapter_run.status = "REVISION_READY"
+        pair.checkpoint.node_name = "LORE_FINAL_REVIEW"
+        with pytest.raises(ReaderPanelInvalidStateError):
+            await service.initialize_from_revision_ready(
+                chapter_workflow_run=chapter_run,
+                ready_pair=pair,
+                mode=PanelMode.QUICK,
+            )
+        pair.checkpoint.node_name = "REVISION_READY"
+        document.current_version_id = uuid4()
+        with pytest.raises(ReaderPanelInvalidStateError):
+            await service.initialize_from_revision_ready(
+                chapter_workflow_run=chapter_run,
+                ready_pair=pair,
+                mode=PanelMode.QUICK,
+            )
+        assert not fake_db_session.storage[ReaderPanelSession]
+
+        document.current_version_id = test_version_id
+        created = await service.initialize_from_revision_ready(
+            chapter_workflow_run=chapter_run,
+            ready_pair=pair,
+            mode=PanelMode.QUICK,
+        )
+        existing_run = fake_db_session.storage[WorkflowRun][created.workflow_run_id]
+        orphan = WorkflowRun(
+            id=uuid4(),
+            project_id=test_project_id,
+            chapter_id=test_chapter_id,
+            workflow_type="reader_panel",
+            status="running",
+            metadata_=dict(existing_run.metadata_),
+        )
+        fake_db_session.add(orphan)
+        with pytest.raises(ReaderPanelInvalidStateError):
+            await service.initialize_from_revision_ready(
+                chapter_workflow_run=chapter_run,
+                ready_pair=pair,
+                mode=PanelMode.QUICK,
+            )
+        assert len(fake_db_session.storage[ReaderPanelSession]) == 1
+
+        existing_run.metadata_.pop("reader_panel_revision_ready_key")
+        with pytest.raises(ReaderPanelInvalidStateError):
+            await service.initialize_from_revision_ready(
+                chapter_workflow_run=chapter_run,
+                ready_pair=pair,
+                mode=PanelMode.QUICK,
+            )
+        orphan.metadata_["reader_panel_revision_ready_binding"] = {
+            **orphan.metadata_["reader_panel_revision_ready_binding"],
+            "source_hash": "0" * 64,
+        }
+        with pytest.raises(ReaderPanelInvalidStateError):
+            await service.initialize_from_revision_ready(
+                chapter_workflow_run=chapter_run,
+                ready_pair=pair,
+                mode=PanelMode.QUICK,
+            )
+
+    async def test_manual_and_revision_ready_sessions_coexist(
+        self,
+        fake_db_session: FakeAsyncSession,
+        test_project_id: UUID,
+        test_chapter_id: UUID,
+        test_document_id: UUID,
+        test_version_id: UUID,
+        sample_hash: str,
+        sample_segments: dict[str, str],
+    ) -> None:
+        chapter_run, pair = setup_ready_pair(
+            fake_db_session,
+            project_id=test_project_id,
+            chapter_id=test_chapter_id,
+            document_id=test_document_id,
+            version_id=test_version_id,
+            content_hash=sample_hash,
+            segments=sample_segments,
+        )
+        service = ReaderPanelService(fake_db_session)  # type: ignore[arg-type]
+        manual = await service.initialize_session(
+            project_id=test_project_id,
+            chapter_id=test_chapter_id,
+            document_id=test_document_id,
+            document_version_id=test_version_id,
+            mode=PanelMode.QUICK,
+        )
+        automatic = await service.initialize_from_revision_ready(
+            chapter_workflow_run=chapter_run,
+            ready_pair=pair,
+            mode=PanelMode.QUICK,
+        )
+
+        assert manual.session_id != automatic.session_id
+        assert len(fake_db_session.storage[ReaderPanelSession]) == 2
+        assert fake_db_session.commit_calls == 1
+
+    async def test_revision_ready_scans_global_claims_and_validates_exact_replay(
+        self,
+        fake_db_session: FakeAsyncSession,
+        test_project_id: UUID,
+        test_chapter_id: UUID,
+        test_document_id: UUID,
+        test_version_id: UUID,
+        sample_hash: str,
+        sample_segments: dict[str, str],
+    ) -> None:
+        chapter_run, pair = setup_ready_pair(
+            fake_db_session,
+            project_id=test_project_id,
+            chapter_id=test_chapter_id,
+            document_id=test_document_id,
+            version_id=test_version_id,
+            content_hash=sample_hash,
+            segments=sample_segments,
+        )
+        service = ReaderPanelService(fake_db_session)  # type: ignore[arg-type]
+        created = await service.initialize_from_revision_ready(
+            chapter_workflow_run=chapter_run,
+            ready_pair=pair,
+            mode=PanelMode.QUICK,
+        )
+        panel_run = fake_db_session.storage[WorkflowRun][created.workflow_run_id]
+        panel = fake_db_session.storage[ReaderPanelSession][created.session_id]
+
+        panel_run.metadata_["reader_panel_request"]["source_hash"] = "0" * 64
+        with pytest.raises(ReaderPanelInvalidStateError):
+            await service.initialize_from_revision_ready(
+                chapter_workflow_run=chapter_run,
+                ready_pair=pair,
+                mode=PanelMode.PANEL,
+            )
+        panel_run.metadata_["reader_panel_request"]["source_hash"] = sample_hash
+
+        panel.config_snapshot = {**panel.config_snapshot, "reader_count": 99}
+        with pytest.raises(ReaderPanelInvalidStateError):
+            await service.initialize_from_revision_ready(
+                chapter_workflow_run=chapter_run,
+                ready_pair=pair,
+                mode=PanelMode.PANEL,
+            )
+        panel.config_snapshot = dict(panel_run.metadata_["reader_panel_request"]["config"])
+
+        reader = next(iter(fake_db_session.storage[ReaderRun].values()))
+        reader.reader_profile_id = "corrupt-profile"
+        with pytest.raises(ReaderPanelInvalidStateError):
+            await service.initialize_from_revision_ready(
+                chapter_workflow_run=chapter_run,
+                ready_pair=pair,
+                mode=PanelMode.PANEL,
+            )
+        reader.reader_profile_id = panel.config_snapshot["reader_profile_ids"][0]
+
+        panel_run.status = ReaderPanelStatus.COMPLETED.value
+        with pytest.raises(ReaderPanelInvalidStateError):
+            await service.initialize_from_revision_ready(
+                chapter_workflow_run=chapter_run,
+                ready_pair=pair,
+                mode=PanelMode.PANEL,
+            )
+        panel_run.status = "running"
+
+        cross_scope = WorkflowRun(
+            id=uuid4(),
+            project_id=uuid4(),
+            chapter_id=uuid4(),
+            workflow_type="reader_panel",
+            status="running",
+            metadata_={
+                **panel_run.metadata_,
+                "reader_panel_revision_ready_key": ["malformed"],
+            },
+        )
+        fake_db_session.add(cross_scope)
+        with pytest.raises(ReaderPanelInvalidStateError):
+            await service.initialize_from_revision_ready(
+                chapter_workflow_run=chapter_run,
+                ready_pair=pair,
+                mode=PanelMode.PANEL,
+            )
+
+    async def test_revision_ready_requires_chapter_production_v2_run(
+        self,
+        fake_db_session: FakeAsyncSession,
+        test_project_id: UUID,
+        test_chapter_id: UUID,
+        test_document_id: UUID,
+        test_version_id: UUID,
+        sample_hash: str,
+        sample_segments: dict[str, str],
+    ) -> None:
+        chapter_run, pair = setup_ready_pair(
+            fake_db_session,
+            project_id=test_project_id,
+            chapter_id=test_chapter_id,
+            document_id=test_document_id,
+            version_id=test_version_id,
+            content_hash=sample_hash,
+            segments=sample_segments,
+        )
+        chapter_run.workflow_type = "reader_panel"
+
+        with pytest.raises(ReaderPanelInvalidStateError):
+            await ReaderPanelService(fake_db_session).initialize_from_revision_ready(  # type: ignore[arg-type]
+                chapter_workflow_run=chapter_run,
+                ready_pair=pair,
+                mode=PanelMode.QUICK,
+            )
+
+    async def test_revision_ready_claim_cannot_hide_behind_corrupt_workflow_type(
+        self,
+        fake_db_session: FakeAsyncSession,
+        test_project_id: UUID,
+        test_chapter_id: UUID,
+        test_document_id: UUID,
+        test_version_id: UUID,
+        sample_hash: str,
+        sample_segments: dict[str, str],
+    ) -> None:
+        chapter_run, pair = setup_ready_pair(
+            fake_db_session,
+            project_id=test_project_id,
+            chapter_id=test_chapter_id,
+            document_id=test_document_id,
+            version_id=test_version_id,
+            content_hash=sample_hash,
+            segments=sample_segments,
+        )
+        service = ReaderPanelService(fake_db_session)  # type: ignore[arg-type]
+        created = await service.initialize_from_revision_ready(
+            chapter_workflow_run=chapter_run,
+            ready_pair=pair,
+            mode=PanelMode.QUICK,
+        )
+        fake_db_session.storage[WorkflowRun][created.workflow_run_id].workflow_type = "corrupt"
+
+        with pytest.raises(ReaderPanelInvalidStateError):
+            await service.initialize_from_revision_ready(
+                chapter_workflow_run=chapter_run,
+                ready_pair=pair,
+                mode=PanelMode.QUICK,
+            )
+
+    @pytest.mark.parametrize("claim_source", ["key", "binding", "request"])
+    async def test_revision_ready_rejects_current_pair_with_missing_policy(
+        self,
+        fake_db_session: FakeAsyncSession,
+        test_project_id: UUID,
+        test_chapter_id: UUID,
+        test_document_id: UUID,
+        test_version_id: UUID,
+        sample_hash: str,
+        sample_segments: dict[str, str],
+        claim_source: str,
+    ) -> None:
+        chapter_run, pair = setup_ready_pair(
+            fake_db_session,
+            project_id=test_project_id,
+            chapter_id=test_chapter_id,
+            document_id=test_document_id,
+            version_id=test_version_id,
+            content_hash=sample_hash,
+            segments=sample_segments,
+        )
+        service = ReaderPanelService(fake_db_session)  # type: ignore[arg-type]
+        created = await service.initialize_from_revision_ready(
+            chapter_workflow_run=chapter_run,
+            ready_pair=pair,
+            mode=PanelMode.QUICK,
+        )
+        metadata = fake_db_session.storage[WorkflowRun][created.workflow_run_id].metadata_
+        binding = dict(metadata["reader_panel_revision_ready_binding"])
+        binding.pop("review_policy_version")
+        metadata.pop("reader_panel_revision_ready_key")
+        metadata.pop("reader_panel_revision_ready_binding")
+        metadata["reader_panel_request"].pop("reader_panel_revision_ready_binding")
+        if claim_source == "key":
+            metadata["reader_panel_revision_ready_key"] = [
+                str(chapter_run.id),
+                str(test_version_id),
+            ]
+        elif claim_source == "binding":
+            metadata["reader_panel_revision_ready_binding"] = binding
+        else:
+            metadata["reader_panel_request"]["reader_panel_revision_ready_binding"] = binding
+
+        with pytest.raises(ReaderPanelInvalidStateError):
+            await service.initialize_from_revision_ready(
+                chapter_workflow_run=chapter_run,
+                ready_pair=pair,
+                mode=PanelMode.QUICK,
+            )
+
     async def test_explicit_binding_is_validated_before_off_noop(
         self,
         fake_db_session: FakeAsyncSession,
