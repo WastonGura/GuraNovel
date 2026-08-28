@@ -107,7 +107,7 @@ The following are intentionally not committed:
 Use public documentation such as [the architecture guide](docs/architecture.md) for cleaned-up
 design material that is safe to share.
 
-## Canonical v0.8 verification
+## Canonical release verification
 
 Run the release gates from a clean checkout. Backend integration tests must use an explicit dedicated
 `_test` PostgreSQL database and run once, serially; never point them at a development or production database.
