@@ -15,5 +15,33 @@ services:
       timeout: 5s
       retries: 5
 
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    environment:
+      DATABASE_URL: postgresql+asyncpg://postgres:postgres@db:5432/guranovel
+      WORKSPACE_BASE_DIR: /data/workspaces
+      APP_ENV: production
+      APP_DEBUG: "false"
+      READER_PANEL_MODE: "off"
+    volumes:
+      - workspaces_data:/data/workspaces
+    ports:
+      - "8000:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    ports:
+      - "5173:80"
+    depends_on:
+      - backend
+
 volumes:
   postgres_data:
+  workspaces_data:
