@@ -32,7 +32,7 @@ class Settings(BaseSettings):
     app_name: str = "GuraNovel API"
     app_env: str = "development"
     app_debug: bool = True
-    app_version: str = "0.9.0"
+    app_version: str = "0.10.0"
     app_log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = "INFO"
     sae_echo: bool = False
     database_url: str = "postgresql+asyncpg://postgres:postgres@localhost:5432/guranovel"
