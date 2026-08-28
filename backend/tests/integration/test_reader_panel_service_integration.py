@@ -121,9 +121,13 @@ class PostgreSQLDiscussionProvider:
     def generate_final_ballot(self, request) -> ReaderFinalBallotOutput:
         self.final_calls += 1
         segment_id = next(iter(request.manuscript_segments))
+        minority_risk = (
+            request.issue.issue_number == 1
+            and request.reader_profile_id == "genre_experienced"
+        )
         return ReaderFinalBallotOutput(
             issue_number=request.issue.issue_number,
-            severity="minor",
+            severity="critical" if minority_risk else "minor",
             suggested_action="clarify",
             confidence="high",
             evidence=[{"segment_ids": [segment_id], "note": "Bound issue evidence."}],
@@ -392,6 +396,25 @@ class TestReaderPanelServiceIntegration:
         assert session_row.document_version_id == version_id
         assert session_row.source_hash == content_hash
         assert session_row.status == ReaderPanelStatus.INDEPENDENT_READING.value
+        assert session_row.config_snapshot["mode"] == "standard"
+        assert session_row.config_snapshot["reader_profile_ids"] == [
+            "general_immersive",
+            "low_patience",
+            "character_emotion",
+            "genre_experienced",
+        ]
+        assert session_row.model_snapshot == {
+            "provider": "fake",
+            "model": "deterministic-reader-panel-v1",
+        }
+        assert session_row.prompt_snapshot == {"version": "v1"}
+        assert session_row.target_audience == ["cultivation_fans", "young_adult"]
+        assert session_row.test_goals == ["Check pacing and worldbuilding introduction"]
+        provenance_snapshot = {
+            "config": dict(session_row.config_snapshot),
+            "model": dict(session_row.model_snapshot),
+            "prompt": dict(session_row.prompt_snapshot),
+        }
 
         # 2. Idempotent initialization check
         dup_result = await service.initialize_session(
@@ -449,6 +472,20 @@ class TestReaderPanelServiceIntegration:
             assert r.confidence == "high"
             assert r.locked is True
             assert r.locked_at is not None
+        initial_report_snapshot = {
+            report.id: {
+                "reader_run_id": report.reader_run_id,
+                "overall_reaction": report.overall_reaction,
+                "continue_reading": report.continue_reading,
+                "confidence": report.confidence,
+                "strengths": report.strengths,
+                "reactions": report.reactions,
+                "concerns": report.concerns,
+                "locked": report.locked,
+                "locked_at": report.locked_at,
+            }
+            for report in reports
+        }
 
         # 4. Two independent sessions race safely: provider calls may repeat, rows may not.
         extraction_started = Event()
@@ -535,6 +572,28 @@ class TestReaderPanelServiceIntegration:
         assert len(ballots) == 8
         assert len({(b.reader_run_id, b.issue_id, b.phase) for b in ballots}) == 8
         assert all(b.session_id == init_result.session_id for b in ballots)
+        assert all(
+            set(ref["segment_ids"]).issubset(segments)
+            for issue in issues
+            for ref in issue.evidence
+        )
+        assert all(
+            set(ref["segment_ids"]).issubset(segments)
+            for ballot in ballots
+            for ref in ballot.evidence
+        )
+        initial_ballot_snapshot = {
+            ballot.id: {
+                "reader_run_id": ballot.reader_run_id,
+                "issue_id": ballot.issue_id,
+                "severity": ballot.severity,
+                "suggested_action": ballot.suggested_action,
+                "confidence": ballot.confidence,
+                "evidence": ballot.evidence,
+                "created_at": ballot.created_at,
+            }
+            for ballot in ballots
+        }
         events = (
             (
                 await async_session.execute(
@@ -602,14 +661,6 @@ class TestReaderPanelServiceIntegration:
         )
 
         # 5. Discussion/final ballot recovery is also safe across two sessions.
-        session_for_agenda = await async_session.get(
-            ReaderPanelSession, init_result.session_id, populate_existing=True
-        )
-        assert session_for_agenda is not None
-        config_snapshot = dict(session_for_agenda.config_snapshot)
-        config_snapshot["max_discussion_issues"] = 1
-        session_for_agenda.config_snapshot = config_snapshot
-        await async_session.commit()
         discussion_provider = PostgreSQLDiscussionProvider()
 
         async def discuss_concurrently():
@@ -649,10 +700,36 @@ class TestReaderPanelServiceIntegration:
             .scalars()
             .all()
         )
-        assert len(messages) == 5
-        assert len({(m.issue_id, m.round_number, m.turn_number) for m in messages}) == 5
+        assert len(messages) == 10
+        assert len({(m.issue_id, m.round_number, m.turn_number) for m in messages}) == 10
         assert len(final_ballots) == 8
         assert len({(b.reader_run_id, b.issue_id, b.phase) for b in final_ballots}) == 8
+        reader_run_ids = {run.id for run in durable_runs}
+        assert all(ballot.reader_run_id in reader_run_ids for ballot in final_ballots)
+        assert all(
+            message.reader_run_id is None
+            for message in messages
+            if message.speaker_type == "moderator"
+        )
+        assert all(
+            message.reader_run_id in reader_run_ids
+            for message in messages
+            if message.speaker_type == "reader"
+        )
+        issue_segments = {
+            issue.id: {
+                segment_id
+                for evidence in issue.evidence
+                for segment_id in evidence["segment_ids"]
+            }
+            for issue in issues
+        }
+        assert all(message.issue_id in issue_segments for message in messages)
+        assert all(
+            set(ref["segment_ids"]).issubset(issue_segments[message.issue_id])
+            for message in messages
+            for ref in message.evidence
+        )
         session_after_discussion = await async_session.get(
             ReaderPanelSession, init_result.session_id, populate_existing=True
         )
@@ -691,7 +768,7 @@ class TestReaderPanelServiceIntegration:
         )
         event_types = [event.event_type for event in lifecycle_events]
         assert event_types.count("reader_panel.discussion_started") == 1
-        assert event_types.count("reader_panel.discussion_round_completed") == 1
+        assert event_types.count("reader_panel.discussion_round_completed") == 2
         assert event_types.count("reader_panel.discussion_completed") == 1
         assert event_types.count("reader_panel.final_ballots_locked") == 1
 
@@ -760,6 +837,15 @@ class TestReaderPanelServiceIntegration:
         assert report.raw_report["stale"] is True
         assert report.raw_report["automatic_application_allowed"] is False
         assert [item["issue_number"] for item in report.raw_report["issues"]] == [1, 2]
+        minority_issue = next(
+            item for item in report.raw_report["issues"] if item["minority_findings"]
+        )
+        assert minority_issue["minority_findings"] == ["minority_high_risk"]
+        assert minority_issue["final_tally"]["risk_flags"] == ["minority_high_risk"]
+        assert minority_issue["final_tally"]["raw_distribution"] != (
+            minority_issue["final_tally"]["target_audience_distribution"]
+        )
+        assert report.raw_report["minority_issue_numbers"] == [minority_issue["issue_number"]]
         assert report.passed is False
         assert report.report_document_id is None
         assert len((await async_session.execute(select(Document))).scalars().all()) == (
@@ -778,6 +864,11 @@ class TestReaderPanelServiceIntegration:
             populate_existing=True,
         )
         assert completed_session is not None
+        assert {
+            "config": completed_session.config_snapshot,
+            "model": completed_session.model_snapshot,
+            "prompt": completed_session.prompt_snapshot,
+        } == provenance_snapshot
         completed_at = completed_session.completed_at
         completed_workflow = await async_session.get(
             WorkflowRun,
@@ -829,6 +920,55 @@ class TestReaderPanelServiceIntegration:
             .all()
         )
         assert len(report_events) == 1
+        durable_initial_reports = (
+            (
+                await async_session.execute(
+                    select(ReaderInitialReport).where(
+                        ReaderInitialReport.session_id == init_result.session_id
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        assert {
+            item.id: {
+                "reader_run_id": item.reader_run_id,
+                "overall_reaction": item.overall_reaction,
+                "continue_reading": item.continue_reading,
+                "confidence": item.confidence,
+                "strengths": item.strengths,
+                "reactions": item.reactions,
+                "concerns": item.concerns,
+                "locked": item.locked,
+                "locked_at": item.locked_at,
+            }
+            for item in durable_initial_reports
+        } == initial_report_snapshot
+        durable_initial_ballots = (
+            (
+                await async_session.execute(
+                    select(ReaderPanelBallot).where(
+                        ReaderPanelBallot.session_id == init_result.session_id,
+                        ReaderPanelBallot.phase == "initial",
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        assert {
+            item.id: {
+                "reader_run_id": item.reader_run_id,
+                "issue_id": item.issue_id,
+                "severity": item.severity,
+                "suggested_action": item.suggested_action,
+                "confidence": item.confidence,
+                "evidence": item.evidence,
+                "created_at": item.created_at,
+            }
+            for item in durable_initial_ballots
+        } == initial_ballot_snapshot
 
     async def test_cross_project_rejection_postgresql(
         self,

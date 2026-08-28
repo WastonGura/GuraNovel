@@ -16,13 +16,22 @@ const ids = {
   editorReport: 'dddddddd-dddd-4ddd-8ddd-dddddddddddd',
   chiefReport: 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee',
   loreReport: 'ffffffff-ffff-4fff-8fff-ffffffffffff',
+  panelSession: '12121212-1212-4212-8212-121212121212',
+  panelRun: '13131313-1313-4313-8313-131313131313',
 }
 
 const sentinels = [
+  'UNPUBLISHED NOVEL TEXT must remain snapshot-private',
+  'SYSTEM PROMPT TEMPLATE must never render',
+  'RAW PROVIDER PAYLOAD must never render',
   'sk-prod-never-render-secret-key-12345',
+  'X-Provider-Credential: canary-header-secret',
+  'https://private-provider.example/v1/chat/completions',
   'postgresql+asyncpg://postgres:secretpassword@prod-db/guranovel',
   '/mnt/d/private/keys/gemini_service_account.json',
   'Bearer canary-token-never-expose-in-dom',
+  'PRIVATE WORKSPACE /srv/guranovel/authors/hidden-draft',
+  'CHAIN-OF-THOUGHT hidden reasoning scratchpad',
   'raw provider exception with internal prompt dump and stack traces',
 ]
 
@@ -44,7 +53,7 @@ function initialProject() {
     genre: 'Fantasy',
     target_platform: 'Web',
     workspace_root: '/workspace',
-    metadata: {},
+    metadata: { reader_panel_private_context: sentinels },
     created_at: '2026-08-22T00:00:00Z',
     updated_at: '2026-08-22T00:00:00Z',
   }
@@ -185,6 +194,7 @@ async function setupRouteMocks(
   onAction?: (url: URL, method: string, postData: string | null) => Promise<ActionResult> | ActionResult,
 ) {
   const violations: string[] = []
+  const requests: string[] = []
 
   page.on('console', (message) => {
     if (sentinels.some((s) => message.text().includes(s))) {
@@ -212,6 +222,13 @@ async function setupRouteMocks(
     if (!url.pathname.startsWith('/api/v1/')) {
       await route.continue()
       return
+    }
+
+    requests.push(`${method} ${url.pathname}`)
+    const requestSurface = [req.url(), req.postData() ?? '', JSON.stringify(await req.allHeaders())]
+      .join('\n')
+    if (sentinels.some((sentinel) => requestSurface.includes(sentinel))) {
+      violations.push(`request_leak: ${method} ${url.pathname}`)
     }
 
     // Projects & Chapters basic routes
@@ -295,7 +312,7 @@ async function setupRouteMocks(
     await route.abort('blockedbyclient')
   })
 
-  return { violations }
+  return { requests, violations }
 }
 
 // ==============================================================================
@@ -702,5 +719,141 @@ test('chapter production v2 flow 3: failure state reconciliation and safe resump
   for (const sentinel of sentinels) {
     expect(bodyText).not.toContain(sentinel)
   }
+  expect(violations).toEqual([])
+})
+
+test('chapter production v2 flow 4: revision-ready reader panel reaches an editor-only report without leaks or edits', async ({
+  context,
+  page,
+}) => {
+  const currentState = buildV2State({
+    status: 'REVISION_READY',
+    awaitingUser: false,
+    editorReportId: ids.editorReport,
+    chiefReportId: ids.chiefReport,
+    loreReportId: ids.loreReport,
+  })
+
+  const panelDetail = {
+    is_noop: false,
+    session_id: ids.panelSession,
+    workflow_run_id: ids.panelRun,
+    project_id: ids.project,
+    chapter_id: ids.chapter,
+    document_id: ids.draftDoc,
+    document_version_id: ids.draftVer1,
+    source_hash: 'a'.repeat(64),
+    mode: 'standard',
+    status: 'completed',
+    stale: false,
+    degradation_reason: null,
+    failure_reason: null,
+    planned_readers: 4,
+    completed_readers: 4,
+    failed_readers: 0,
+    issue_count: 1,
+    initial_ballot_count: 4,
+    final_ballot_count: 4,
+    discussion_message_count: 5,
+    created_at: '2026-08-28T01:00:00Z',
+    updated_at: '2026-08-28T01:02:00Z',
+    completed_at: '2026-08-28T01:02:00Z',
+    review_report: {
+      summary: 'Editor review should consider one local clarification.',
+      blocking_issues: [],
+      warnings: ['A high-confidence minority risk remains visible.'],
+      notes: ['Reader Panel did not modify the manuscript.'],
+      suggested_actions: [{
+        priority: 'manual_review',
+        target_segment_ids: ['S002'],
+        suggested_action: 'clarify',
+        instruction: 'Consider one causal beat at the transition.',
+      }],
+    },
+    issues: [{
+      issue_number: 1,
+      title: 'Abrupt transition',
+      category: 'pacing',
+      symptom: 'The scene changes before the cause is clear.',
+      root_cause_hypotheses: ['The causal beat is compressed.'],
+      evidence: [{ segment_ids: ['S002'], note: 'The transition begins here.' }],
+      target_audience_relevance: 'high',
+      minority_risk: true,
+      discussion_status: 'closed',
+      consensus_class: 'polarized',
+      recommended_priority: 'manual_review',
+    }],
+    initial_reports: [],
+    transcript: null,
+    permitted_operations: [],
+  }
+
+  const { requests, violations } = await setupRouteMocks(
+    context,
+    page,
+    () => currentState,
+    async (url, method, postData) => {
+      const panelBase = `/api/v1/projects/${ids.project}/chapters/${ids.chapter}/reader-panels`
+      if (method === 'POST' && url.pathname === panelBase) {
+        expect(JSON.parse(postData || '{}')).toEqual({
+          document_id: ids.draftDoc,
+          document_version_id: ids.draftVer1,
+          mode: 'standard',
+          config_overrides: {
+            max_ballot_issues: 6,
+            max_discussion_issues: 4,
+            max_rounds_per_issue: 2,
+            min_valid_readers: 3,
+          },
+          test_goals: ['Check the transition.'],
+          target_audience: ['Fantasy readers.'],
+        })
+        return {
+          body: {
+            ...panelDetail,
+            status: 'independent_reading',
+            completed_readers: 0,
+            issue_count: 0,
+            initial_ballot_count: 0,
+            final_ballot_count: 0,
+            discussion_message_count: 0,
+            completed_at: null,
+            review_report: null,
+            issues: [],
+            permitted_operations: ['cancel'],
+          },
+        }
+      }
+      if (method === 'GET' && url.pathname === `${panelBase}/${ids.panelSession}`) {
+        return { body: panelDetail }
+      }
+      return null
+    },
+  )
+
+  await page.goto(`/projects/${ids.project}/chapters/${ids.chapter}`)
+  await expect(page.getByRole('heading', { name: 'Revision ready for finalization' })).toBeVisible()
+  await page.getByRole('link', { name: 'Open Reader Panel' }).click()
+
+  await expect(page).toHaveURL(new RegExp(
+    `/projects/${ids.project}/chapters/${ids.chapter}/documents/${ids.draftDoc}/versions/${ids.draftVer1}/reader-panel$`,
+  ))
+  await page.getByLabel('Test goals').fill('Check the transition.')
+  await page.getByLabel('Target audience').fill('Fantasy readers.')
+  await page.getByRole('button', { name: 'Start Reader Panel' }).click()
+
+  await expect(page).toHaveURL(new RegExp(`/reader-panel/${ids.panelSession}$`))
+  await expect(page.getByRole('heading', { name: 'Reader Panel report' })).toBeVisible()
+  await expect(page.getByRole('region', { name: 'Editor handoff' })).toContainText(
+    'Editor review should consider one local clarification.',
+  )
+  await expect(page.getByText(ids.draftVer1)).toBeVisible()
+  await expect(page.getByText(/results never modify the chapter automatically/i)).toBeVisible()
+
+  const bodyText = await page.locator('body').innerText()
+  for (const sentinel of sentinels) expect(bodyText).not.toContain(sentinel)
+  expect(requests.filter((request) => /^(POST|PUT|PATCH|DELETE) .*\/documents\//.test(request)))
+    .toEqual([])
+  expect(requests.some((request) => request.includes('/finalize'))).toBe(false)
   expect(violations).toEqual([])
 })
