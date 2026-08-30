@@ -6,5 +6,20 @@ version: "1.0"
 linter: qodana-python
 profile:
   name: qodana.recommended
+
+bootstrap: pip install uv && uv pip install --system -e ./backend
+
+exclude:
+  - name: All
+    paths:
+      - backend/tests
+      - backend/alembic
+      - frontend
+      - .codegraph
+      - docs
+      - scripts
+  - name: PyInitCodeInspection
+  - name: PyMethodMayBeStaticInspection
+
 include:
   - name: CheckDependencyLicenses
