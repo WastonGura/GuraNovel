@@ -1,0 +1,10 @@
+node_modules
+dist
+coverage
+.vite
+.env
+.env.*
+.envrc
+.npmrc
+.git
+npm-debug.log*

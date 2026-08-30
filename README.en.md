@@ -104,19 +104,58 @@ Ideal for launching PostgreSQL, the FastAPI backend, and the Nginx frontend in a
 git clone https://github.com/WastonGura/GuraNovel.git
 cd GuraNovel
 
-# 2. Build and launch all services
-docker compose up -d --build
+# 2. Build and launch all services, waiting for database and backend health checks
+docker compose up -d --build --wait
+```
+
+The first build downloads base images and installs dependencies, so it can take several minutes. Later builds reuse the Docker cache. After the command succeeds, verify the deployment with:
+
+```bash
+docker compose ps
+curl -fsS http://localhost:8000/api/v1/health
+curl -fsS http://localhost:5173/api/v1/health
 ```
 
 - **Frontend Workbench**: Open [http://localhost:5173](http://localhost:5173) in your browser.
 - **Backend API Docs**: Open [http://localhost:8000/docs](http://localhost:8000/docs).
-- **Stop Services**: Run `docker compose down`.
+
+The frontend and backend listen only on host address `127.0.0.1` by default, and PostgreSQL is not exposed on a host port. If `5173` or `8000` are already in use, override the public ports when starting the stack:
+
+```bash
+GURANOVEL_FRONTEND_PORT=15173 GURANOVEL_BACKEND_PORT=18000 \
+  docker compose up -d --build --wait
+```
+
+If LAN or remote server access is required, explicitly change the bind address:
+
+```bash
+GURANOVEL_BIND_ADDRESS=0.0.0.0 docker compose up -d --build --wait
+```
+
+> [!WARNING]
+> Binding to `0.0.0.0` exposes the frontend and backend ports to external networks. Configure a firewall and serve the application through a TLS-enabled reverse proxy on servers.
+
+Inspect startup or runtime logs with:
+
+```bash
+docker compose logs --tail=100 backend frontend db
+```
+
+Stop the containers while preserving database and workspace data:
+
+```bash
+docker compose down
+```
+
+> [!WARNING]
+> `docker compose down -v` permanently deletes the Compose-managed PostgreSQL data and project workspace volumes. Use it only when you intend to erase all application data.
 
 > [!TIP]
 > **Docker Troubleshooting**:
 > If you encounter `failed to connect to the docker API at unix:///var/run/docker.sock`:
 > - **Windows WSL2 Users**: Open **Docker Desktop** on Windows and check `Settings -> Resources -> WSL Integration` to ensure your Linux distro is enabled.
 > - **Linux Native Users**: Run `sudo service docker start` in your terminal to start the Docker daemon.
+> If Docker reports `address already in use`, stop the process using that port or restart with the port override variables above.
 
 ---
 

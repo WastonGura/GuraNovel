@@ -9,11 +9,11 @@ ENV PYTHONUNBUFFERED=1 \
 
 # Install dependencies first for better layer caching
 COPY pyproject.toml uv.lock ./
-RUN uv sync --frozen --no-install-project
+RUN uv sync --frozen --no-dev --no-install-project
 
 # Copy application source code
 COPY . .
-RUN uv sync --frozen
+RUN uv sync --frozen --no-dev
 
 # Ensure workspace data directory exists
 RUN mkdir -p /data/workspaces
@@ -21,4 +21,4 @@ RUN mkdir -p /data/workspaces
 EXPOSE 8000
 
 # Apply Alembic migrations and launch FastAPI server
-CMD ["sh", "-c", "uv run alembic upgrade head && uv run uvicorn app.main:app --host 0.0.0.0 --port 8000"]
+CMD ["sh", "-c", "/app/.venv/bin/alembic upgrade head && exec /app/.venv/bin/uvicorn app.main:app --host 0.0.0.0 --port 8000"]
