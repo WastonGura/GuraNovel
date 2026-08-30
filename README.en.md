@@ -108,12 +108,12 @@ cd GuraNovel
 docker compose up -d --build --wait
 ```
 
-The first build downloads base images and installs dependencies, so it can take several minutes. Later builds reuse the Docker cache. After the command succeeds, verify the deployment with:
+The first build downloads base images and installs dependencies, so it can take several minutes. Later builds reuse the Docker cache. After the command succeeds, verify the deployment with the following commands. The health checks explicitly bypass `HTTP_PROXY`/`ALL_PROXY` so a local proxy cannot intercept loopback requests and return `502`:
 
 ```bash
 docker compose ps
-curl -fsS http://localhost:8000/api/v1/health
-curl -fsS http://localhost:5173/api/v1/health
+curl --noproxy '*' -fsS http://127.0.0.1:8000/api/v1/health
+curl --noproxy '*' -fsS http://127.0.0.1:5173/api/v1/health
 ```
 
 - **Frontend Workbench**: Open [http://localhost:5173](http://localhost:5173) in your browser.

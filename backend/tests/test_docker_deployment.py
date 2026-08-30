@@ -85,8 +85,13 @@ def test_readmes_document_observable_compose_lifecycle() -> None:
         assert "docker compose up -d --build --wait" in readme
         assert "docker compose ps" in readme
         assert "docker compose logs --tail=100 backend frontend db" in readme
-        assert "curl -fsS http://localhost:8000/api/v1/health" in readme
-        assert "curl -fsS http://localhost:5173/api/v1/health" in readme
+        assert (
+            "curl --noproxy '*' -fsS http://127.0.0.1:8000/api/v1/health" in readme
+        )
+        assert (
+            "curl --noproxy '*' -fsS http://127.0.0.1:5173/api/v1/health" in readme
+        )
+        assert "curl -fsS http://localhost:" not in readme
         assert "GURANOVEL_BACKEND_PORT" in readme
         assert "GURANOVEL_FRONTEND_PORT" in readme
         assert "GURANOVEL_BIND_ADDRESS=0.0.0.0" in readme

@@ -108,12 +108,12 @@ cd GuraNovel
 docker compose up -d --build --wait
 ```
 
-首次构建需要下载基础镜像并安装依赖，可能耗时数分钟；后续构建会复用 Docker 缓存。命令成功返回后，可通过以下方式确认服务状态：
+首次构建需要下载基础镜像并安装依赖，可能耗时数分钟；后续构建会复用 Docker 缓存。命令成功返回后，可通过以下方式确认服务状态。健康检查显式绕过 `HTTP_PROXY`/`ALL_PROXY`，避免本机代理截获回环请求并返回 `502`：
 
 ```bash
 docker compose ps
-curl -fsS http://localhost:8000/api/v1/health
-curl -fsS http://localhost:5173/api/v1/health
+curl --noproxy '*' -fsS http://127.0.0.1:8000/api/v1/health
+curl --noproxy '*' -fsS http://127.0.0.1:5173/api/v1/health
 ```
 
 - **前端工作台**：打开浏览器访问 [http://localhost:5173](http://localhost:5173)
