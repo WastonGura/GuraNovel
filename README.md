@@ -104,19 +104,58 @@ GuraNovel 提供三种部署方式，推荐使用 **Docker Compose 全栈一键�
 git clone https://github.com/WastonGura/GuraNovel.git
 cd GuraNovel
 
-# 2. 一键构建并启动全部服务（PostgreSQL 16 + FastAPI 后端 + Nginx 前端）
-docker compose up -d --build
+# 2. 构建并启动全部服务，等待数据库和后端通过健康检查
+docker compose up -d --build --wait
+```
+
+首次构建需要下载基础镜像并安装依赖，可能耗时数分钟；后续构建会复用 Docker 缓存。命令成功返回后，可通过以下方式确认服务状态：
+
+```bash
+docker compose ps
+curl -fsS http://localhost:8000/api/v1/health
+curl -fsS http://localhost:5173/api/v1/health
 ```
 
 - **前端工作台**：打开浏览器访问 [http://localhost:5173](http://localhost:5173)
 - **后端 API 文档**：访问 [http://localhost:8000/docs](http://localhost:8000/docs)
-- **停止服务**：执行 `docker compose down`
+
+前后端端口默认仅监听宿主机的 `127.0.0.1`，PostgreSQL 端口不会暴露到宿主机。如 `5173` 或 `8000` 已被占用，可在启动时覆盖公开端口：
+
+```bash
+GURANOVEL_FRONTEND_PORT=15173 GURANOVEL_BACKEND_PORT=18000 \
+  docker compose up -d --build --wait
+```
+
+如确需允许局域网或服务器外部访问，可显式修改监听地址：
+
+```bash
+GURANOVEL_BIND_ADDRESS=0.0.0.0 docker compose up -d --build --wait
+```
+
+> [!WARNING]
+> 监听 `0.0.0.0` 会向外部网络开放前后端端口。服务器部署时应配置防火墙，并通过带 TLS 的反向代理对外提供服务。
+
+查看启动或运行日志：
+
+```bash
+docker compose logs --tail=100 backend frontend db
+```
+
+停止容器但保留数据库和工作区数据：
+
+```bash
+docker compose down
+```
+
+> [!WARNING]
+> `docker compose down -v` 会永久删除 Compose 管理的 PostgreSQL 数据和项目工作区卷，仅在确实需要清空所有数据时使用。
 
 > [!TIP]
 > **Docker 常见问题排查**：
 > 若执行出现 `failed to connect to the docker API at unix:///var/run/docker.sock`：
 > - **Windows WSL2 用户**：请打开 Windows 上的 **Docker Desktop**，并在 `Settings -> Resources -> WSL Integration` 中勾选开启当前 WSL 发行版。
 > - **Linux 原生用户**：请在终端执行 `sudo service docker start` 启动 Docker 服务。
+> 若提示 `address already in use`，请停止占用端口的程序，或使用上方的端口覆盖变量重新启动。
 
 ---
 
