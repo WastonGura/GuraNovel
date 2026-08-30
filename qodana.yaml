@@ -7,7 +7,7 @@ linter: qodana-python
 profile:
   name: qodana.recommended
 
-bootstrap: pip install uv && uv pip install --system -e ./backend
+bootstrap: pip install --no-cache-dir ./backend
 
 exclude:
   - name: All
