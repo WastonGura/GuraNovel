@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { Link, MemoryRouter, useLocation } from 'react-router-dom'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { Chapter, ChapterProductionRun, Document, DocumentContent, DocumentVersion, Project } from './api/client'
@@ -126,8 +126,7 @@ afterEach(() => {
 
 describe('application shell', () => {
   it('provides accessible landmarks', () => {
-    mockedApi.listProjects.mockResolvedValue([])
-    renderApp()
+    renderApp('/missing')
     expect(screen.getByRole('banner', { name: 'GuraNovel workbench' })).toBeInTheDocument()
     expect(screen.getByRole('navigation', { name: 'Workbench navigation' })).toBeInTheDocument()
     expect(screen.getByRole('main')).toBeInTheDocument()
@@ -167,7 +166,7 @@ describe('project list', () => {
     let view = renderApp()
     expect(screen.getByText('Loading projects…')).toBeInTheDocument()
     resolveProjects([project()])
-    expect(await screen.findByRole('link', { name: 'Archive of Ash' })).toHaveAttribute('href', '/projects/project-1')
+    expect(await screen.findAllByRole('button', { name: 'Open Archive of Ash' })).toHaveLength(2)
 
     view.unmount()
     mockedApi.listProjects.mockResolvedValue([])
@@ -186,6 +185,7 @@ describe('project list', () => {
     mockedApi.createProject.mockResolvedValue(project({ id: 'server-project-id' }))
     renderApp()
     await screen.findByText('No projects yet. Create one to begin.')
+    fireEvent.click(screen.getByRole('button', { name: 'Create novel' }))
     fireEvent.change(screen.getByLabelText('Slug'), { target: { value: 'archive-of-ash' } })
     fireEvent.change(screen.getByLabelText('Title'), { target: { value: 'Archive of Ash' } })
     fireEvent.click(screen.getByRole('button', { name: 'Create project' }))
@@ -200,6 +200,7 @@ describe('project list', () => {
     mockedApi.createProject.mockReturnValue(new Promise(() => undefined))
     renderApp()
     await screen.findByText('No projects yet. Create one to begin.')
+    fireEvent.click(screen.getByRole('button', { name: 'Create novel' }))
     fireEvent.change(screen.getByLabelText('Slug'), { target: { value: 'archive-of-ash' } })
     fireEvent.change(screen.getByLabelText('Title'), { target: { value: 'Archive of Ash' } })
     const button = screen.getByRole('button', { name: 'Create project' })
@@ -207,6 +208,92 @@ describe('project list', () => {
     fireEvent.click(button)
     expect(mockedApi.createProject).toHaveBeenCalledTimes(1)
     expect(button).toBeDisabled()
+  })
+
+  it('filters projects and opens the designed novel details', async () => {
+    mockedApi.listProjects.mockResolvedValue([project()])
+    mockedApi.listChapters.mockResolvedValue([chapter()])
+    renderApp()
+
+    const search = await screen.findByRole('searchbox', { name: 'Search novels' })
+    fireEvent.focus(search)
+    fireEvent.change(search, { target: { value: 'archive' } })
+    const results = screen.getByLabelText('Search results')
+    fireEvent.click(within(results).getByRole('button', { name: 'Archive of Ash' }))
+
+    const dialog = await screen.findByRole('dialog', { name: 'Archive of Ash' })
+    expect(dialog).toBeInTheDocument()
+    expect(await screen.findByRole('button', { name: /第7话/ })).toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Close novel details' }))
+    expect(dialog).toHaveClass('is-closing')
+  })
+
+  it('moves the dashboard search through hover, active, and leaving states', async () => {
+    mockedApi.listProjects.mockResolvedValue([project()])
+    renderApp()
+
+    const search = await screen.findByRole('searchbox', { name: 'Search novels' })
+    const shell = search.closest('.dashboard-search') as HTMLElement
+    const searchBar = search.closest('.search-shell') as HTMLElement
+    fireEvent.pointerEnter(shell)
+    expect(shell).toHaveClass('is-hovered')
+
+    fireEvent.focus(search)
+    expect(shell).toHaveClass('is-active')
+    expect(shell).not.toHaveClass('is-hovered')
+    fireEvent.change(search, { target: { value: 'archive' } })
+    expect(shell).toHaveClass('has-results')
+
+    vi.spyOn(shell, 'matches').mockReturnValue(true)
+    vi.spyOn(searchBar, 'matches').mockReturnValue(false)
+    fireEvent.blur(search, { relatedTarget: null })
+    expect(shell).toHaveClass('is-leaving')
+    expect(shell).not.toHaveClass('is-hovered')
+    expect(shell).toHaveClass('has-results')
+    expect(screen.getByLabelText('Search results')).toBeInTheDocument()
+    await waitFor(() => {
+      expect(shell).not.toHaveClass('has-results')
+      expect(screen.queryByLabelText('Search results')).not.toBeInTheDocument()
+    }, { timeout: 1_000 })
+
+    fireEvent.pointerEnter(shell)
+    expect(shell).toHaveClass('is-hovered')
+    expect(shell).toHaveClass('has-results')
+    expect(screen.getByLabelText('Search results')).toBeInTheDocument()
+    fireEvent.pointerOut(shell)
+    expect(shell).toHaveClass('is-leaving')
+    expect(shell).not.toHaveClass('is-hovered')
+
+  })
+
+  it('starts the shared glow burst when an interactive surface is clicked', async () => {
+    mockedApi.listProjects.mockResolvedValue([project()])
+    renderApp()
+
+    const create = await screen.findByRole('button', { name: 'Create novel' })
+    fireEvent.click(create)
+    expect(create).toHaveClass('is-glow-burst')
+  })
+
+  it('moves the novel carousel by one complete card in either direction', async () => {
+    mockedApi.listProjects.mockResolvedValue(Array.from({ length: 10 }, (_, index) => project({
+      id: `project-${index}`, title: `Novel ${index}`,
+    })))
+    renderApp()
+
+    await screen.findByRole('button', { name: 'Open Novel 9' })
+    const row = globalThis.document.querySelector('.novels-row') as HTMLDivElement
+    row.scrollTo = vi.fn()
+    const previous = screen.getByRole('button', { name: 'Show previous novels' })
+    const next = screen.getByRole('button', { name: 'Show more novels' })
+
+    expect(previous).toBeDisabled()
+    fireEvent.click(next)
+    expect(row.scrollTo).toHaveBeenLastCalledWith({ left: 171, behavior: 'smooth' })
+    expect(previous).not.toBeDisabled()
+    fireEvent.click(previous)
+    expect(row.scrollTo).toHaveBeenLastCalledWith({ left: 0, behavior: 'smooth' })
   })
 })
 
