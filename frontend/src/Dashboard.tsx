@@ -135,7 +135,7 @@ function NovelDetails({ project, artwork, onClose }: { project: Project, artwork
         </ul>}
       </div>
       <span className="novel-detail-rule" aria-hidden="true" />
-      <button className="novel-create-button" data-glow type="button" onClick={() => navigate(`/projects/${project.id}/creation/start`)}>create</button>
+      <button className="novel-create-button" data-glow type="button" onClick={() => navigate(`/projects/${project.id}/studio`)}>create</button>
     </section>
   </div>
 }

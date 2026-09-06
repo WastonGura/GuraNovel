@@ -1,0 +1,23 @@
+<svg preserveAspectRatio="none" overflow="visible" style="display: block;" width="56" height="56" viewBox="0 0 56 56" fill="none" xmlns="http://www.w3.org/2000/svg">
+<g id="send">
+<g id="Ellipse 5" filter="url(#filter0_d_0_34)">
+<circle cx="26" cy="24" r="16" fill="white"/>
+<circle cx="26" cy="24" r="15.75" stroke="black" stroke-opacity="0.2" stroke-width="0.5"/>
+</g>
+<g id="griddy-icons:send-filled">
+<path id="Vector" d="M33.0333 17.4667C32.7417 17.175 32.3208 17.0833 31.9375 17.225L17.8542 22.4125C17.4625 22.5542 17.1958 22.9167 17.175 23.3333C17.15 23.75 17.3792 24.1375 17.75 24.325L22.7792 26.8417L26.725 22.8958L27.6083 23.7792L23.6625 27.725L26.1792 32.7542C26.3542 33.1083 26.7167 33.3292 27.1083 33.3292H27.1667C27.5833 33.3042 27.9417 33.0375 28.0875 32.65L33.275 18.5625C33.4167 18.1792 33.325 17.7583 33.0333 17.4667Z" fill="black"/>
+</g>
+</g>
+<defs>
+<filter id="filter0_d_0_34" x="0" y="0" width="56" height="56" filterUnits="userSpaceOnUse" color-interpolation-filters="sRGB">
+<feFlood flood-opacity="0" result="BackgroundImageFix"/>
+<feColorMatrix in="SourceAlpha" type="matrix" values="0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 127 0" result="hardAlpha"/>
+<feOffset dx="2" dy="4"/>
+<feGaussianBlur stdDeviation="6"/>
+<feComposite in2="hardAlpha" operator="out"/>
+<feColorMatrix type="matrix" values="0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0.25 0"/>
+<feBlend mode="normal" in2="BackgroundImageFix" result="effect1_dropShadow_0_34"/>
+<feBlend mode="normal" in="SourceGraphic" in2="effect1_dropShadow_0_34" result="shape"/>
+</filter>
+</defs>
+</svg>

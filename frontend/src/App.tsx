@@ -25,6 +25,7 @@ import {
 } from './api/client'
 import ConceptGate from './ConceptGate'
 import Dashboard from './Dashboard'
+import Studio from './Studio'
 import ProjectCreationForm from './ProjectCreationForm'
 import ProjectMaintenancePage from './ProjectMaintenancePage'
 import { ChapterProductionV2Workbench } from './ChapterProductionV2Workbench'
@@ -463,7 +464,10 @@ function NotFound() {
 }
 
 export default function App() {
-  const dashboard = useLocation().pathname === '/'
+  const pathname = useLocation().pathname
+  const dashboard = pathname === '/'
+  const studio = pathname === '/preview/studio' || /^\/projects\/[^/]+\/studio(?:\/[^/]+)?$/.test(pathname)
+  if (studio) return <div className="app-shell studio-app-shell"><div className="workspace"><main><Routes><Route path="/preview/studio" element={<Studio />} /><Route path="/projects/:projectId/studio" element={<Studio />} /><Route path="/projects/:projectId/studio/:chapterId" element={<Studio />} /></Routes></main></div></div>
   return (
     <div className={`app-shell${dashboard ? ' dashboard-app-shell' : ''}`}>
       {!dashboard && <header className="topbar" aria-label="GuraNovel workbench"><Link className="wordmark" to="/">GuraNovel</Link><span className="workspace-name">Creative workbench</span></header>}
