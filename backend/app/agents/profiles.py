@@ -16,7 +16,7 @@ from app.llm.contracts import validate_model_identifier
 
 _IDENTIFIER = re.compile(r"[a-z][a-z0-9_]{0,63}")
 _PATH = re.compile(r"[a-z][a-z0-9_/-]{0,127}(?:\.md)?")
-_SAFE_TEXT = re.compile(r"[^\x00]{1,4000}")
+_SAFE_TEXT = re.compile(r"[^\x00]{1,16000}")
 
 
 class _StrictProfileModel(BaseModel):
@@ -124,7 +124,7 @@ class AgentProfile(_StrictProfileModel):
     model: ModelProfile
     permissions: PermissionsProfile
     context_policy: ContextPolicyProfile
-    system_prompt: str = Field(min_length=1, max_length=4000)
+    system_prompt: str = Field(min_length=1, max_length=16000)
     output_schema: Literal[
         "concept_generation_output",
         "chief_editor_review_output",

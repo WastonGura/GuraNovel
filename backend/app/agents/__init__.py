@@ -21,10 +21,13 @@ from app.agents.chapter_writer_contracts import (
     ReviewDrivenRevisionRequest,
     ReviewReportReference,
     SegmentDraftRequest,
+    SelectedReviewFinding,
     SourceDraftReference,
     SourceDraftSegment,
     UserFeedbackReference,
     UserFeedbackRevisionRequest,
+    WriterContextKind,
+    WriterContextSnapshot,
     validate_candidate_chapter_output,
 )
 from app.agents.chapter_writer_fakes import (
@@ -262,6 +265,7 @@ __all__ = [
     "ReviewReportReference",
     "RewriteRequirement",
     "ReviewSegmentSnapshot",
+    "SelectedReviewFinding",
     "WarningSeverity",
     "SegmentDraftProvider",
     "SegmentDraftRequest",
@@ -318,4 +322,7 @@ __all__ = [
     "build_blind_ballot_request",
     "build_cold_read_request",
     "validate_reader_panel_text",
+    "WriterContextKind",
+    "WriterContextSnapshot",
 ]
+
