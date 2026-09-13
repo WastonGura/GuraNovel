@@ -80,6 +80,8 @@ class BenchmarkSampleId(StrEnum):
     SAMPLE_2_LORE_CONFLICT = "sample_2_lore_conflict"
     SAMPLE_3_STYLE_MISMATCH = "sample_3_style_mismatch"
     SAMPLE_4_QUALIFIED = "sample_4_qualified"
+    SAMPLE_5_NON_TARGET_PRESERVATION = "sample_5_non_target_preservation"
+    SAMPLE_6_INSUFFICIENT_MATERIALS = "sample_6_insufficient_materials"
 
 
 _SAMPLE_MAP: dict[BenchmarkSampleId, str] = {
@@ -87,6 +89,8 @@ _SAMPLE_MAP: dict[BenchmarkSampleId, str] = {
     BenchmarkSampleId.SAMPLE_2_LORE_CONFLICT: "bench-timeline-lore-conflict-02",
     BenchmarkSampleId.SAMPLE_3_STYLE_MISMATCH: "bench-style-mismatch-03",
     BenchmarkSampleId.SAMPLE_4_QUALIFIED: "bench-qualified-chapter-04",
+    BenchmarkSampleId.SAMPLE_5_NON_TARGET_PRESERVATION: "bench-non-target-preservation-05",
+    BenchmarkSampleId.SAMPLE_6_INSUFFICIENT_MATERIALS: "bench-insufficient-materials-06",
 }
 
 
