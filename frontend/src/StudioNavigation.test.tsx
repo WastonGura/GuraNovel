@@ -4,11 +4,11 @@ import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import Studio from './Studio'
 import { draftRecoveryCopies } from './useDraftAutosave'
 import { writeStudioDraft } from './api/client'
-import { ApiError, approveStudioOutline, createChapter, getProject, listChapters, readDocumentContent, readStudioFeedback, writeDocument, type Chapter, type Project } from './api/client'
-import { getChapterProductionRun, getChapterProductionReviewReport, listChapterProductionRuns, resolveChapterProductionAction, triggerChapterReview, resumeChapterProduction, startChapterProductionV2, type ChapterProductionState, type ChapterProductionReviewReport } from './api/chapterProductionV2Client'
+import { ApiError, approveStudioOutline, createChapter, getProject, listChapters, readDocumentContent, readStudioFeedback, submitStudioFeedback, writeDocument, writeStudioFeedback, type Chapter, type Project, type StudioFeedback } from './api/client'
+import { getChapterProductionRun, getChapterProductionReviewReport, listChapterProductionRuns, resolveChapterProductionAction, triggerChapterReview, resumeChapterProduction, startChapterProductionV2, requestStudioFeedbackRevision, type ChapterProductionState, type ChapterProductionReviewReport } from './api/chapterProductionV2Client'
 
-vi.mock('./api/client', async original => ({ ...await original<typeof import('./api/client')>(), writeStudioDraft: vi.fn(), approveStudioOutline: vi.fn(), createChapter: vi.fn(), getProject: vi.fn(), listChapters: vi.fn(), readDocumentContent: vi.fn(), readStudioFeedback: vi.fn(), writeDocument: vi.fn() }))
-vi.mock('./api/chapterProductionV2Client', async original => ({ ...await original<typeof import('./api/chapterProductionV2Client')>(), getChapterProductionRun: vi.fn(), getChapterProductionReviewReport: vi.fn(), listChapterProductionRuns: vi.fn(), resolveChapterProductionAction: vi.fn(), triggerChapterReview: vi.fn(), resumeChapterProduction: vi.fn(), startChapterProductionV2: vi.fn() }))
+vi.mock('./api/client', async original => ({ ...await original<typeof import('./api/client')>(), writeStudioDraft: vi.fn(), approveStudioOutline: vi.fn(), createChapter: vi.fn(), getProject: vi.fn(), listChapters: vi.fn(), readDocumentContent: vi.fn(), readStudioFeedback: vi.fn(), submitStudioFeedback: vi.fn(), writeDocument: vi.fn(), writeStudioFeedback: vi.fn() }))
+vi.mock('./api/chapterProductionV2Client', async original => ({ ...await original<typeof import('./api/chapterProductionV2Client')>(), getChapterProductionRun: vi.fn(), getChapterProductionReviewReport: vi.fn(), listChapterProductionRuns: vi.fn(), resolveChapterProductionAction: vi.fn(), triggerChapterReview: vi.fn(), resumeChapterProduction: vi.fn(), startChapterProductionV2: vi.fn(), requestStudioFeedbackRevision: vi.fn() }))
 const project = (id: string) => ({ id, title: `Novel ${id}`, metadata: {} }) as Project
 const chapter = (id: string, number = 1) => ({ id, title: `Chapter ${id}`, chapter_number: number, metadata: {}, current_draft_document_id: `doc-${id}` }) as Chapter
 function Navigation() {
@@ -24,7 +24,21 @@ beforeEach(() => {
   vi.mocked(listChapters).mockResolvedValue([chapter('a'), chapter('b', 2)])
   vi.mocked(readDocumentContent).mockImplementation(async id => ({ document_id: id, version_id: `${id}-v1`, content: `Text ${id}` }))
   const versions = new Map<string, string>()
-  vi.mocked(readStudioFeedback).mockImplementation(async (_project, chapter_id, region) => ({ chapter_id, region, document_id: `doc-${chapter_id}`, source_version_id: versions.get(`doc-${chapter_id}`) || `doc-${chapter_id}-v1`, revision: 0, comments: [], requirements: '', read_only: false }))
+  const feedbackData = new Map<string, { requirements: string; comments: StudioFeedback['comments']; revision: number }>()
+  vi.mocked(readStudioFeedback).mockImplementation(async (_project, chapter_id, region) => {
+    const data = feedbackData.get(`${chapter_id}:${region}`) || { requirements: '', comments: [], revision: 0 }
+    return { chapter_id, region, document_id: `doc-${chapter_id}`, source_version_id: versions.get(`doc-${chapter_id}`) || `doc-${chapter_id}-v1`, revision: data.revision, comments: data.comments, requirements: data.requirements, read_only: false }
+  })
+  vi.mocked(writeStudioFeedback).mockImplementation(async (_project, chapter_id, region, payload) => {
+    const data = feedbackData.get(`${chapter_id}:${region}`) || { requirements: '', comments: [], revision: 0 }
+    const next = { requirements: payload.requirements ?? data.requirements, comments: payload.comments ?? data.comments, revision: (payload.expected_revision ?? data.revision) + 1 }
+    feedbackData.set(`${chapter_id}:${region}`, next)
+    return { chapter_id, region, document_id: `doc-${chapter_id}`, source_version_id: payload.expected_current_version_id, revision: next.revision, comments: next.comments, requirements: next.requirements, read_only: false }
+  })
+  vi.mocked(submitStudioFeedback).mockImplementation(async (_project, chapter_id, region, payload) => {
+    const data = feedbackData.get(`${chapter_id}:${region}`) || { requirements: '', comments: [], revision: 0 }
+    return { id: payload.request_id, chapter_id, region, document_id: `doc-${chapter_id}`, source_version_id: payload.expected_current_version_id, feedback_revision: data.revision + 1, comments: data.comments, requirements: data.requirements, created_at: '2026-09-13T00:00:00Z' }
+  })
   vi.mocked(writeDocument).mockImplementation(async id => { versions.set(id, 'saved-v2'); return { id: 'saved-v2' } as Awaited<ReturnType<typeof writeDocument>> })
 })
 afterEach(() => { cleanup(); vi.restoreAllMocks() })
@@ -337,4 +351,127 @@ it('handles invalid chapter in preview without crashing', async () => {
   )
   expect(await screen.findByRole('alert')).toHaveTextContent('此作品中未找到该章节')
   expect(screen.getByRole('link', { name: '返回作品' })).toHaveAttribute('href', '/preview/studio')
+})
+
+it('submits formal Draft feedback revision, flushes prose and adopts the new candidate draft', async () => {
+  vi.mocked(listChapters).mockResolvedValue([chapter('a')])
+  vi.mocked(listChapterProductionRuns).mockResolvedValue([{ workflow_run_id: 'run-a' }] as Awaited<ReturnType<typeof listChapterProductionRuns>>)
+  let runState = {
+    chapter_workflow_run_id: 'run-a', chapter_id: 'a', status: 'AUTHOR_REVISION', awaiting_user: true,
+    action_kind: 'author_revision', action_request_id: 'action-a', document_id: 'doc-a', document_version_id: 'doc-a-v1',
+    chief_editor_required: false,
+  } as ChapterProductionState
+  vi.mocked(getChapterProductionRun).mockImplementation(async () => runState)
+  vi.mocked(submitStudioFeedback).mockImplementation(async (_p, _c, _r, payload) => ({
+    id: payload.request_id, chapter_id: 'a', region: 'draft', document_id: 'doc-a', source_version_id: 'doc-a-v1',
+    feedback_revision: 1, comments: [], requirements: '让剧情更加紧凑', created_at: '2026-09-13T00:00:00Z',
+  }))
+  vi.mocked(requestStudioFeedbackRevision).mockImplementation(async () => {
+    runState = { ...runState, document_version_id: 'doc-a-v2', action_request_id: 'action-b' }
+    return { workflow_run_id: 'run-a', draft_document_id: 'doc-a', draft_version_id: 'doc-a-v2', action_request_id: 'action-b' }
+  })
+  vi.mocked(readDocumentContent).mockImplementation(async id => ({
+    document_id: id, version_id: runState.document_version_id || 'doc-a-v1',
+    content: runState.document_version_id === 'doc-a-v2' ? '修改后的紧凑正文' : '初始正文 Text doc-a',
+  }))
+
+  open('/projects/p/studio/a')
+  const prose = await screen.findByRole('textbox', { name: '章节正文' })
+  await waitFor(() => expect(prose).not.toHaveAttribute('readonly'))
+  expect(prose).toHaveValue('初始正文 Text doc-a')
+
+  const requirementsInput = screen.getByRole('textbox', { name: '给写作 Agent 的要求' })
+  fireEvent.change(requirementsInput, { target: { value: '让剧情更加紧凑' } })
+
+  const sendBtn = screen.getByRole('button', { name: '发送写作要求' })
+  await waitFor(() => expect(sendBtn).not.toBeDisabled())
+  fireEvent.click(sendBtn)
+
+  await waitFor(() => expect(screen.getByRole('textbox', { name: '章节正文' })).toHaveValue('修改后的紧凑正文'))
+  expect(submitStudioFeedback).toHaveBeenCalledWith('p', 'a', 'draft', expect.objectContaining({
+    expected_current_version_id: 'doc-a-v1',
+  }))
+  expect(requestStudioFeedbackRevision).toHaveBeenCalledWith('p', 'a', 'run-a', expect.objectContaining({
+    document_id: 'doc-a', version_id: 'doc-a-v1', action_request_id: 'action-a',
+  }), expect.any(AbortSignal))
+})
+
+it('recovers a lost feedback revision response via retry button and preserves request identity', async () => {
+  vi.mocked(listChapters).mockResolvedValue([chapter('a')])
+  vi.mocked(listChapterProductionRuns).mockResolvedValue([{ workflow_run_id: 'run-a' }] as Awaited<ReturnType<typeof listChapterProductionRuns>>)
+  let runState = {
+    chapter_workflow_run_id: 'run-a', chapter_id: 'a', status: 'AUTHOR_REVISION', awaiting_user: true,
+    action_kind: 'author_revision', action_request_id: 'action-a', document_id: 'doc-a', document_version_id: 'doc-a-v1',
+    chief_editor_required: false,
+  } as ChapterProductionState
+  vi.mocked(getChapterProductionRun).mockImplementation(async () => runState)
+  vi.mocked(submitStudioFeedback).mockImplementation(async (_p, _c, _r, payload) => ({
+    id: payload.request_id, chapter_id: 'a', region: 'draft', document_id: 'doc-a', source_version_id: 'doc-a-v1',
+    feedback_revision: 1, comments: [], requirements: '重试修改要求', created_at: '2026-09-13T00:00:00Z',
+  }))
+  vi.mocked(requestStudioFeedbackRevision)
+    .mockRejectedValueOnce(new Error('Network loss during feedback revision'))
+    .mockImplementationOnce(async () => {
+      runState = { ...runState, document_version_id: 'doc-a-v2', action_request_id: 'action-b' }
+      return { workflow_run_id: 'run-a', draft_document_id: 'doc-a', draft_version_id: 'doc-a-v2', action_request_id: 'action-b' }
+    })
+  vi.mocked(readDocumentContent).mockImplementation(async id => ({
+    document_id: id, version_id: runState.document_version_id || 'doc-a-v1',
+    content: runState.document_version_id === 'doc-a-v2' ? '重试成功的新正文' : '初始正文 Text doc-a',
+  }))
+
+  open('/projects/p/studio/a')
+  await screen.findByRole('textbox', { name: '章节正文' })
+  const requirementsInput = screen.getByRole('textbox', { name: '给写作 Agent 的要求' })
+  fireEvent.change(requirementsInput, { target: { value: '重试修改要求' } })
+
+  const sendBtn = screen.getByRole('button', { name: '发送写作要求' })
+  await waitFor(() => expect(sendBtn).not.toBeDisabled())
+  fireEvent.click(sendBtn)
+
+  const retryBtn = await screen.findByRole('button', { name: '重试修改' })
+  expect(requestStudioFeedbackRevision).toHaveBeenCalledTimes(1)
+
+  fireEvent.click(retryBtn)
+  await waitFor(() => expect(screen.getByRole('textbox', { name: '章节正文' })).toHaveValue('重试成功的新正文'))
+  expect(requestStudioFeedbackRevision).toHaveBeenCalledTimes(2)
+  const firstSubmission = vi.mocked(requestStudioFeedbackRevision).mock.calls[0][3]
+  const secondSubmission = vi.mocked(requestStudioFeedbackRevision).mock.calls[1][3]
+  expect(firstSubmission.submission_id).toBe(secondSubmission.submission_id)
+})
+
+it('restores pending feedback revision upon reload and completes revision via retry', async () => {
+  vi.mocked(listChapters).mockResolvedValue([chapter('a')])
+  vi.mocked(listChapterProductionRuns).mockResolvedValue([{ workflow_run_id: 'run-a' }] as Awaited<ReturnType<typeof listChapterProductionRuns>>)
+  let runState = {
+    chapter_workflow_run_id: 'run-a', chapter_id: 'a', status: 'AUTHOR_REVISION', awaiting_user: true,
+    action_kind: 'author_revision', action_request_id: 'action-a', document_id: 'doc-a', document_version_id: 'doc-a-v1',
+    chief_editor_required: false,
+  } as ChapterProductionState
+  vi.mocked(getChapterProductionRun).mockImplementation(async () => runState)
+  vi.mocked(submitStudioFeedback).mockImplementation(async (_p, _c, _r, payload) => ({
+    id: payload.request_id, chapter_id: 'a', region: 'draft', document_id: 'doc-a', source_version_id: 'doc-a-v1',
+    feedback_revision: 1, comments: [], requirements: '恢复待核对要求', created_at: '2026-09-13T00:00:00Z',
+  }))
+  vi.mocked(requestStudioFeedbackRevision).mockImplementation(async () => {
+    runState = { ...runState, document_version_id: 'doc-a-v2', action_request_id: 'action-b' }
+    return { workflow_run_id: 'run-a', draft_document_id: 'doc-a', draft_version_id: 'doc-a-v2', action_request_id: 'action-b' }
+  })
+  vi.mocked(readDocumentContent).mockImplementation(async id => ({
+    document_id: id, version_id: runState.document_version_id || 'doc-a-v1',
+    content: runState.document_version_id === 'doc-a-v2' ? '恢复后成功的新正文' : '初始正文 Text doc-a',
+  }))
+
+  sessionStorage.setItem('guranovel:feedback-revision:p:a', JSON.stringify({
+    runId: 'run-a', documentId: 'doc-a', actionId: 'action-a',
+    submission: { request_id: 'sub-recovered', expected_current_version_id: 'doc-a-v1', expected_revision: 0, comment_ids: [] },
+  }))
+
+  open('/projects/p/studio/a')
+  expect(await screen.findByRole('alert')).toHaveTextContent('上次反馈修改尚待核对，重试会恢复原请求。')
+  const retryBtn = screen.getByRole('button', { name: '重试修改' })
+  fireEvent.click(retryBtn)
+
+  await waitFor(() => expect(screen.getByRole('textbox', { name: '章节正文' })).toHaveValue('恢复后成功的新正文'))
+  expect(sessionStorage.getItem('guranovel:feedback-revision:p:a')).toBeNull()
 })
