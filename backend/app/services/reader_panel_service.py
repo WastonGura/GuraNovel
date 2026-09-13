@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 import re
@@ -183,8 +184,9 @@ class ReaderPanelSessionResult:
 class ReaderPanelService:
     """Service managing reader panel lifecycle, immutable version binding, and cold-reading sample collection."""
 
-    def __init__(self, db: AsyncSession) -> None:
+    def __init__(self, db: AsyncSession, provider: Any = None) -> None:
         self._db = db
+        self._provider = provider
 
     async def _manuscript_segments(self, panel, version):
         if version is None or version.content_hash != panel.source_hash:
@@ -700,7 +702,12 @@ class ReaderPanelService:
             await self._db.commit()
 
             try:
-                output = await asyncio.to_thread(invoke, request)
+                if inspect.iscoroutinefunction(invoke):
+                    output = await invoke(request)
+                else:
+                    output = await asyncio.to_thread(invoke, request)
+                    if inspect.isawaitable(output):
+                        output = await output
                 if type(output) is not expected_type:
                     raise ProviderInvalidOutputError()
                 if validate is not None:
@@ -1863,7 +1870,7 @@ class ReaderPanelService:
         provider: Any = None,
     ) -> ReaderPanelSessionResult:
         """Executes isolated cold reading across reader runs and locks initial reports upon quorum."""
-        panel_provider = provider or DeterministicReaderPanelProvider(
+        panel_provider = provider or self._provider or DeterministicReaderPanelProvider(
             scenario=ReaderPanelFakeScenario.CLEAN
         )
 
@@ -2096,14 +2103,15 @@ class ReaderPanelService:
         else:
             await self._db.commit()
 
+        effective_provider = provider or self._provider
         if status_value == ReaderPanelStatus.INDEPENDENT_READING.value:
-            return await self.collect_initial_reports(session_id=session_id, provider=provider)
+            return await self.collect_initial_reports(session_id=session_id, provider=effective_provider)
         if status_value in {
             ReaderPanelStatus.INITIAL_REPORTS_LOCKED.value,
             ReaderPanelStatus.ISSUE_EXTRACTION.value,
             ReaderPanelStatus.INITIAL_BALLOTING.value,
         }:
-            return await self.collect_initial_ballots(session_id=session_id, provider=provider)
+            return await self.collect_initial_ballots(session_id=session_id, provider=effective_provider)
         if status_value in {
             ReaderPanelStatus.INITIAL_BALLOTS_LOCKED.value,
             ReaderPanelStatus.DISCUSSING.value,
@@ -2112,14 +2120,14 @@ class ReaderPanelService:
         }:
             if status_value == ReaderPanelStatus.FINAL_BALLOTS_LOCKED.value:
                 return await self.generate_editor_handoff_report(
-                    session_id=session_id, provider=provider
+                    session_id=session_id, provider=effective_provider
                 )
             return await self.run_discussion_and_final_ballots(
-                session_id=session_id, provider=provider
+                session_id=session_id, provider=effective_provider
             )
         if status_value == ReaderPanelStatus.REPORT_GENERATING.value:
             return await self.generate_editor_handoff_report(
-                session_id=session_id, provider=provider
+                session_id=session_id, provider=effective_provider
             )
         if status_value in {
             ReaderPanelStatus.COMPLETED.value,
@@ -2146,7 +2154,7 @@ class ReaderPanelService:
         provider: Any = None,
     ) -> ReaderPanelSessionResult:
         """Extracts server-owned issues and collects isolated initial ballots."""
-        panel_provider = provider or DeterministicReaderPanelProvider(
+        panel_provider = provider or self._provider or DeterministicReaderPanelProvider(
             scenario=ReaderPanelFakeScenario.CLEAN
         )
         compatible_statuses = {
@@ -2706,7 +2714,7 @@ class ReaderPanelService:
         provider: Any = None,
     ) -> ReaderPanelSessionResult:
         """Runs issue-scoped discussion and immutable final ballots."""
-        panel_provider = provider or DeterministicReaderPanelProvider(
+        panel_provider = provider or self._provider or DeterministicReaderPanelProvider(
             scenario=ReaderPanelFakeScenario.CLEAN
         )
         active_statuses = {
@@ -3842,7 +3850,7 @@ class ReaderPanelService:
         provider: Any = None,
     ) -> ReaderPanelSessionResult:
         """Classifies locked final ballots and persists one non-approval editor handoff."""
-        panel_provider = provider or DeterministicReaderPanelProvider(
+        panel_provider = provider or self._provider or DeterministicReaderPanelProvider(
             scenario=ReaderPanelFakeScenario.CLEAN
         )
         severity_values = {item.value for item in Severity}

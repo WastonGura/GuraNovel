@@ -1,3 +1,4 @@
+from typing import Any
 from uuid import UUID
 
 from fastapi import Depends
@@ -13,6 +14,7 @@ from app.agents import (
     DeterministicChapterReviewProvider,
     DeterministicChapterWriterProvider,
     DeterministicMaintenanceProvider,
+    DeterministicReaderPanelProvider,
     EditorAgent,
     LoreAgent,
     LoreChapterFinalAgent,
@@ -21,6 +23,7 @@ from app.agents import (
     OpenAICompatibleConceptChiefEditorProvider,
     OpenAICompatibleConceptProvider,
     OpenAICompatibleMaintenanceProvider,
+    OpenAICompatibleReaderPanelProvider,
     PlotArchitectAgent,
     RevisionAgent,
     WorldbuildingAgent,
@@ -265,10 +268,32 @@ async def get_chapter_production_v2_service(
     return composition.create_service(session)
 
 
+def get_reader_panel_provider(
+    configured_settings=settings,
+) -> Any:
+    """Provide the server-configured provider for reader panel evaluation and moderation."""
+    if configured_settings.reader_panel_provider == "fake":
+        return DeterministicReaderPanelProvider()
+    base_url = configured_settings.openai_compatible_base_url
+    api_key = configured_settings.openai_compatible_api_key
+    model = configured_settings.openai_compatible_model
+    timeout = configured_settings.openai_compatible_timeout_seconds
+    api_key_value = api_key.get_secret_value() if api_key is not None else ""
+    if not base_url or not api_key_value or not model or timeout is None:
+        raise ProviderConfigurationError()
+    return OpenAICompatibleReaderPanelProvider(
+        base_url=base_url,
+        api_key=api_key_value,
+        model=model,
+        timeout_seconds=timeout,
+    )
+
+
 async def get_reader_panel_service(
     session: AsyncSession = Depends(get_db_session),
+    provider: Any = Depends(get_reader_panel_provider),
 ) -> ReaderPanelService:
-    return ReaderPanelService(session)
+    return ReaderPanelService(session, provider=provider)
 
 
 async def get_default_actor_user_id(session: AsyncSession = Depends(get_db_session)) -> UUID:
@@ -292,5 +317,6 @@ __all__ = [
     "get_project_creation_composition",
     "get_project_maintenance_composition",
     "get_project_workspace",
+    "get_reader_panel_provider",
     "get_reader_panel_service",
 ]

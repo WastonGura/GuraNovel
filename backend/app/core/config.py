@@ -41,6 +41,7 @@ class Settings(BaseSettings):
     chapter_production_provider: Literal["fake", "openai_compatible"] = "fake"
     project_creation_provider: Literal["fake", "openai_compatible"] = "fake"
     project_maintenance_provider: Literal["fake", "openai_compatible"] = "fake"
+    reader_panel_provider: Literal["fake", "openai_compatible"] = "fake"
     reader_panel_mode: Literal["off", "quick", "standard", "panel"] = "off"
     openai_compatible_base_url: str | None = None
     openai_compatible_api_key: SecretStr | None = None

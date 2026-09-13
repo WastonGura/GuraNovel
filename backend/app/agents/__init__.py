@@ -173,7 +173,17 @@ from app.agents.reader_panel_fakes import (
 )
 from app.agents.reader_panel_agents import (
     build_blind_ballot_request,
+    build_blind_ballot_user_prompt,
     build_cold_read_request,
+    build_discussion_summary_user_prompt,
+    build_discussion_turn_user_prompt,
+    build_final_ballot_user_prompt,
+    build_initial_reading_user_prompt,
+    build_issue_extraction_user_prompt,
+    build_report_synthesis_user_prompt,
+)
+from app.agents.reader_panel_providers import (
+    OpenAICompatibleReaderPanelProvider,
 )
 from app.agents.maintenance_fakes import (
     DeterministicApplyChangeProvider,
@@ -265,6 +275,7 @@ __all__ = [
     "OpenAICompatibleRevisionPlanProvider",
     "OpenAICompatibleApplyChangeProvider",
     "OpenAICompatiblePostChangeProvider",
+    "OpenAICompatibleReaderPanelProvider",
     "PlotArchitectAgent",
     "ProjectCreationComposition",
     "ConceptArtifactWorkflowError",
@@ -342,7 +353,14 @@ __all__ = [
     "SuggestedAction",
     "TargetAudienceRelevance",
     "build_blind_ballot_request",
+    "build_blind_ballot_user_prompt",
     "build_cold_read_request",
+    "build_discussion_summary_user_prompt",
+    "build_discussion_turn_user_prompt",
+    "build_final_ballot_user_prompt",
+    "build_initial_reading_user_prompt",
+    "build_issue_extraction_user_prompt",
+    "build_report_synthesis_user_prompt",
     "validate_reader_panel_text",
     "WriterContextKind",
     "WriterContextSnapshot",
