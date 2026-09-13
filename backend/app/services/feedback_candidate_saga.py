@@ -466,6 +466,8 @@ async def _finalize_feedback_revision(
         document_id=str(document.id), document_version_id=str(version.id),
         content_hash=version.content_hash, action=binding,
     )
+    from app.services.studio_feedback_revision import record_feedback_revision_result
+    record_feedback_revision_result(run, identity.action_request_id, version.id)
     service._set_attempt(run, None)
     service._append_state(run, checkpoint, next_state)
     await service._commit()

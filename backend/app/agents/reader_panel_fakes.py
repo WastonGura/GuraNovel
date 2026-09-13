@@ -220,7 +220,10 @@ class DeterministicReaderPanelProvider:
                         symptom="Descriptive wording repeated in close proximity",
                         root_cause_hypotheses=["Stylistic draft repetition"],
                         evidence=[EvidenceRef(segment_ids=[second_seg], note="Repetition")],
-                        source_reader_ids=["general_immersive"],
+                        source_reader_ids=["general_immersive"] if any(
+                            item.get("reader_profile_id") == "general_immersive"
+                            for item in request.reader_initial_reports.values()
+                        ) else [next(iter(request.reader_initial_reports))],
                         target_audience_relevance=TargetAudienceRelevance.LOW,
                         minority_risk=False,
                     )

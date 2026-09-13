@@ -5,6 +5,8 @@ import {
   decodeChapterActionKind,
   decodeChapterFailureCode,
   decodeChapterProductionFinalized,
+  decodeChapterProductionReviewReport,
+  getChapterProductionReviewReport,
   decodeChapterProductionRunSummary,
   decodeChapterProductionStarted,
   decodeChapterProductionState,
@@ -105,6 +107,39 @@ function sampleValidFinalized(): Record<string, unknown> {
 function mockJsonResponse(body: unknown, status = 200): void {
   vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(JSON.stringify(body), { status })))
 }
+
+function sampleReviewReport() {
+  return { id: ids.report, project_id: ids.project, chapter_id: ids.chapter, workflow_run_id: ids.run,
+    reviewer_role: 'editor_agent', review_mode: 'chapter_editor', target_document_id: ids.document,
+    target_version_id: ids.version, passed: false, summary: '需要修正时间顺序。',
+    findings: [{ sequence: 1, code: 'timeline.order', severity: 'blocking', required: true,
+      evidence_segment_ids: [ids.segment], rationale: '人物在到达前离开。', suggested_action: '调整抵达和离开的顺序。' }],
+    suggested_actions: ['调整时间顺序'] }
+}
+
+it('loads a report only for the requested project, chapter, run, report and prose version', async () => {
+  const report = sampleReviewReport()
+  mockJsonResponse(report)
+  const target = { documentId: ids.document, versionId: ids.version }
+  expect(await getChapterProductionReviewReport(ids.project, ids.chapter, ids.run, ids.report, target)).toEqual(report)
+  expect(vi.mocked(fetch).mock.calls[0][0]).toContain(`/production-v2/${ids.run}/reports/${ids.report}`)
+  for (const key of ['id', 'project_id', 'chapter_id', 'workflow_run_id', 'target_document_id', 'target_version_id']) {
+    mockJsonResponse({ ...report, [key]: ids.finalVer })
+    await expect(getChapterProductionReviewReport(ids.project, ids.chapter, ids.run, ids.report, target)).rejects.toBeInstanceOf(ApiError)
+  }
+})
+
+it('rejects contradictory outcomes, invalid evidence, duplicate findings and private report metadata', () => {
+  const report = sampleReviewReport(), finding = report.findings[0]
+  for (const invalid of [
+    { ...report, passed: true }, { ...report, review_mode: 'chapter_final_lore' },
+    { ...report, findings: [{ ...finding, required: false }] },
+    { ...report, findings: [{ ...finding, evidence_segment_ids: ['not-a-uuid'] }] },
+    { ...report, findings: [finding, { ...finding, sequence: 2 }] },
+    { ...report, raw_report: { operation_key: 'private' } },
+  ]) expect(() => decodeChapterProductionReviewReport(invalid)).toThrow(ApiError)
+  expect(decodeChapterProductionReviewReport({ ...report, passed: true, findings: [] }).passed).toBe(true)
+})
 
 afterEach(() => {
   vi.unstubAllGlobals()
@@ -370,6 +405,14 @@ describe('Chapter Production V2 API Client', () => {
         body: JSON.stringify({ decision: 'accept' }),
       }),
     )
+  })
+
+  it('binds explicit author acceptance to the saved version and rejects that field on other decisions', async () => {
+    mockJsonResponse(sampleValidUpdated())
+    await resolveChapterProductionAction(ids.project, ids.chapter, ids.run, ids.action, { decision: 'accept', expected_current_version_id: ids.version })
+    expect(fetch).toHaveBeenLastCalledWith(expect.any(String), expect.objectContaining({ body: JSON.stringify({ decision: 'accept', expected_current_version_id: ids.version }) }))
+    expect(() => resolveChapterProductionAction(ids.project, ids.chapter, ids.run, ids.action, { decision: 'submit_manual_edit', content: 'text', expected_current_version_id: ids.version })).toThrow(ApiError)
+    expect(fetch).toHaveBeenCalledTimes(1)
   })
 
   it('resolves action with feedback revision and segment targets', async () => {

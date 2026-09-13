@@ -6,7 +6,7 @@ from collections.abc import Sequence
 from uuid import UUID
 
 from sqlalchemy import func, select
-from sqlalchemy.orm import selectinload
+from sqlalchemy.orm import aliased, selectinload
 
 from app.models import (
     ActionRequest,
@@ -20,7 +20,8 @@ from app.models import (
     ReviewReport,
     WorkflowRun,
 )
-from app.services.author_accept_coordination import _StaleActionAdopted
+from app.core.errors import ConflictError
+from app.services.author_accept_coordination import _StaleActionAdopted, _expiry_precludes_resolution
 from app.services.chapter_production_recovery_reconstruction import locked_state
 from app.services.chapter_production_recovery_shared import (
     _AUTHOR_ACTION_TYPE,
@@ -36,7 +37,6 @@ from app.services.chapter_production_v2_contracts import (
 from app.services.chapter_review_validation import (
     review_action_metadata,
     validated_persisted_review_report,
-    validated_resolved_review_action,
 )
 from app.workflows.chapter_production import (
     ChapterActionBinding,
@@ -57,6 +57,7 @@ async def author_context(
     action_request_id: UUID,
     actor_user_id: UUID,
     adopt_stale: bool = True,
+    expected_current_version_id: UUID | None = None,
 ) -> _AuthorContext:
     await service._require_project_owner(project_id, actor_user_id)
     chapter = await service._chapter(project_id, chapter_id, lock=True)
@@ -70,10 +71,7 @@ async def author_context(
     ):
         raise _invalid()
     action, pending_count = await _locked_author_action(
-        service,
-        run=run,
-        project_id=project_id,
-        chapter_id=chapter_id,
+        service, run=run, project_id=project_id, chapter_id=chapter_id,
         action_request_id=action_request_id,
     )
     if (
@@ -97,6 +95,9 @@ async def author_context(
         version_id=version_id,
         content_hash=metadata["content_hash"],
     )
+    if expected_current_version_id is not None:
+        if document is not None and document.current_version_id != expected_current_version_id:
+            raise ConflictError("The saved draft changed before submission.")
     if document is None:
         if not adopt_stale:
             raise _invalid() from None
@@ -111,6 +112,7 @@ async def author_context(
             document_id=document_id,
             version_id=version_id,
             metadata=metadata,
+            expected_current_version_id=expected_current_version_id,
         )
     if (
         version is None
@@ -121,10 +123,8 @@ async def author_context(
     ):
         raise _invalid()
     await service.documents.derive_chapter_segment_map(
-        project_id=project_id,
-        chapter_id=chapter_id,
-        document_id=document.id,
-        version_id=version.id,
+        project_id=project_id, chapter_id=chapter_id,
+        document_id=document.id, version_id=version.id,
     )
     binding = _build_author_binding(action, run, chapter, document, version)
     return _AuthorContext(run, state, checkpoint, action, binding, document, version)
@@ -304,9 +304,11 @@ async def _adopt_stale_author_context(
     document_id: UUID,
     version_id: UUID,
     metadata: dict[str, object],
+    expected_current_version_id: UUID | None = None,
 ) -> _AuthorContext:
     stale_document, stale_version = await _locked_stale_author_document(
-        service, run=run, document_id=document_id, version_id=version_id
+        service, run=run, document_id=document_id, version_id=version_id,
+        expected_current_version_id=expected_current_version_id,
     )
     if (
         stale_document is None
@@ -319,6 +321,11 @@ async def _adopt_stale_author_context(
         or stale_version.workflow_run_id is not None
     ):
         raise _invalid()
+    if expected_current_version_id is not None:
+        await _validate_saved_user_chain(service, document_id, version_id, stale_version, actor_user_id)
+        database_now = await service.session.scalar(select(func.clock_timestamp()))
+        if _expiry_precludes_resolution(action.expires_at, database_now):
+            raise _invalid()
     await _commit_stale_author_adoption(
         service,
         run=run,
@@ -342,6 +349,7 @@ async def _locked_stale_author_document(
     run: WorkflowRun,
     document_id: UUID,
     version_id: UUID,
+    expected_current_version_id: UUID | None = None,
 ) -> tuple[Document | None, DocumentVersion | None]:
     stale_document = await service.session.scalar(
         select(Document)
@@ -356,13 +364,17 @@ async def _locked_stale_author_document(
         )
         .with_for_update()
     )
+    if expected_current_version_id is not None and (
+        stale_document is None or stale_document.current_version_id != expected_current_version_id
+    ):
+        raise ConflictError("The saved draft changed before submission.")
     stale_version = (
         await service.session.scalar(
             select(DocumentVersion)
             .where(
                 DocumentVersion.id == stale_document.current_version_id,
                 DocumentVersion.document_id == document_id,
-                DocumentVersion.parent_version_id == version_id,
+                *([DocumentVersion.parent_version_id == version_id] if expected_current_version_id is None else []),
             )
             .with_for_update()
         )
@@ -370,6 +382,27 @@ async def _locked_stale_author_document(
         else None
     )
     return stale_document, stale_version
+
+
+async def _validate_saved_user_chain(service, document_id, base_version_id, current_version, actor_user_id):
+    # One recursive query proves ancestry without one round trip per autosave.
+    chain = select(DocumentVersion).where(
+        DocumentVersion.id == current_version.id, DocumentVersion.document_id == document_id,
+    ).cte("saved_user_chain", recursive=True)
+    parent = aliased(DocumentVersion)
+    chain = chain.union_all(select(parent).join(chain, parent.id == chain.c.parent_version_id).where(
+        parent.document_id == document_id, chain.c.id != base_version_id,
+        parent.version_number < chain.c.version_number,
+    ))
+    versions = (await service.session.execute(select(chain))).mappings().all()
+    if not any(version["id"] == base_version_id for version in versions):
+        raise _invalid()
+    for version in versions:
+        if version["id"] == base_version_id:
+            continue
+        if (version["source"] != DocumentSource.USER.value or version["actor_user_id"] != actor_user_id
+                or version["agent_role"] is not None or version["workflow_run_id"] is not None):
+            raise _invalid()
 
 
 async def _commit_stale_author_adoption(
@@ -522,7 +555,8 @@ async def _validate_review_revision_reports(
             stage=stage,
         )
     trigger_mode = report_slots[-1][1]
-    await validated_resolved_review_action(
+    from app.services.studio_review_revision import validate_revision_authority
+    await validate_revision_authority(
         service,
         run=run,
         document=document,

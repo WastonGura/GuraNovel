@@ -644,6 +644,13 @@ export function getChapter(projectId: string, chapterId: string): Promise<Chapte
   return request('GET', () => apiPath('projects', projectId, 'chapters', chapterId), decodeChapter)
 }
 
+export function approveStudioOutline(projectId: string, chapterId: string, documentId: string, versionId: string): Promise<void> {
+  return request('POST', () => apiPath('projects', projectId, 'chapters', chapterId, 'outline', 'approve'), value => {
+    const data = object(value)
+    if (data.chapter_id !== chapterId || data.document_id !== documentId || data.version_id !== versionId) throw invalidResponse()
+  }, { document_id: documentId, expected_current_version_id: versionId })
+}
+
 export function startChapterProduction(projectId: string, chapterId: string): Promise<ChapterProductionRun> {
   return request('POST', () => apiPath('projects', projectId, 'chapters', chapterId, 'production-runs'), decodeRun)
 }
@@ -677,12 +684,113 @@ export function listDocumentVersions(documentId: string): Promise<DocumentVersio
   })
 }
 
+export interface RestorePoint {
+  id: string; chapter_id: string; document_id: string; version_id: string; summary: string; created_at: string
+}
+export interface RestorePointRequest { request_id: string; expected_current_version_id: string }
+
+export type FeedbackRegion = 'outline' | 'draft'
+export interface StudioComment {
+  id: string; start: number; end: number; quote: string; text: string; color: string; submitted?: boolean; orphaned?: boolean
+}
+export interface StudioFeedback {
+  chapter_id: string; region: FeedbackRegion; document_id: string | null; source_version_id: string | null
+  revision: number; comments: StudioComment[]; requirements: string; read_only: boolean
+}
+export interface FeedbackWriteRequest extends RestorePointRequest {
+  expected_revision: number; comments: StudioComment[]; requirements: string
+}
+export interface FeedbackSubmitRequest extends RestorePointRequest {
+  expected_revision: number; comment_ids: string[]
+}
+export interface FeedbackSubmission {
+  id: string; chapter_id: string; region: FeedbackRegion; document_id: string; source_version_id: string
+  feedback_revision: number; comments: StudioComment[]; requirements: string; created_at: string
+}
+export interface RestorePointFeedback {
+  point_id: string; document_id: string; source_version_id: string; available: boolean
+  comments: StudioComment[]; requirements: string
+}
+function decodeFeedbackRegion(value: unknown): FeedbackRegion {
+  if (value !== 'outline' && value !== 'draft') throw invalidResponse()
+  return value
+}
+function decodeStudioComments(value: unknown): StudioComment[] {
+  if (!Array.isArray(value)) throw invalidResponse()
+  const ids = new Set<string>()
+  return value.map(item => {
+    const data = object(item), id = string(data.id), start = integer(data.start), end = integer(data.end)
+    if (!id || ids.has(id) || start < 0 || end < start) throw invalidResponse()
+    ids.add(id)
+    const color = string(data.color)
+    if (!/^#[0-9a-f]{6}$/.test(color)) throw invalidResponse()
+    return { id, start, end, color, quote: string(data.quote), text: string(data.text),
+      submitted: boolean(data.submitted), orphaned: boolean(data.orphaned) }
+  })
+}
+export function decodeStudioFeedback(value: unknown): StudioFeedback {
+  const data = object(value), revision = integer(data.revision)
+  if (revision < 0) throw invalidResponse()
+  return { chapter_id: string(data.chapter_id), region: decodeFeedbackRegion(data.region),
+    document_id: nullableString(data.document_id), source_version_id: nullableString(data.source_version_id),
+    revision, comments: decodeStudioComments(data.comments), requirements: string(data.requirements), read_only: boolean(data.read_only) }
+}
+function decodeFeedbackSubmission(value: unknown): FeedbackSubmission {
+  const data = object(value), feedback_revision = integer(data.feedback_revision)
+  if (feedback_revision < 1) throw invalidResponse()
+  return { id: string(data.id), chapter_id: string(data.chapter_id), region: decodeFeedbackRegion(data.region),
+    document_id: string(data.document_id), source_version_id: string(data.source_version_id), feedback_revision,
+    comments: decodeStudioComments(data.comments), requirements: string(data.requirements), created_at: string(data.created_at) }
+}
+export function readStudioFeedback(projectId: string, chapterId: string, region: FeedbackRegion): Promise<StudioFeedback> {
+  return request('GET', () => apiPath('projects', projectId, 'chapters', chapterId, 'feedback', region), decodeStudioFeedback)
+}
+export function writeStudioFeedback(projectId: string, chapterId: string, region: FeedbackRegion, payload: FeedbackWriteRequest): Promise<StudioFeedback> {
+  return request('PUT', () => apiPath('projects', projectId, 'chapters', chapterId, 'feedback', region), decodeStudioFeedback, payload)
+}
+export function submitStudioFeedback(projectId: string, chapterId: string, region: FeedbackRegion, payload: FeedbackSubmitRequest): Promise<FeedbackSubmission> {
+  return request('POST', () => apiPath('projects', projectId, 'chapters', chapterId, 'feedback', region, 'submissions'), decodeFeedbackSubmission, payload)
+}
+export function readFeedbackSubmission(projectId: string, chapterId: string, region: FeedbackRegion, id: string): Promise<FeedbackSubmission> {
+  return request('GET', () => apiPath('projects', projectId, 'chapters', chapterId, 'feedback', region, 'submissions', id), decodeFeedbackSubmission)
+}
+export function readRestorePointFeedback(projectId: string, chapterId: string, pointId: string): Promise<RestorePointFeedback> {
+  return request('GET', () => apiPath('projects', projectId, 'chapters', chapterId, 'restore-points', pointId, 'feedback'), value => {
+    const data = object(value)
+    const result = { point_id: string(data.point_id), document_id: string(data.document_id), source_version_id: string(data.source_version_id),
+      available: boolean(data.available), comments: decodeStudioComments(data.comments), requirements: string(data.requirements) }
+    if (result.point_id !== pointId || (!result.available && (result.comments.length > 0 || result.requirements))) throw invalidResponse()
+    return result
+  })
+}
+function decodeRestorePoint(value: unknown): RestorePoint {
+  const data = object(value)
+  return { id: string(data.id), chapter_id: string(data.chapter_id), document_id: string(data.document_id),
+    version_id: string(data.version_id), summary: string(data.summary), created_at: string(data.created_at) }
+}
+export function listRestorePoints(projectId: string, chapterId: string): Promise<RestorePoint[]> {
+  return request('GET', () => apiPath('projects', projectId, 'chapters', chapterId, 'restore-points'), value => {
+    if (!Array.isArray(value)) throw invalidResponse()
+    return value.map(decodeRestorePoint)
+  })
+}
+export function createRestorePoint(projectId: string, chapterId: string, payload: RestorePointRequest): Promise<RestorePoint> {
+  return request('POST', () => apiPath('projects', projectId, 'chapters', chapterId, 'restore-points'), decodeRestorePoint, payload)
+}
+export function restorePoint(projectId: string, chapterId: string, pointId: string, payload: RestorePointRequest): Promise<DocumentVersion> {
+  return request('POST', () => apiPath('projects', projectId, 'chapters', chapterId, 'restore-points', pointId, 'restore'), decodeDocumentVersion, payload)
+}
+
 export function readDocumentVersionContent(documentId: string, versionId: string): Promise<DocumentContent> {
   return request('GET', () => apiPath('documents', documentId, 'versions', versionId, 'content'), decodeDocumentContent)
 }
 
 export function writeDocument(documentId: string, payload: WriteDocumentRequest): Promise<DocumentVersion> {
   return request('PUT', () => apiPath('documents', documentId, 'content'), decodeDocumentVersion, payload)
+}
+
+export function writeStudioDraft(projectId: string, chapterId: string, payload: Pick<WriteDocumentRequest, 'content' | 'expected_current_version_id'>): Promise<DocumentVersion> {
+  return request('PUT', () => apiPath('projects', projectId, 'chapters', chapterId, 'draft', 'content'), decodeDocumentVersion, payload)
 }
 
 export function restoreDocument(

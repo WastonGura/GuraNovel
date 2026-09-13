@@ -48,3 +48,8 @@ Thumbs.db
 # Logs
 *.log
 logs/
+
+# Playwright and test outputs
+.playwright-cli/
+frontend/.playwright-cli/
+frontend/output/

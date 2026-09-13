@@ -497,7 +497,7 @@ class ProfileRegistry:
                     "review_report_refs",
                 }
             ),
-            frozenset(),
+            frozenset({"selected_findings"}),
         ),
         ("general_immersive", None): _ProfileManifest(
             "reader_general_immersive.yaml",

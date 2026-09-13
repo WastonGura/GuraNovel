@@ -20,6 +20,7 @@ from pydantic import (
 )
 
 from app.llm.errors import ProviderInvalidOutputError
+from app.agents.chapter_review_contracts import ChapterReviewFinding
 
 
 _UUID_FIELDS = (
@@ -80,6 +81,7 @@ class _StrictChapterModel(BaseModel):
         "target_segment_ids",
         "feedback_refs",
         "review_report_refs",
+        "selected_findings",
         "segments",
         "self_check",
         "uncertainty_markers",
@@ -292,14 +294,27 @@ class UserFeedbackRevisionRequest(_RevisionRequest):
         return self
 
 
+class SelectedReviewFinding(_StrictChapterModel):
+    report_id: UUID
+    finding: ChapterReviewFinding
+
+
 class ReviewDrivenRevisionRequest(_RevisionRequest):
     review_report_refs: tuple[ReviewReportReference, ...] = Field(min_length=1, max_length=16)
+    selected_findings: tuple[SelectedReviewFinding, ...] = Field(default=(), max_length=384)
 
     @model_validator(mode="after")
     def valid_reports(self) -> Self:
         ids = [item.report_id for item in self.review_report_refs]
         if len(ids) != len(set(ids)):
             raise ValueError("duplicate review report reference")
+        selected = [(item.report_id, item.finding.sequence) for item in self.selected_findings]
+        if len(selected) != len(set(selected)) or any(
+            item.report_id not in ids
+            or not set(item.finding.evidence_segment_ids) <= set(self.target_segment_ids)
+            for item in self.selected_findings
+        ):
+            raise ValueError("invalid selected review finding")
         lineage = (
             self.project_id,
             self.chapter_id,

@@ -229,6 +229,17 @@ describe('project list', () => {
     expect(dialog).toHaveClass('is-closing')
   })
 
+  it('restores the designed detail from its URL and opens the exact Studio chapter', async () => {
+    mockedApi.listProjects.mockResolvedValue([project()])
+    mockedApi.getProject.mockResolvedValue(project())
+    mockedApi.listChapters.mockResolvedValue([chapter()])
+    renderApp('/?project=project-1')
+    expect(await screen.findByRole('dialog', { name: 'Archive of Ash' })).toBeInTheDocument()
+    fireEvent.click(await screen.findByRole('button', { name: /第7话/ }))
+    await waitFor(() => expect(screen.getByTestId('location')).toHaveTextContent('/projects/project-1/studio/chapter-1'))
+    expect(await screen.findByRole('region', { name: 'Create 工作区' })).toBeInTheDocument()
+  })
+
   it('moves the dashboard search through hover, active, and leaving states', async () => {
     mockedApi.listProjects.mockResolvedValue([project()])
     renderApp()

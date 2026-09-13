@@ -31,6 +31,7 @@ from app.workflows.chapter_production import (
     ChapterProductionStatus,
 )
 from app.workspace.hashing import sha256_content
+from app.services.review_revision_selection import revision_input_hash
 
 
 async def fail_provider(
@@ -231,7 +232,7 @@ async def _recover_review_attempt(
         if report is None:
             raise ChapterProductionV2ReconciliationError()
         reports.append(report)
-    if service._review_report_input_hash(reports) != attempt.get("report_input_hash"):
+    if revision_input_hash(service, run, reports) != attempt.get("report_input_hash"):
         raise ChapterProductionV2ReconciliationError()
 
 

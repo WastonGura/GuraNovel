@@ -96,7 +96,7 @@ def test_handoff_is_one_way_bounded_and_service_style() -> None:
     for expected_call in (
         "service._review_revision_context",
         "service._review_revision_request",
-        "service._review_report_input_hash",
+        "revision_input_hash(service, context.run, context.reports)",
         "service._review_operation_key",
         "service._attempt_payload",
         "service._set_attempt",

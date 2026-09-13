@@ -74,6 +74,13 @@ class AgentOutputInvalidError(AppError):
     default_message = "The agent returned an invalid output."
 
 
+class ValidationError(AppError):
+    status_code = status.HTTP_422_UNPROCESSABLE_CONTENT
+    code = "validation_error"
+    default_message = "The request payload is invalid."
+
+
+
 def error_response(
     *,
     status_code: int,

@@ -96,6 +96,38 @@ def _start(document: Document, version: DocumentVersion, key: str, **extra: obje
     }
 
 
+async def test_individual_invitations_bind_replay_and_report_identity(
+    reader_panel_client: httpx.AsyncClient, async_session: AsyncSession, tmp_path: Path,
+) -> None:
+    project, chapter, document, version = await _seed_chapter(async_session, tmp_path / "invited")
+    base = _url(project.id, chapter.id)
+    payload = _start(document, version, "invited", reader_profile_ids=["studio_plot", "studio_world"])
+    for readers in ([], ["studio_plot", "studio_plot"], ["invented"], ["studio_plot", "studio_world", "studio_emotion"]):
+        response = await reader_panel_client.post(base, json={**payload, "reader_profile_ids": readers})
+        assert response.status_code == 422
+    created = await reader_panel_client.post(base, json=payload)
+    assert created.status_code == 201, created.text
+    result = created.json()
+    assert result["reader_profile_ids"] == ["studio_plot", "studio_world"]
+    assert result["planned_readers"] == 2 and result["simulated"] is True
+    repeated = await reader_panel_client.post(base, json=payload)
+    assert repeated.json()["session_id"] == result["session_id"]
+    changed = await reader_panel_client.post(base, json={**payload, "reader_profile_ids": ["studio_plot", "studio_emotion"]})
+    assert changed.status_code == 409
+    session_url = f"{base}/{result['session_id']}"
+    for _ in range(6):
+        advanced = await reader_panel_client.post(f"{session_url}/resume", json={})
+        assert advanced.status_code == 200, advanced.text
+        if not advanced.json()["permitted_operations"]:
+            break
+    detail = await reader_panel_client.get(f"{session_url}?include_initial_reports=true&include_transcript=true")
+    assert detail.status_code == 200, detail.text
+    assert detail.json()["status"] in {"completed", "degraded_completed"}
+    assert {item["reader_profile_id"] for item in detail.json()["initial_reports"]} == {"studio_plot", "studio_world"}
+    for message in detail.json()["transcript"]:
+        assert message.get("reader_profile_id") in ({"studio_plot", "studio_world"} if message["speaker_type"] == "reader" else {None})
+
+
 async def test_reader_panel_http_scope_noop_replay_pagination_and_lifecycle(
     reader_panel_client: httpx.AsyncClient,
     async_session: AsyncSession,
@@ -149,7 +181,8 @@ async def test_reader_panel_http_scope_noop_replay_pagination_and_lifecycle(
     assert detail.json()["initial_reports"] == []
     assert detail.json()["transcript"] == []
     assert "config_snapshot" not in detail.text
-    assert "reader_profile_id" not in detail.text
+    assert detail.json()["reader_profile_ids"] == ["general_immersive", "low_patience"]
+    assert "reader_run_id" not in detail.text
 
     cross_scope = await reader_panel_client.get(f"{_url(uuid4(), chapter.id)}/{session_id}")
     assert cross_scope.status_code == 404

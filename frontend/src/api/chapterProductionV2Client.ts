@@ -67,6 +67,73 @@ export interface ChapterProductionRunSummary {
   updated_at: string
 }
 
+export interface ChapterReviewFinding {
+  sequence: number
+  code: string
+  severity: 'blocking' | 'warning' | 'note'
+  required: boolean
+  evidence_segment_ids: string[]
+  rationale: string
+  suggested_action: string
+}
+
+export interface ChapterProductionReviewReport {
+  id: string
+  project_id: string
+  chapter_id: string
+  workflow_run_id: string
+  reviewer_role: 'editor_agent' | 'chief_editor_agent' | 'lore_agent'
+  review_mode: string
+  target_document_id: string
+  target_version_id: string
+  passed: boolean
+  summary: string
+  findings: ChapterReviewFinding[]
+  suggested_actions: string[]
+}
+
+export function decodeChapterProductionReviewReport(value: unknown): ChapterProductionReviewReport {
+  if (!isRecord(value) || !hasOnlyKeys(value, ['id', 'project_id', 'chapter_id', 'workflow_run_id', 'reviewer_role',
+    'review_mode', 'target_document_id', 'target_version_id', 'passed', 'summary', 'findings', 'suggested_actions'])) throw invalidResponse()
+  const modes = { editor_agent: 'chapter_editor', chief_editor_agent: 'chapter_chief_final', lore_agent: 'chapter_final_lore' }
+  const role = value.reviewer_role
+  if (role !== 'editor_agent' && role !== 'chief_editor_agent' && role !== 'lore_agent') throw invalidResponse()
+  if (value.review_mode !== modes[role] || !Array.isArray(value.findings) || value.findings.length > 128
+    || !Array.isArray(value.suggested_actions) || value.suggested_actions.length > 16) throw invalidResponse()
+  const findings = value.findings.map((item: unknown, index: number): ChapterReviewFinding => {
+    if (!isRecord(item) || !hasOnlyKeys(item, ['sequence', 'code', 'severity', 'required', 'evidence_segment_ids', 'rationale', 'suggested_action'])
+      || item.sequence !== index + 1 || !['blocking', 'warning', 'note'].includes(String(item.severity))
+      || item.required !== (item.severity === 'blocking') || !Array.isArray(item.evidence_segment_ids)) throw invalidResponse()
+    const evidence = item.evidence_segment_ids.map(validateUuid)
+    if (new Set(evidence).size !== evidence.length) throw invalidResponse()
+    return { sequence: index + 1, code: validateNonEmptyString(item.code), severity: item.severity as ChapterReviewFinding['severity'],
+      required: item.required, evidence_segment_ids: evidence, rationale: validateNonEmptyString(item.rationale),
+      suggested_action: validateNonEmptyString(item.suggested_action) }
+  })
+  const passed = validateBoolean(value.passed)
+  const actions = value.suggested_actions.map(validateNonEmptyString)
+  if (new Set(findings.map(item => item.code)).size !== findings.length || new Set(actions).size !== actions.length
+    || passed === findings.some(item => item.severity === 'blocking')) throw invalidResponse()
+  return { id: validateUuid(value.id), project_id: validateUuid(value.project_id), chapter_id: validateUuid(value.chapter_id),
+    workflow_run_id: validateUuid(value.workflow_run_id), reviewer_role: role, review_mode: modes[role],
+    target_document_id: validateUuid(value.target_document_id), target_version_id: validateUuid(value.target_version_id),
+    passed, summary: validateNonEmptyString(value.summary), findings, suggested_actions: actions }
+}
+
+export function getChapterProductionReviewReport(
+  projectId: string, chapterId: string, workflowRunId: string, reportId: string,
+  target: { documentId: string; versionId: string }, signal?: AbortSignal,
+): Promise<ChapterProductionReviewReport> {
+  const pId = validateUuid(projectId), cId = validateUuid(chapterId), rId = validateUuid(workflowRunId), id = validateUuid(reportId)
+  const documentId = validateUuid(target.documentId), versionId = validateUuid(target.versionId)
+  return request('GET', () => apiPath('projects', pId, 'chapters', cId, 'production-v2', rId, 'reports', id), value => {
+    const report = decodeChapterProductionReviewReport(value)
+    if (report.id !== id || report.project_id !== pId || report.chapter_id !== cId || report.workflow_run_id !== rId
+      || report.target_document_id !== documentId || report.target_version_id !== versionId) throw invalidResponse()
+    return report
+  }, undefined, { signal })
+}
+
 export interface ChapterProductionStarted {
   workflow_run_id: string
   action_request_id: string
@@ -95,6 +162,7 @@ export interface ResolveChapterProductionV2ActionPayload {
   target_segment_ids?: string[]
   content?: string
   report_ids?: string[]
+  expected_current_version_id?: string
 }
 
 export interface ListChapterProductionRunsOptions {
@@ -609,6 +677,10 @@ export function resolveChapterProductionAction(
   if (payload.content !== undefined) {
     cleanPayload.content = validateNonEmptyString(payload.content)
   }
+  if (payload.expected_current_version_id !== undefined) {
+    if (payload.decision !== 'accept') throw new ApiError(422, 'invalid_request', 'Saved versions require author acceptance.')
+    cleanPayload.expected_current_version_id = validateUuid(payload.expected_current_version_id)
+  }
   if (payload.report_ids !== undefined) {
     if (!Array.isArray(payload.report_ids) || payload.report_ids.length === 0) {
       throw new ApiError(422, 'invalid_request', 'Report IDs must not be empty.')
@@ -623,6 +695,48 @@ export function resolveChapterProductionAction(
     cleanPayload,
     { signal },
   )
+}
+
+export interface ReviewRevisionSelection {
+  request_id: string
+  document_id: string
+  version_id: string
+  action_request_id: string | null
+  report_ids: string[]
+  selected_findings: { report_id: string; sequence: number }[]
+}
+
+export interface StudioFeedbackRevisionRequest {
+  submission_id: string
+  document_id: string
+  version_id: string
+  action_request_id: string
+}
+
+export function requestStudioFeedbackRevision(projectId: string, chapterId: string, workflowRunId: string,
+  payload: StudioFeedbackRevisionRequest, signal?: AbortSignal): Promise<ChapterProductionUpdated> {
+  const [p, c, r] = [projectId, chapterId, workflowRunId].map(validateUuid)
+  const body = { submission_id: validateUuid(payload.submission_id), document_id: validateUuid(payload.document_id),
+    version_id: validateUuid(payload.version_id), action_request_id: validateUuid(payload.action_request_id) }
+  return request('POST', () => apiPath('projects', p, 'chapters', c, 'production-v2', r, 'feedback-revisions'),
+    decodeChapterProductionUpdated, body, { signal })
+}
+
+export function requestReviewRevision(projectId: string, chapterId: string, workflowRunId: string,
+  payload: ReviewRevisionSelection, signal?: AbortSignal): Promise<ChapterProductionUpdated> {
+  const ids = [projectId, chapterId, workflowRunId].map(validateUuid)
+  const clean = { request_id: validateUuid(payload.request_id), document_id: validateUuid(payload.document_id),
+    version_id: validateUuid(payload.version_id), action_request_id: payload.action_request_id === null ? null : validateUuid(payload.action_request_id),
+    report_ids: payload.report_ids.map(validateUuid), selected_findings: payload.selected_findings.map(item => {
+      if (!Number.isInteger(item.sequence) || item.sequence < 1 || item.sequence > 128) throw invalidResponse()
+      return { report_id: validateUuid(item.report_id), sequence: item.sequence }
+    }) }
+  if (!clean.report_ids.length || clean.report_ids.length > 3 || !clean.selected_findings.length
+    || clean.selected_findings.length > 384 || new Set(clean.report_ids).size !== clean.report_ids.length
+    || new Set(clean.selected_findings.map(item => `${item.report_id}:${item.sequence}`)).size !== clean.selected_findings.length
+    || clean.selected_findings.some(item => !clean.report_ids.includes(item.report_id))) throw invalidResponse()
+  return request('POST', () => apiPath('projects', ids[0], 'chapters', ids[1], 'production-v2', ids[2], 'review-revisions'),
+    decodeChapterProductionUpdated, clean, { signal })
 }
 
 export function triggerChapterReview(
@@ -648,6 +762,7 @@ export function finalizeChapterProduction(
   chapterId: string,
   workflowRunId: string,
   signal?: AbortSignal,
+  expectedCurrentVersionId?: string,
 ): Promise<ChapterProductionFinalized> {
   const pId = validateUuid(projectId)
   const cId = validateUuid(chapterId)
@@ -656,7 +771,7 @@ export function finalizeChapterProduction(
     'POST',
     () => apiPath('projects', pId, 'chapters', cId, 'production-v2', rId, 'finalize'),
     decodeChapterProductionFinalized,
-    {},
+    expectedCurrentVersionId ? { expected_current_version_id: validateUuid(expectedCurrentVersionId) } : {},
     { signal },
   )
 }

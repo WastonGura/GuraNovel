@@ -524,6 +524,9 @@ class FeedbackRevisionHandoff:
     async def _claim_locked(self, session: AsyncSession, scope: _Scope) -> _Claim:
         phase = _FeedbackClaimPhase(session, self.service)
         context = await phase.author_context(scope=scope)
+        from app.services.studio_feedback_revision import validate_feedback_revision_input
+        validate_feedback_revision_input(context.run, scope.action_request_id, context.version.id,
+                                         scope.feedback, scope.target_segment_ids)
         if self.service.revision_agent is None:
             raise ChapterProductionV2ProviderError() from None
         database_now = await session.scalar(select(func.clock_timestamp()))

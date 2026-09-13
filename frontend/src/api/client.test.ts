@@ -1,12 +1,21 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   ApiError,
+  writeStudioDraft,
   getChapterProduction,
   getProjectCreationRun,
   getProject,
   listProjects,
   resolveProjectCreationAction,
   restoreDocument,
+  listRestorePoints,
+  createRestorePoint,
+  restorePoint,
+  readStudioFeedback,
+  writeStudioFeedback,
+  submitStudioFeedback,
+  readFeedbackSubmission,
+  readRestorePointFeedback,
 } from './client'
 
 const project = {
@@ -49,6 +58,58 @@ afterEach(() => {
 })
 
 describe('typed API client', () => {
+  it('saves a draft through its chapter scope without supplying actor or workflow authority', async () => {
+    const payload = { content: 'Saved prose', expected_current_version_id: 'version' }
+    mockJsonResponse(documentVersion)
+    await expect(writeStudioDraft('project', 'chapter', payload)).resolves.toEqual(documentVersion)
+    expect(fetch).toHaveBeenCalledWith('/api/v1/projects/project/chapters/chapter/draft/content', expect.objectContaining({ method: 'PUT', body: JSON.stringify(payload) }))
+  })
+  it('round-trips version-bound comments and immutable feedback submissions through scoped endpoints', async () => {
+    const comment = { id: 'comment', start: 2, end: 5, quote: '原文段', text: '修改', color: '#8d9bff', submitted: false, orphaned: false }
+    const state = { chapter_id: 'chapter', region: 'draft', document_id: 'document', source_version_id: 'version', revision: 1, comments: [comment], requirements: '要求', read_only: false }
+    mockJsonResponse(state)
+    await expect(readStudioFeedback('project', 'chapter', 'draft')).resolves.toEqual(state)
+    expect(fetch).toHaveBeenLastCalledWith('/api/v1/projects/project/chapters/chapter/feedback/draft', expect.objectContaining({ method: 'GET' }))
+    const write = { request_id: 'write', expected_current_version_id: 'version', expected_revision: 0, comments: [comment], requirements: '要求' }
+    mockJsonResponse(state)
+    await expect(writeStudioFeedback('project', 'chapter', 'draft', write)).resolves.toEqual(state)
+    expect(fetch).toHaveBeenLastCalledWith('/api/v1/projects/project/chapters/chapter/feedback/draft', expect.objectContaining({ method: 'PUT', body: JSON.stringify(write) }))
+    const submission = { id: 'submission', chapter_id: 'chapter', region: 'draft', document_id: 'document', source_version_id: 'version', feedback_revision: 2, comments: [{ ...comment, submitted: true }], requirements: '要求', created_at: project.created_at }
+    mockJsonResponse(submission)
+    const submit = { request_id: 'submission', expected_current_version_id: 'version', expected_revision: 1, comment_ids: ['comment'] }
+    await expect(submitStudioFeedback('project', 'chapter', 'draft', submit)).resolves.toEqual(submission)
+    expect(fetch).toHaveBeenLastCalledWith('/api/v1/projects/project/chapters/chapter/feedback/draft/submissions', expect.objectContaining({ method: 'POST', body: JSON.stringify(submit) }))
+    mockJsonResponse(submission)
+    await expect(readFeedbackSubmission('project', 'chapter', 'draft', 'submission')).resolves.toEqual(submission)
+    mockJsonResponse({ ...state, comments: [comment, comment] })
+    await expect(readStudioFeedback('project', 'chapter', 'draft')).rejects.toBeInstanceOf(ApiError)
+    mockJsonResponse({ ...state, comments: [{ ...comment, orphaned: 'false' }] })
+    await expect(readStudioFeedback('project', 'chapter', 'draft')).rejects.toBeInstanceOf(ApiError)
+  })
+
+  it('uses scoped restore-point endpoints and rejects incomplete server point identities', async () => {
+    const point = { id: 'point', chapter_id: 'chapter', document_id: 'document', version_id: 'version', summary: '手动存档', created_at: project.created_at }
+    const payload = { request_id: 'request', expected_current_version_id: 'version' }
+    mockJsonResponse(point)
+    await expect(createRestorePoint('project', 'chapter', payload)).resolves.toEqual(point)
+    expect(fetch).toHaveBeenLastCalledWith('/api/v1/projects/project/chapters/chapter/restore-points', expect.objectContaining({ method: 'POST', body: JSON.stringify(payload) }))
+    mockJsonResponse([point])
+    await expect(listRestorePoints('project', 'chapter')).resolves.toEqual([point])
+    mockJsonResponse(documentVersion)
+    await expect(restorePoint('project', 'chapter', 'point', payload)).resolves.toEqual(documentVersion)
+    expect(fetch).toHaveBeenLastCalledWith('/api/v1/projects/project/chapters/chapter/restore-points/point/restore', expect.objectContaining({ method: 'POST', body: JSON.stringify(payload) }))
+    mockJsonResponse([{ ...point, version_id: null }])
+    await expect(listRestorePoints('project', 'chapter')).rejects.toBeInstanceOf(ApiError)
+    const feedback = { point_id: 'point', document_id: 'document', source_version_id: 'version', available: false, comments: [], requirements: '' }
+    mockJsonResponse(feedback)
+    await expect(readRestorePointFeedback('project', 'chapter', 'point')).resolves.toEqual(feedback)
+    expect(fetch).toHaveBeenLastCalledWith('/api/v1/projects/project/chapters/chapter/restore-points/point/feedback', expect.objectContaining({ method: 'GET' }))
+    mockJsonResponse({ ...feedback, point_id: 'another-point' })
+    await expect(readRestorePointFeedback('project', 'chapter', 'point')).rejects.toBeInstanceOf(ApiError)
+    mockJsonResponse({ ...feedback, requirements: 'invented old requirements' })
+    await expect(readRestorePointFeedback('project', 'chapter', 'point')).rejects.toBeInstanceOf(ApiError)
+  })
+
   it('decodes a valid project response into the typed contract', async () => {
     mockJsonResponse(project)
 

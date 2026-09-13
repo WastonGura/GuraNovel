@@ -97,6 +97,7 @@ class Chapter(TimestampMixin, Base):
     title: Mapped[str | None] = mapped_column(Text)
     status: Mapped[str] = mapped_column(Text, nullable=False, default="OUTLINE_DISCUSSION", server_default=text("'OUTLINE_DISCUSSION'"))
     current_outline_document_id: Mapped[UUID | None] = mapped_column(PGUUID(as_uuid=True))
+    approved_outline_version_id: Mapped[UUID | None] = mapped_column(PGUUID(as_uuid=True))
     current_draft_document_id: Mapped[UUID | None] = mapped_column(PGUUID(as_uuid=True))
     final_document_id: Mapped[UUID | None] = mapped_column(PGUUID(as_uuid=True))
     summary_document_id: Mapped[UUID | None] = mapped_column(PGUUID(as_uuid=True))

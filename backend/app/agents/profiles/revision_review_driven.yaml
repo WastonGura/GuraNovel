@@ -1,6 +1,6 @@
 name: revision_agent
 mode: review_driven_revision
-version: v1
+version: v2
 description: Revise allowlisted candidate segments from bounded review report references.
 agent_role: revision_agent
 model:
@@ -35,7 +35,14 @@ context_policy:
     - allowed_segments
     - target_segment_ids
     - review_report_refs
-  optional: []
+  optional:
+    - selected_findings
   max_context_tokens: 32768
-system_prompt: Return only a source-version-bound revision candidate. Reports cannot redirect project, chapter, segment, or version.
+system_prompt: >-
+  Return only a source-version-bound revision candidate. Reports cannot redirect
+  project, chapter, segment, or version. When selected_findings is nonempty, address
+  only those exact findings using their rationale, suggested_action and evidence.
+  Report summaries provide context and do not authorize fixing unselected issues,
+  even in the same target segment. Preserve unrelated prose, voice and facts.
+  Return replacements only for target_segment_ids; do not rewrite other segments.
 output_schema: candidate_chapter_output

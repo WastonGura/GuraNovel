@@ -6,7 +6,8 @@ from datetime import datetime
 from typing import Literal
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, model_validator
+from app.agents.chapter_review_contracts import ChapterReviewReport
 
 
 # --- V1 legacy schemas ---
@@ -60,6 +61,10 @@ class ChapterProductionRunResponse(BaseModel):
 # --- V2 schemas ---
 
 
+class ChapterProductionReviewReportResponse(ChapterReviewReport):
+    id: UUID
+
+
 class ResumeChapterProductionRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -70,6 +75,7 @@ class TriggerChapterReviewRequest(BaseModel):
 
 class FinalizeChapterProductionRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
+    expected_current_version_id: UUID | None = None
 
 
 class ReconcileChapterProductionRequest(BaseModel):
@@ -92,6 +98,15 @@ class ResolveChapterProductionV2ActionRequest(BaseModel):
     target_segment_ids: list[UUID] | None = None
     content: str | None = None
     report_ids: list[UUID] | None = None
+    expected_current_version_id: UUID | None = None
+
+    @model_validator(mode="after")
+    def saved_version_is_for_accept(self):
+        if self.expected_current_version_id is not None and (
+            self.expected_current_version_id.int == 0 or self.decision != "accept"
+        ):
+            raise ValueError("A saved version may only accompany author acceptance")
+        return self
 
 
 class ChapterProductionV2StartedResponse(BaseModel):

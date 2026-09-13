@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type FormEvent, type MouseEvent, type PointerEvent } from 'react'
-import { useNavigate } from 'react-router-dom'
+import { useNavigate, useSearchParams } from 'react-router-dom'
 import { createProject, listChapters, listProjects, type Chapter, type Project } from './api/client'
 
 const asset = (name: string) => `/ui/${name}`
@@ -56,7 +56,7 @@ function ProjectForm({ onClose }: { onClose: () => void }) {
       const project = await createProject({
         slug: slug.trim(), title: title.trim(), genre: genre.trim() || null, target_platform: platform.trim() || null,
       })
-      navigate(`/projects/${project.id}`)
+      navigate(`/projects/${encodeURIComponent(project.id)}/studio?view=Detail`)
     } catch {
       setError('Project could not be created. Try again.')
     } finally {
@@ -127,7 +127,7 @@ function NovelDetails({ project, artwork, onClose }: { project: Project, artwork
         {expanded && chapters?.length === 0 && <p className="detail-status">暂无章节</p>}
         {expanded && chapters && chapters.length > 0 && <ul className="detail-chapter-list">
           {chapters.map((chapter) => <li key={chapter.id}>
-            <button data-glow type="button" onClick={() => navigate(`/projects/${project.id}/chapters/${chapter.id}`)}>
+            <button data-glow type="button" onClick={() => navigate(`/projects/${encodeURIComponent(project.id)}/studio/${encodeURIComponent(chapter.id)}?view=Create`)}>
               <span>第{chapter.chapter_number}话</span><span>{chapter.title || '未命名章节'}</span>
               <img src={icon('rename')} alt="重命名章节" />
             </button>
@@ -166,7 +166,15 @@ export default function Dashboard() {
   const searchHideTimer = useRef<number | null>(null)
   const [projects, setProjects] = useState<Project[] | null>(null)
   const [failed, setFailed] = useState(false)
-  const [selected, setSelected] = useState<Project | null>(null)
+  const [searchParams, setSearchParams] = useSearchParams()
+  const selectedId = searchParams.get('project')
+  const selected = projects?.find(project => project.id === selectedId)
+  const setSelected = (project: Project | null) => {
+    const next = new URLSearchParams(searchParams)
+    if (project) next.set('project', project.id)
+    else next.delete('project')
+    setSearchParams(next)
+  }
   const [creating, setCreating] = useState(false)
   const [query, setQuery] = useState('')
   const [searching, setSearching] = useState(false)
@@ -299,7 +307,8 @@ export default function Dashboard() {
         </div>
       </div>
     </div>
-    {selected && <NovelDetails project={selected} artwork={artwork(selected)} onClose={() => setSelected(null)} />}
+    {selected && <NovelDetails key={selected.id} project={selected} artwork={artwork(selected)} onClose={() => setSelected(null)} />}
+    {selectedId && projects && !selected && <div className="dashboard-dialog-backdrop"><section className="dashboard-create-dialog" role="alert"><p>未找到此作品，可能已被删除或无权访问。</p><button onClick={() => setSelected(null)}>返回书架</button></section></div>}
     {creating && <ProjectForm onClose={() => setCreating(false)} />}
   </div>
 }

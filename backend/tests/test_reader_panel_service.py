@@ -1212,7 +1212,9 @@ class TestReaderPanelServiceApiProjection:
         assert expanded["discussion_transcript"][1]["speaker_type"] == "moderator"
         assert expanded["discussion_transcript"][1]["stance"] is None
         assert "reader_run_id" not in repr(expanded)
-        assert "reader_profile_id" not in repr(expanded)
+        assert expanded["initial_reports"][0]["reader_profile_id"] == run.reader_profile_id
+        assert expanded["discussion_transcript"][0]["reader_profile_id"] == run.reader_profile_id
+        assert expanded["discussion_transcript"][1]["reader_profile_id"] is None
 
         review.summary = "api_key=sk-123456789"
         with pytest.raises(ReaderPanelInvalidStateError):
