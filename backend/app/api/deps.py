@@ -14,6 +14,8 @@ from app.agents import (
     EditorAgent,
     LoreAgent,
     LoreChapterFinalAgent,
+    OpenAICompatibleChapterReviewProvider,
+    OpenAICompatibleChapterWriterProvider,
     PlotArchitectAgent,
     RevisionAgent,
     WorldbuildingAgent,
@@ -158,9 +160,33 @@ class ChapterProductionV2Composition:
 
 
 def get_chapter_production_v2_composition() -> ChapterProductionV2Composition:
-    """Server-owned deterministic composition for V2 chapter production."""
-    writer_provider = DeterministicChapterWriterProvider()
-    review_provider = DeterministicChapterReviewProvider()
+    """Server-owned composition for V2 chapter production."""
+    if settings.chapter_production_provider == "fake":
+        writer_provider = DeterministicChapterWriterProvider()
+        review_provider = DeterministicChapterReviewProvider()
+    else:
+        base_url = settings.openai_compatible_base_url
+        api_key = settings.openai_compatible_api_key
+        model = settings.openai_compatible_model
+        timeout = settings.openai_compatible_timeout_seconds or 30.0
+        api_key_value = api_key.get_secret_value() if api_key is not None else ""
+        if not base_url or not api_key_value or not model or timeout is None:
+            raise ProviderConfigurationError()
+        try:
+            writer_provider = OpenAICompatibleChapterWriterProvider(
+                base_url=base_url,
+                api_key=api_key_value,
+                model=model,
+                timeout_seconds=timeout,
+            )
+            review_provider = OpenAICompatibleChapterReviewProvider(
+                base_url=base_url,
+                api_key=api_key_value,
+                model=model,
+                timeout_seconds=timeout,
+            )
+        except Exception:
+            raise ProviderConfigurationError() from None
     try:
         from app.db.session import engine as default_engine
 
