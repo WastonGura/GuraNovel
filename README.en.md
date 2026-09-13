@@ -49,7 +49,7 @@ GuraNovel covers the entire lifecycle of long-form novel creation from initial c
   - **Non-Blocking Warning Proceed (`accept_warning`)**: Acknowledges minor stylistic suggestions without blocking the pipeline;
   - **Blocking Revision Request (`request_revision`)**: Triggers targeted rewrites and iterative version evolution for critical narrative flaws.
 
-### 4. Reader Panel Multi-Agent Critique System (v0.10.0 MVP)
+### 4. Reader Panel Multi-Agent Critique System (v0.11.0)
 - **6 Diverse Simulated Reader Personas**:
   - `general_immersive` (Everyday immersive reader: focuses on emotional resonance and pacing);
   - `low_patience` (Low-patience reader: focuses on opening hooks and pacing drags);
