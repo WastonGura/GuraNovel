@@ -1,6 +1,10 @@
 """Agent profiles, contracts, and narrow persistence boundaries."""
 
 from app.agents.concept_agent import ConceptAgent, ConceptProvider
+from app.agents.concept_providers import (
+    OpenAICompatibleConceptChiefEditorProvider,
+    OpenAICompatibleConceptProvider,
+)
 from app.agents.chief_editor import ChiefEditor, ChiefEditorProvider
 from app.agents.composition import ProjectCreationComposition
 from app.agents.chapter_writer_agents import (
@@ -84,6 +88,13 @@ from app.agents.maintenance_agents import (
     PlotArchitectAgent,
     RevisionPlanProvider,
     WorldbuildingAgent,
+)
+from app.agents.maintenance_providers import (
+    OpenAICompatibleApplyChangeProvider,
+    OpenAICompatibleMaintenanceImpactProvider,
+    OpenAICompatibleMaintenanceProvider,
+    OpenAICompatiblePostChangeProvider,
+    OpenAICompatibleRevisionPlanProvider,
 )
 from app.agents.maintenance_contracts import (
     AffectedItemReference,
@@ -247,6 +258,13 @@ __all__ = [
     "ProposedEditOperation",
     "OpenAICompatibleChapterReviewProvider",
     "OpenAICompatibleChapterWriterProvider",
+    "OpenAICompatibleConceptChiefEditorProvider",
+    "OpenAICompatibleConceptProvider",
+    "OpenAICompatibleMaintenanceProvider",
+    "OpenAICompatibleMaintenanceImpactProvider",
+    "OpenAICompatibleRevisionPlanProvider",
+    "OpenAICompatibleApplyChangeProvider",
+    "OpenAICompatiblePostChangeProvider",
     "PlotArchitectAgent",
     "ProjectCreationComposition",
     "ConceptArtifactWorkflowError",

@@ -32,6 +32,28 @@ from app.agents.chapter_review_contracts import (
 )
 from app.agents.chapter_writer_providers import OpenAICompatibleChapterWriterProvider
 from app.agents.chapter_review_providers import OpenAICompatibleChapterReviewProvider
+from app.agents.concept_providers import (
+    OpenAICompatibleConceptChiefEditorProvider,
+    OpenAICompatibleConceptProvider,
+)
+from app.agents.maintenance_providers import OpenAICompatibleMaintenanceProvider
+from app.agents.contracts import (
+    ConceptAgentRequest,
+    ConceptGenerationOutput,
+    ConceptOption,
+)
+from app.agents.maintenance_contracts import (
+    AffectedItemReference,
+    AppliedDocumentReference,
+    ApplyChangeRequest,
+    DocumentVersionReference,
+    MaintenanceImpactRequest,
+    PostChangeRequest,
+    RevisionOperation,
+    RevisionOperationKind,
+    RevisionPlanRequest,
+)
+from app.workflows.project_maintenance_types import AffectedItemType, ImpactLevel
 from app.agents.profiles import ProfileRegistry
 from app.core.config import settings
 from enum import StrEnum
@@ -246,6 +268,202 @@ async def run_smoke(
             finally:
                 await provider.aclose()
 
+        elif role == "concept":
+            provider = OpenAICompatibleConceptProvider(
+                base_url=base_url,
+                api_key=api_key,
+                model=model,
+                timeout_seconds=timeout_seconds,
+            )
+            try:
+                concept_req = ConceptAgentRequest(
+                    user_seed="A clockwork detective in Victorian London investigates an impossible vault murder.",
+                    target_platform="Webnovel",
+                    preferred_genres=["mystery", "steampunk"],
+                    disliked_elements=["harem", "litrpg"],
+                    style_preference="Victorian gothic tone",
+                )
+                profile = registry.load("concept_agent", mode=None)
+                concept_res = await provider.generate_concepts(concept_req, profile)
+                elapsed = time.monotonic() - start_time
+                print(
+                    f"[SUCCESS] Concept generation produced {len(concept_res.options)} options in {elapsed:.2f}s"
+                )
+                for opt in concept_res.options:
+                    print(f"  - [{opt.id}] {opt.title}: {opt.logline[:80]}...")
+                print(
+                    f"Input Tokens: {provider.last_input_tokens}, Output Tokens: {provider.last_output_tokens}"
+                )
+                return 0
+            finally:
+                await provider.aclose()
+
+        elif role == "concept_review":
+            provider = OpenAICompatibleConceptChiefEditorProvider(
+                base_url=base_url,
+                api_key=api_key,
+                model=model,
+                timeout_seconds=timeout_seconds,
+            )
+            try:
+                concepts = ConceptGenerationOutput(
+                    options=[
+                        ConceptOption(
+                            id="clockwork-detective",
+                            title="The Brass Key of Whitechapel",
+                            logline="A disgraced automaton investigator uncovers an aristocratic conspiracy behind a locked-room death.",
+                            premise="In an alternate 1888 London, clockwork enforcers maintain the peace until a human noble is found murdered inside an airtight vault.",
+                            genres=["mystery", "steampunk"],
+                        )
+                    ]
+                )
+                profile = registry.load("chief_editor", mode=None)
+                review_res = await provider.review_concepts(concepts, profile)
+                elapsed = time.monotonic() - start_time
+                print(f"[SUCCESS] Concept review completed in {elapsed:.2f}s")
+                print(f"Passed: {review_res.passed}")
+                print(f"Summary: {review_res.summary[:120]}...")
+                print(
+                    f"Blocking Issues: {len(review_res.blocking_issues)}, Warnings: {len(review_res.warnings)}"
+                )
+                print(
+                    f"Input Tokens: {provider.last_input_tokens}, Output Tokens: {provider.last_output_tokens}"
+                )
+                return 0
+            finally:
+                await provider.aclose()
+
+        elif role in (
+            "maintenance_impact",
+            "revision_plan",
+            "archivist",
+            "consistency_review",
+        ):
+            provider = OpenAICompatibleMaintenanceProvider(
+                base_url=base_url,
+                api_key=api_key,
+                model=model,
+                timeout_seconds=timeout_seconds,
+            )
+            try:
+                doc_id = uuid4()
+                ver_id = uuid4()
+                doc_ref = DocumentVersionReference(
+                    document_id=doc_id, current_version_id=ver_id
+                )
+
+                if role == "maintenance_impact":
+                    profile = registry.load("lore_agent", mode="maintenance_impact")
+                    maint_impact_req = MaintenanceImpactRequest(
+                        project_id=project_id,
+                        workflow_run_id=workflow_run_id,
+                        change_request_id=uuid4(),
+                        change_request="Introduce a secret underground resistance faction in the lower wards.",
+                        document_refs=(doc_ref,),
+                    )
+                    impact_res = await provider.analyze_maintenance_impact(
+                        maint_impact_req, profile
+                    )
+                    elapsed = time.monotonic() - start_time
+                    print(
+                        f"[SUCCESS] Maintenance impact analysis completed in {elapsed:.2f}s"
+                    )
+                    print(f"Safe to change: {impact_res.safe_to_change}")
+                    print(f"Summary: {impact_res.impact_summary[:120]}...")
+                    print(
+                        f"Affected items: {len(impact_res.affected_items)}, Warnings: {len(impact_res.warnings)}"
+                    )
+
+                elif role == "revision_plan":
+                    profile = registry.load("plot_architect_agent", mode="revision_plan")
+                    item_id = uuid4()
+                    affected_item = AffectedItemReference(
+                        affected_item_id=item_id,
+                        stable_reference="world/underground-faction",
+                        item_type=AffectedItemType.WORLD,
+                        impact_level=ImpactLevel.MEDIUM,
+                        document=doc_ref,
+                        reason="The faction alters existing district governance canon.",
+                    )
+                    revision_req = RevisionPlanRequest(
+                        project_id=project_id,
+                        workflow_run_id=workflow_run_id,
+                        change_request_id=uuid4(),
+                        change_request="Integrate the underground faction into district lore documents.",
+                        affected_items=(affected_item,),
+                        document_refs=(doc_ref,),
+                    )
+                    plan_res = await provider.plan_revision(revision_req, profile)
+                    elapsed = time.monotonic() - start_time
+                    print(f"[SUCCESS] Revision plan completed in {elapsed:.2f}s")
+                    print(f"Operations count: {len(plan_res.operations)}")
+                    print(f"Summary: {plan_res.summary[:120]}...")
+
+                elif role == "archivist":
+                    profile = registry.load("archivist_agent", mode="apply_change")
+                    op_id = uuid4()
+                    item_id = uuid4()
+                    operation = RevisionOperation(
+                        operation_id=op_id,
+                        sequence=1,
+                        operation=RevisionOperationKind.REVISE,
+                        target=doc_ref,
+                        affected_item_ids=(item_id,),
+                        instruction="Append section detailing the underground faction contacts.",
+                    )
+                    archivist_req = ApplyChangeRequest(
+                        project_id=project_id,
+                        workflow_run_id=workflow_run_id,
+                        change_request_id=uuid4(),
+                        approval_id=uuid4(),
+                        revision_plan_id=uuid4(),
+                        revision_plan_document_id=uuid4(),
+                        revision_plan_version_id=uuid4(),
+                        operations=(operation,),
+                    )
+                    archivist_res = await provider.propose_changes(
+                        archivist_req, profile
+                    )
+                    elapsed = time.monotonic() - start_time
+                    print(f"[SUCCESS] Archivist proposal completed in {elapsed:.2f}s")
+                    print(f"Proposed edits count: {len(archivist_res.proposed_edits)}")
+                    for edit in archivist_res.proposed_edits:
+                        print(
+                            f"  - Edit for doc {edit.document_id}: {edit.rationale[:80]}..."
+                        )
+
+                else:  # consistency_review
+                    profile = registry.load("lore_agent", mode="post_change")
+                    applied_change = AppliedDocumentReference(
+                        proposed_edit_id=uuid4(),
+                        document_id=doc_id,
+                        previous_version_id=ver_id,
+                        current_version_id=uuid4(),
+                    )
+                    post_req = PostChangeRequest(
+                        project_id=project_id,
+                        workflow_run_id=workflow_run_id,
+                        change_request_id=uuid4(),
+                        approval_id=uuid4(),
+                        revision_plan_id=uuid4(),
+                        revision_plan_document_id=uuid4(),
+                        revision_plan_version_id=uuid4(),
+                        change_set_id=uuid4(),
+                        applied_changes=(applied_change,),
+                    )
+                    review_res = await provider.review_consistency(post_req, profile)
+                    elapsed = time.monotonic() - start_time
+                    print(f"[SUCCESS] Consistency review completed in {elapsed:.2f}s")
+                    print(f"Outcome: {review_res.outcome.value}")
+                    print(f"Findings count: {len(review_res.findings)}")
+
+                print(
+                    f"Input Tokens: {provider.last_input_tokens}, Output Tokens: {provider.last_output_tokens}"
+                )
+                return 0
+            finally:
+                await provider.aclose()
+
         else:
             print(f"[ERROR] Unsupported role: {role}", file=sys.stderr)
             return 1
@@ -257,7 +475,7 @@ async def run_smoke(
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Bounded, explicit smoke test for real OpenAI-compatible chapter models."
+        description="Bounded, explicit smoke test for real OpenAI-compatible models."
     )
     parser.add_argument(
         "--enable-real-model",
@@ -267,7 +485,18 @@ def main() -> None:
     )
     parser.add_argument(
         "--role",
-        choices=["writer", "editor", "chief_editor", "lore"],
+        choices=[
+            "writer",
+            "editor",
+            "chief_editor",
+            "lore",
+            "concept",
+            "concept_review",
+            "maintenance_impact",
+            "revision_plan",
+            "archivist",
+            "consistency_review",
+        ],
         default="writer",
         help="Agent role to invoke (default: writer).",
     )

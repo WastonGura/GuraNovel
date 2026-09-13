@@ -6,8 +6,10 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
 from app.agents import (
     ArchivistAgent,
+    ChiefEditor,
     ChiefEditorAgent,
     ChiefEditorChapterFinalAgent,
+    ConceptAgent,
     DeterministicChapterReviewProvider,
     DeterministicChapterWriterProvider,
     DeterministicMaintenanceProvider,
@@ -16,6 +18,9 @@ from app.agents import (
     LoreChapterFinalAgent,
     OpenAICompatibleChapterReviewProvider,
     OpenAICompatibleChapterWriterProvider,
+    OpenAICompatibleConceptChiefEditorProvider,
+    OpenAICompatibleConceptProvider,
+    OpenAICompatibleMaintenanceProvider,
     PlotArchitectAgent,
     RevisionAgent,
     WorldbuildingAgent,
@@ -87,21 +92,69 @@ def get_project_workspace() -> ProjectWorkspace:
     return ProjectWorkspace(settings.workspace_base_dir)
 
 
-def get_project_creation_composition() -> ProjectCreationComposition:
-    """The route owns a local-only composition; clients cannot select providers."""
-    return ProjectCreationComposition()
+def get_project_creation_composition(
+    configured_settings=settings,
+) -> ProjectCreationComposition:
+    """Provide the server-configured composition for concept generation and review."""
+    if configured_settings.project_creation_provider == "fake":
+        return ProjectCreationComposition()
+    base_url = configured_settings.openai_compatible_base_url
+    api_key = configured_settings.openai_compatible_api_key
+    model = configured_settings.openai_compatible_model
+    timeout = configured_settings.openai_compatible_timeout_seconds
+    api_key_value = api_key.get_secret_value() if api_key is not None else ""
+    if not base_url or not api_key_value or not model or timeout is None:
+        raise ProviderConfigurationError()
+    concept_provider = OpenAICompatibleConceptProvider(
+        base_url=base_url,
+        api_key=api_key_value,
+        model=model,
+        timeout_seconds=timeout,
+    )
+    chief_editor_provider = OpenAICompatibleConceptChiefEditorProvider(
+        base_url=base_url,
+        api_key=api_key_value,
+        model=model,
+        timeout_seconds=timeout,
+    )
+    return ProjectCreationComposition(
+        concept_agent=ConceptAgent(concept_provider),
+        chief_editor=ChiefEditor(chief_editor_provider),
+    )
 
 
-def get_project_maintenance_composition() -> ProjectMaintenanceComposition:
-    """Provide a credential-free server-owned composition for maintenance routes."""
-
-    provider = DeterministicMaintenanceProvider()
+def get_project_maintenance_composition(
+    configured_settings=settings,
+) -> ProjectMaintenanceComposition:
+    """Provide the server-configured composition for project maintenance routes."""
+    if configured_settings.project_maintenance_provider == "fake":
+        provider = DeterministicMaintenanceProvider()
+        return ProjectMaintenanceComposition(
+            LoreAgent(provider),
+            ChiefEditorAgent(provider),
+            PlotArchitectAgent(provider),
+            WorldbuildingAgent(provider),
+            ArchivistAgent(provider),
+        )
+    base_url = configured_settings.openai_compatible_base_url
+    api_key = configured_settings.openai_compatible_api_key
+    model = configured_settings.openai_compatible_model
+    timeout = configured_settings.openai_compatible_timeout_seconds
+    api_key_value = api_key.get_secret_value() if api_key is not None else ""
+    if not base_url or not api_key_value or not model or timeout is None:
+        raise ProviderConfigurationError()
+    maintenance_provider = OpenAICompatibleMaintenanceProvider(
+        base_url=base_url,
+        api_key=api_key_value,
+        model=model,
+        timeout_seconds=timeout,
+    )
     return ProjectMaintenanceComposition(
-        LoreAgent(provider),
-        ChiefEditorAgent(provider),
-        PlotArchitectAgent(provider),
-        WorldbuildingAgent(provider),
-        ArchivistAgent(provider),
+        LoreAgent(maintenance_provider),
+        ChiefEditorAgent(maintenance_provider),
+        PlotArchitectAgent(maintenance_provider),
+        WorldbuildingAgent(maintenance_provider),
+        ArchivistAgent(maintenance_provider),
     )
 
 
