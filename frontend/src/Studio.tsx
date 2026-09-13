@@ -479,7 +479,15 @@ function StudioLoader() {
         }
       }))
       if (active) setLoaded({ title: project.title, chapters: items, project })
-    }).catch(() => { if (active) setError('创作区加载失败，请重试。没有使用示例数据替代真实章节。') })
+    }).catch((caught: unknown) => {
+      if (active) {
+        if (caught instanceof ApiError && caught.status === 404) {
+          setError('未找到此作品，可能已被删除或无权访问。')
+        } else {
+          setError('创作区加载失败，请重试。没有使用示例数据替代真实章节。')
+        }
+      }
+    })
     return () => { active = false }
   }, [projectId])
   if (error) return <div className="studio-load"><p role="alert">{error}</p><button onClick={() => window.location.reload()}>重新加载</button><Link to="/">返回首页</Link></div>
@@ -853,7 +861,7 @@ function StudioWorkspace({ title, initial, initialId, project, preview }: {
     }
   }
 
-  if (initialId && !chapters.some(chapter => chapter.id === initialId)) return <div className="studio-load"><p role="alert">此作品中未找到该章节，可能已被删除或链接有误。</p><Link to={`/projects/${encodeURIComponent(project!.id)}/studio`}>返回作品</Link></div>
+  if (initialId && !chapters.some(chapter => chapter.id === initialId)) return <div className="studio-load"><p role="alert">此作品中未找到该章节，可能已被删除或链接有误。</p><Link to={preview ? '/preview/studio' : `/projects/${encodeURIComponent(project!.id)}/studio`}>返回作品</Link></div>
   return <div className={`studio${hidden ? ' is-focused' : ''}${page === 'Setting' ? ' is-setting' : ''}`} data-focus-mode={focus}
     onClickCapture={event => {
       const target = (event.target as HTMLElement).closest<HTMLButtonElement>('.studio-icon')
