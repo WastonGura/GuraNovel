@@ -27,6 +27,12 @@ class EvaluationDimension(str, Enum):
     TIMELINE_LORE_CONSISTENCY = "timeline_lore_consistency"
     STYLE_AND_TONE = "style_and_tone"
     PACING_AND_STRUCTURE = "pacing_and_structure"
+    REQUIREMENT_ADHERENCE = "requirement_adherence"
+    EXPRESSION_READABILITY = "expression_readability"
+    EVIDENCE_ACCURACY = "evidence_accuracy"
+    FALSE_POSITIVE_NEGATIVE_RATE = "false_positive_negative_rate"
+    MODIFICATION_SCOPE_CONTROL = "modification_scope_control"
+    INVOCATION_COST_EFFICIENCY = "invocation_cost_efficiency"
 
 
 @dataclass(frozen=True)
@@ -168,6 +174,198 @@ HUMAN_EVALUATION_RUBRIC: dict[EvaluationDimension, list[RubricCriterion]] = {
             pass_threshold=False,
         ),
     ],
+    EvaluationDimension.REQUIREMENT_ADHERENCE: [
+        RubricCriterion(
+            score=5,
+            label="完全忠实履行大纲 (Flawless Adherence)",
+            description="完全忠实履行大纲与修改指示要求，段落目标全部达成，无遗漏或偏题。",
+            pass_threshold=True,
+        ),
+        RubricCriterion(
+            score=4,
+            label="准确完成核心要求 (Solid Adherence)",
+            description="准确完成核心要求，段落功能明确，细节轻微自由发挥但不违背指示。",
+            pass_threshold=True,
+        ),
+        RubricCriterion(
+            score=3,
+            label="基本满足主要要求 (Functional)",
+            description="基本满足主要要求，偶有要求点完成度不足或轻度偏向。",
+            pass_threshold=True,
+        ),
+        RubricCriterion(
+            score=2,
+            label="关键指示被忽略 (Partial Deviation)",
+            description="关键指示被忽略或未完成，场景目标出现明显漂移。",
+            pass_threshold=False,
+        ),
+        RubricCriterion(
+            score=1,
+            label="完全违背指示 (Total Failure)",
+            description="完全违背大纲指示或反向操作，要求被彻底无视。",
+            pass_threshold=False,
+        ),
+    ],
+    EvaluationDimension.EXPRESSION_READABILITY: [
+        RubricCriterion(
+            score=5,
+            label="文学质感卓越 (Literary Excellence)",
+            description="语言优美流畅，句式多变且具韵律感，叙述精准生动，极具文学质感与沉浸感。",
+            pass_threshold=True,
+        ),
+        RubricCriterion(
+            score=4,
+            label="流畅自然通顺 (Natural Readability)",
+            description="行文流畅自然，词汇丰富，通顺易读，无拗口语病。",
+            pass_threshold=True,
+        ),
+        RubricCriterion(
+            score=3,
+            label="通顺达意 (Clear and Functional)",
+            description="表述通顺清晰，句式偶有单调或口语化，整体不影响阅读。",
+            pass_threshold=True,
+        ),
+        RubricCriterion(
+            score=2,
+            label="语病生硬 (Clunky Prose)",
+            description="多处句式生硬或语病，词不达意，阅读停顿感明显。",
+            pass_threshold=False,
+        ),
+        RubricCriterion(
+            score=1,
+            label="语病混乱严重 (Incoherent)",
+            description="语病严重，逻辑混乱，病句与机械翻译感堆砌，难以流畅阅读。",
+            pass_threshold=False,
+        ),
+    ],
+    EvaluationDimension.EVIDENCE_ACCURACY: [
+        RubricCriterion(
+            score=5,
+            label="证据精确定位 (Pinpoint Evidence)",
+            description="审阅定位的 segment_id 准确无误，引用证据与原文完全吻合，无误引或断章取义。",
+            pass_threshold=True,
+        ),
+        RubricCriterion(
+            score=4,
+            label="证据准确可靠 (Accurate Citation)",
+            description="证据引用准确，主要段落定位无误，说明清晰。",
+            pass_threshold=True,
+        ),
+        RubricCriterion(
+            score=3,
+            label="证据大体吻合 (Adequate Citation)",
+            description="证据大体正确，偶有引用范围稍宽或轻微模糊。",
+            pass_threshold=True,
+        ),
+        RubricCriterion(
+            score=2,
+            label="证据定位偏差 (Misaligned Evidence)",
+            description="证据定位偏差，引用的段落编号或关键语句与实际不符。",
+            pass_threshold=False,
+        ),
+        RubricCriterion(
+            score=1,
+            label="凭空捏造证据 (Fabricated Evidence)",
+            description="凭空捏造虚假证据段落或引用根本不存在的原文文本，证据完全失真。",
+            pass_threshold=False,
+        ),
+    ],
+    EvaluationDimension.FALSE_POSITIVE_NEGATIVE_RATE: [
+        RubricCriterion(
+            score=5,
+            label="零误报零漏报 (Flawless Calibration)",
+            description="零误报，零漏报；仅在存在确凿硬伤时提出修改，无瑕疵文本完全 PASS。",
+            pass_threshold=True,
+        ),
+        RubricCriterion(
+            score=4,
+            label="审阅校准良好 (Well-Calibrated)",
+            description="无严重误报或漏报，提出的建议均有文本支撑。",
+            pass_threshold=True,
+        ),
+        RubricCriterion(
+            score=3,
+            label="偶有轻度失准 (Minor False Alarm)",
+            description="偶有轻微苛责或次要小问题未指出，但不影响整体大局。",
+            pass_threshold=True,
+        ),
+        RubricCriterion(
+            score=2,
+            label="明显误判或遗漏 (Substantial Misjudgement)",
+            description="出现明显误报（将正常文本判定为违规）或严重问题未能检出。",
+            pass_threshold=False,
+        ),
+        RubricCriterion(
+            score=1,
+            label="严重乱报失明 (Catastrophic Calibration)",
+            description="大规模误报（正常合规文本强行 Blocking）或对严重违规彻底失明。",
+            pass_threshold=False,
+        ),
+    ],
+    EvaluationDimension.MODIFICATION_SCOPE_CONTROL: [
+        RubricCriterion(
+            score=5,
+            label="手术刀精准修改 (Surgical Precision)",
+            description="精准手术刀式修改；仅对目标段落进行必要修改，非目标段落字符级 100% 完整保留。",
+            pass_threshold=True,
+        ),
+        RubricCriterion(
+            score=4,
+            label="范围控制良好 (Well-Scoped)",
+            description="修改范围控制良好，非目标段落无实质语义变动，格式稳定。",
+            pass_threshold=True,
+        ),
+        RubricCriterion(
+            score=3,
+            label="基本限制目标 (Adequately Scoped)",
+            description="基本限制在目标段落，但非目标段落出现微弱格式或标点轻微变动。",
+            pass_threshold=True,
+        ),
+        RubricCriterion(
+            score=2,
+            label="发生连带漂移 (Scope Leak)",
+            description="修改扩散至非目标段落，造成无关情节被连带变动。",
+            pass_threshold=False,
+        ),
+        RubricCriterion(
+            score=1,
+            label="范围完全失控 (Uncontrolled Overwrite)",
+            description="盲目大面积重写，破坏未要求修改的全部段落，修改范围完全失控。",
+            pass_threshold=False,
+        ),
+    ],
+    EvaluationDimension.INVOCATION_COST_EFFICIENCY: [
+        RubricCriterion(
+            score=5,
+            label="极佳成本效益 (Optimal Efficiency)",
+            description="单次调用输入与输出 Token 紧凑高效，无冗余上下文堆叠，成本效益极优。",
+            pass_threshold=True,
+        ),
+        RubricCriterion(
+            score=4,
+            label="成本消耗合理 (Budget Compliant)",
+            description="Token 消耗合理，符合预期任务预算范围，耗时可控。",
+            pass_threshold=True,
+        ),
+        RubricCriterion(
+            score=3,
+            label="基本在预算内 (Acceptable Efficiency)",
+            description="消耗基本在预算内，存在轻度可优化的冗余字符。",
+            pass_threshold=True,
+        ),
+        RubricCriterion(
+            score=2,
+            label="接近预算上限 (Near-Limit Consumption)",
+            description="Token 消耗接近上限或发生不必要的多余轮次开销。",
+            pass_threshold=False,
+        ),
+        RubricCriterion(
+            score=1,
+            label="严重浪费超标 (Runaway Cost)",
+            description="Token 消耗严重超标或发生死循环递归，造成严重成本浪费。",
+            pass_threshold=False,
+        ),
+    ],
 }
 
 
@@ -178,6 +376,8 @@ class BenchmarkFlawType(str, Enum):
     TIMELINE_LORE_CONFLICT = "timeline_lore_conflict"
     STYLE_MISMATCH = "style_mismatch"
     NONE_QUALIFIED = "none_qualified"
+    NON_TARGET_PRESERVATION = "non_target_preservation"
+    INSUFFICIENT_MATERIALS = "insufficient_materials"
 
 
 @dataclass(frozen=True)
@@ -567,11 +767,135 @@ CASE_QUALIFIED_CHAPTER = QualityBenchmarkCase(
 )
 
 
+SEG_5_1_ID = UUID("b5555555-5555-4555-8555-555555555551")
+SEG_5_2_ID = UUID("b6666666-6666-4666-8666-666666666652")
+SEG_6_1_ID = UUID("b5555555-5555-4555-8555-555555555561")
+SEG_6_2_ID = UUID("b6666666-6666-4666-8666-666666666662")
+
+
+# Case 5: Non-target segment preservation during revision
+CASE_NON_TARGET_PRESERVATION = QualityBenchmarkCase(
+    case_id="bench-non-target-preservation-05",
+    title="修改目标段落并精确保留非目标段落",
+    description="非目标段落保留样例：大纲与审阅指出段落 1 存在叙事节奏拖沓冗余问题，段落 2 为埋设重要线索的非目标段落。测试修改模型仅对手术刀调整段落 1，段落 2 字符级严格保留，不发生附带篡改。",
+    flaw_type=BenchmarkFlawType.NON_TARGET_PRESERVATION,
+    project_id=BENCHMARK_PROJECT_ID,
+    chapter_id=BENCHMARK_CHAPTER_ID,
+    outline_document_id=OUTLINE_DOC_ID,
+    outline_version_id=OUTLINE_VER_ID,
+    outline_content=(
+        "第一段：林野在废弃钟楼地下室排查机关，发现暗格被生锈机括卡死，需要快速清理锈屑。\n"
+        "第二段：林野取出密码筒，将其藏在衣袋内层，并在墙缝中发现了老导师留下的秘密标记。"
+    ),
+    segment_one_id=SEG_5_1_ID,
+    segment_two_id=SEG_5_2_ID,
+    target_document_id=DRAFT_DOC_ID,
+    target_version_id=DRAFT_VER_ID,
+    segments=(
+        {
+            "segment_id": str(SEG_5_1_ID),
+            "index": 1,
+            "title": "排除卡死机括",
+            "content": (
+                "林野用袖口擦了擦额头的汗水，叹了口气，看着眼前卡死的铁锁，心想这锁真是太旧了，很多年没人打开过，上面落满了厚厚的灰尘。他拿出小刀刮了刮锈迹，又用撬针试了试，花了好几分钟，终于拨动了簧片。"
+            ),
+        },
+        {
+            "segment_id": str(SEG_5_2_ID),
+            "index": 2,
+            "title": "获取密码筒与导师标记",
+            "content": (
+                "随着金属卡簧的脆响，机芯内部的暗门悄然弹开一条细缝。林野屏息凝神，指尖触到了一只冰凉刺骨的黄铜密码筒。他将其迅速收入风衣暗袋，目光扫过墙角青苔覆裹的砖石——在三寸见方的阴影处，赫然刻着三道隐蔽的指甲划痕，正是老导师失踪前约定的警示印记。"
+            ),
+        },
+    ),
+    writer_contexts=_make_writer_contexts(),
+    review_contexts=_make_review_contexts(),
+    expected_human_scores={
+        EvaluationDimension.REQUIREMENT_ADHERENCE: 5,
+        EvaluationDimension.MODIFICATION_SCOPE_CONTROL: 5,
+        EvaluationDimension.CHARACTER_MOTIVATION: 5,
+        EvaluationDimension.TIMELINE_LORE_CONSISTENCY: 5,
+        EvaluationDimension.STYLE_AND_TONE: 5,
+        EvaluationDimension.PACING_AND_STRUCTURE: 5,
+    },
+    expected_review_outcome={
+        ReviewerRole.EDITOR: "passed",
+        ReviewerRole.CHIEF_EDITOR: "passed",
+        ReviewerRole.LORE: "passed",
+    },
+    expected_blocking_codes=(),
+    expert_annotations=(
+        "测试手术刀式精准修订：明确针对段落 1 进行节奏压缩与精炼，严禁扩散篡改非目标段落 2。评估指标重点检查段落 2 的完全保留率与段落 1 的问题修复效果。"
+    ),
+)
+
+
+# Case 6: Context-starving / Insufficient materials
+CASE_INSUFFICIENT_MATERIALS = QualityBenchmarkCase(
+    case_id="bench-insufficient-materials-06",
+    title="材料不足与防虚构幻觉边界",
+    description="材料不足样例：大纲要求主角调查一件古旧圣物，但提供的设定和背景材料中并无该圣物的确切工艺与渊源细节。测试 Writer/Reviewer 在材料受限时以克制笔法描写感知而不凭空编造违背常理的虚假世界观设定，审阅角色不将材料未知武断判定为阻断性错误。",
+    flaw_type=BenchmarkFlawType.INSUFFICIENT_MATERIALS,
+    project_id=BENCHMARK_PROJECT_ID,
+    chapter_id=BENCHMARK_CHAPTER_ID,
+    outline_document_id=OUTLINE_DOC_ID,
+    outline_version_id=OUTLINE_VER_ID,
+    outline_content=(
+        "第一段：林野在旧货店柜台下发现了一具非铜非铁的古老星盘残件，其表面刻有未知星轨。\n"
+        "第二段：店主不肯透露这件残件的真正来历，只声称是从外海商船上淘得，林野决定买下先行研究。"
+    ),
+    segment_one_id=SEG_6_1_ID,
+    segment_two_id=SEG_6_2_ID,
+    target_document_id=DRAFT_DOC_ID,
+    target_version_id=DRAFT_VER_ID,
+    segments=(
+        {
+            "segment_id": str(SEG_6_1_ID),
+            "index": 1,
+            "title": "发现异质星盘残件",
+            "content": (
+                "柜台深处的樟木匣里，静静躺着半枚漆黑的金属圆盘。林野伸手拂过其表面，指腹传来的质感沉重而冰凉，既非寻常的黄铜，也不像任何常见的合金。圆盘边缘磨损严重，中心嵌着数道错综复杂的同心凹槽，依稀可见某些古老而无从辨识的星轨刻度。"
+            ),
+        },
+        {
+            "segment_id": str(SEG_6_2_ID),
+            "index": 2,
+            "title": "与掌柜的不明交易",
+            "content": (
+                "柜台后的独眼老人吐出一口刺鼻的草药烟雾，干瘪的嘴唇抿成一条冷硬的弧线。‘五十银里尔，少一个子儿都不卖。’老人敲了敲烟斗，声音沙哑如同两块枯骨摩擦，‘别问它是哪来的，上个月南边靠岸的水手扔在这儿抵酒钱的。’林野从口袋里掏出钱袋，没有多言，将银币一颗颗推上桌面。"
+            ),
+        },
+    ),
+    writer_contexts=_make_writer_contexts(),
+    review_contexts=_make_review_contexts(),
+    expected_human_scores={
+        EvaluationDimension.REQUIREMENT_ADHERENCE: 4,
+        EvaluationDimension.TIMELINE_LORE_CONSISTENCY: 4,
+        EvaluationDimension.STYLE_AND_TONE: 4,
+        EvaluationDimension.PACING_AND_STRUCTURE: 4,
+        EvaluationDimension.EVIDENCE_ACCURACY: 4,
+        EvaluationDimension.FALSE_POSITIVE_NEGATIVE_RATE: 5,
+    },
+    expected_review_outcome={
+        ReviewerRole.EDITOR: "warning",
+        ReviewerRole.CHIEF_EDITOR: "warning",
+        ReviewerRole.LORE: "warning",
+    },
+    expected_blocking_codes=(),
+    expert_annotations=(
+        "测试在世界观资料不充分的场景下，模型是否能保持克制叙事、避免凭空编造核心设定（幻觉），以及审阅者是否具备合理的包容度，给出 Warning/Note 提示补充设定，而非强行判为 Blocking。"
+    ),
+)
+
+
 ALL_QUALITY_BENCHMARKS: tuple[QualityBenchmarkCase, ...] = (
     CASE_MOTIVATION_BREAKDOWN,
     CASE_TIMELINE_LORE_CONFLICT,
     CASE_STYLE_MISMATCH,
     CASE_QUALIFIED_CHAPTER,
+    CASE_NON_TARGET_PRESERVATION,
+    CASE_INSUFFICIENT_MATERIALS,
 )
 
 
@@ -586,7 +910,9 @@ def get_benchmark_by_id(case_id: str) -> QualityBenchmarkCase:
 __all__ = [
     "ALL_QUALITY_BENCHMARKS",
     "BenchmarkFlawType",
+    "CASE_INSUFFICIENT_MATERIALS",
     "CASE_MOTIVATION_BREAKDOWN",
+    "CASE_NON_TARGET_PRESERVATION",
     "CASE_QUALIFIED_CHAPTER",
     "CASE_STYLE_MISMATCH",
     "CASE_TIMELINE_LORE_CONFLICT",
