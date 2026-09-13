@@ -3,7 +3,7 @@ import { Link, useLocation, useNavigate, useParams } from 'react-router-dom'
 import { flushSync } from 'react-dom'
 import { ApiError, approveStudioOutline, createChapter, getProject, listChapters, readDocumentContent, readDocumentVersionContent, readRestorePointFeedback, createRestorePoint, restorePoint, type Project } from './api/client'
 import { getChapterProductionRun, listChapterProductionRuns, resumeChapterProduction, startChapterProductionV2 } from './api/chapterProductionV2Client'
-import { advanceStudioReview, finalizeStudioChapter, loadStudioReview, reviewStages, reviseStudioReview, studioRevisionSelection, revisionRecoveryKey, studioFinalIsComplete } from './studioProduction'
+import { advanceStudioReview, finalizeStudioChapter, loadStudioReview, reviewStages, reviseStudioReview, studioRevisionSelection, revisionRecoveryKey, studioFinalIsComplete, prepareStudioFeedbackRevision, reviseStudioFeedback, feedbackRevisionKey } from './studioProduction'
 import { initialPreview, newStudioChapter, outlineOptions, previewIssues, previewProse, readerPersonas, readerStageKey, reviewers, stages, type Stage, type StudioChapter } from './studioPreview'
 import StudioReader from './StudioReader'
 import { useDraftAutosave } from './useDraftAutosave'
@@ -807,6 +807,33 @@ function StudioWorkspace({ title, initial, initialId, project, preview }: {
       if (productionPending.current === controller) { productionPending.current = null; setProductionBusyId('') }
     }
   }
+  async function runFormalFeedback(id: string) {
+    if (productionPending.current || archiveSaving.current || !project || id !== selectedId) return
+    const controller = new AbortController()
+    productionPending.current = controller; setProductionBusyId(id)
+    const origin = navigation.current
+    try {
+      if (!editor.current || !await editor.current.flush()) { setToast('正文或反馈尚未保存，请先重试保存。'); return }
+      if (origin !== navigation.current || controller.signal.aborted) return
+      const chapter = currentChapters.current.find(item => item.id === id)
+      if (!chapter) return
+      const request = chapter.feedbackRequest || await prepareStudioFeedbackRevision(project.id, chapter, controller.signal)
+      sessionStorage.setItem(feedbackRevisionKey(project.id, id), JSON.stringify(request))
+      update(id, { feedbackRequest: request, productionError: undefined })
+      const patch = await reviseStudioFeedback(project.id, chapter, request, controller.signal)
+      sessionStorage.removeItem(feedbackRevisionKey(project.id, id))
+      update(id, patch)
+      setToast('已根据反馈生成新稿，请核对正文。')
+    } catch (error) {
+      if (!controller.signal.aborted) update(id, { productionError: error instanceof ApiError && error.status === 409
+        ? '章节版本或流程已变化，请重试读取服务器状态；如仍冲突，请重新加载核对。'
+        : error instanceof ApiError && error.message
+          ? error.message
+          : '反馈修改未完成。重试会先核对服务器进度，不会重复创建流程。' })
+    } finally {
+      if (productionPending.current === controller) { productionPending.current = null; setProductionBusyId('') }
+    }
+  }
   function startReview(id: string, revisedIds: string[] = []) {
     const chapter = currentChapters.current.find(item => item.id === id)
     if (!preview) {
@@ -931,7 +958,7 @@ function StudioWorkspace({ title, initial, initialId, project, preview }: {
                 <span data-motion-control data-visible={sendVisible} aria-hidden={!sendVisible} inert={!sendVisible}><IconButton icon="send" label={selected.stage === 'Review' ? `修改所选 ${selected.selected.length} 项并重新审阅` : '发送写作要求'} disabled={Boolean(productionBusyId) || Boolean(selected.productionError) || (selected.stage === 'Review' ? !selected.selected.length : (!preview && selected.feedbackReadOnly !== false) || !selected.requirements.trim() && !selected.draftComments?.some(comment => comment.submitted))} onClick={() => {
                   if (selected.stage === 'Review') startReview(selected.id, selected.selected)
                   else if (preview) setToast('写作要求与已提交评论已保留，Agent 修改接口尚未接入。')
-                  else void editor.current?.submitFeedback((selected.draftComments || []).filter(comment => comment.submitted).map(comment => comment.id)).then(saved => setToast(saved ? '写作反馈已保存，Agent 修改流程尚未接入。' : '写作反馈尚未提交，请先重试保存。'))
+                  else void runFormalFeedback(selected.id)
                 }} /></span>
               </div>
               {(archive ? !!archive.comments?.length : selected.stage === 'Draft' && !!selected.draftComments?.some(comment => comment.submitted)) && <SubmittedComments key={archive?.id || selected.id} archive={Boolean(archive)} activeId={activeComment?.id} comments={archive ? archive.comments || [] : selected.draftComments!.filter(comment => comment.submitted)} readOnly={Boolean(archive) || productionBusyId === selected.id || Boolean(selected.productionError) || (!preview && selected.feedbackReadOnly !== false) || selected.published}
@@ -940,12 +967,15 @@ function StudioWorkspace({ title, initial, initialId, project, preview }: {
             </>}>
               <div className="studio-context-heading"><h2><TextSweep text={archive ? activeComment ? '存档评论' : '存档写作要求' : showingOutline ? '本章大纲' : selected.stage === 'Review' ? '审阅' : '给写作 Agent 的要求'} /></h2></div>
               {!preview && !showingOutline && <div>
-                {productionBusyId === selected.id && <p role="status" className="studio-muted">{selected.stage === 'Draft' ? '正在保存并提交正文…' : '正在执行当前审阅…'}</p>}
+                {productionBusyId === selected.id && <p role="status" className="studio-muted">{selected.stage === 'Draft' ? (selected.feedbackRequest ? '正在根据要求修改正文…' : '正在保存并提交正文…') : '正在执行当前审阅…'}</p>}
                 {selected.productionError && <p role="alert">{selected.productionError}</p>}
                 {!selected.productionError && selected.productionState?.awaiting_user && selected.productionState.action_kind === 'review_warning'
                   && <button disabled={Boolean(productionBusyId)} onClick={() => void runFormalReview(selected.id, selected.productionState)}>接受当前警告并继续审阅</button>}
-                {(selected.productionError || selected.stage === 'Review' && !selected.productionState?.awaiting_user
-                  && (reviewStages.includes(selected.productionStatus || '') || selected.productionStatus === 'FAILED'))
+                {selected.stage === 'Draft' && (selected.feedbackRequest || selected.productionError) && (
+                  <button disabled={Boolean(productionBusyId)} onClick={() => void (selected.feedbackRequest ? runFormalFeedback(selected.id) : runFormalReview(selected.id))}>{selected.feedbackRequest ? '重试修改' : '重试审阅'}</button>
+                )}
+                {selected.stage === 'Review' && (selected.productionError || (!selected.productionState?.awaiting_user
+                  && (reviewStages.includes(selected.productionStatus || '') || selected.productionStatus === 'FAILED')))
                   && <button disabled={Boolean(productionBusyId)} onClick={() => void runFormalReview(selected.id)}>{selected.productionError || selected.productionStatus === 'FAILED' ? '重试审阅' : '继续审阅'}</button>}
               </div>}
               <div className={`studio-context-body${contextInput ? ' is-input' : ''}`}>
@@ -994,7 +1024,7 @@ function StudioWorkspace({ title, initial, initialId, project, preview }: {
               const chapter = currentChapters.current.find(chapter => chapter.id === selected.id)
               if (!chapter || chapter.stage !== 'Draft' || chapter.review === 'running') return
               if (preview) update(chapter.id, { draftComments: chapter.draftComments?.map(comment => ({ ...comment, submitted: true })) })
-              else setToast('正文反馈已保存，Agent 修改流程尚未接入。')
+              else setToast('评论已加入待处理要求。')
               setCommentRequest({ id: chapter.draftComments?.find(comment => preview ? !comment.submitted : comment.submitted)?.id || '' })
               setContextOutline(false)
               requestAnimationFrame(() => {
@@ -1019,7 +1049,7 @@ function StudioWorkspace({ title, initial, initialId, project, preview }: {
       <section className={`studio-stats studio-floating${pins.stats ? ' is-pinned' : ''}${hidden && !pins.stats ? ' is-hidden' : ''}`} inert={(hidden || !sidebarOpen) && !pins.stats} aria-label="创作统计"><div><img src={asset('time')} alt="时间" />{Math.floor(seconds / 3600)}h {Math.floor(seconds / 60) % 60}m {seconds % 60}s</div><div><img src={asset('font')} alt="字数" />{(selected?.draft.replace(/\s/g, '').length || 0).toLocaleString()} 字</div><Pin label="统计面板" pinned={pins.stats} onChange={() => setPins(value => ({ ...value, stats: !value.stats }))} /></section>
       <section className={`studio-directory studio-floating${pins.directory ? ' is-pinned' : ''}${hidden && !pins.directory ? ' is-hidden' : ''}`} inert={(hidden || !sidebarOpen) && !pins.directory} aria-label="章节目录"><div className="studio-directory-tools"><Pin label="章节目录" pinned={pins.directory} onChange={() => setPins(value => ({ ...value, directory: !value.directory }))} /></div><div className="studio-directory-title"><h2>{title}</h2><IconButton icon="add" label="新建卷" disabled={!preview} onClick={() => setVolumes(items => [...items, `第${items.length + 1}卷`])} /></div><div className="studio-directory-scroll">{volumes.slice().reverse().map(volume => <details key={volume} open><summary><span>{volume}</span><IconButton icon="add" label={`在${volume}新建章节`} disabled={chapterPending} onClick={event => { event.preventDefault(); addChapter(volume) }} /></summary>{chapters.filter(chapter => chapter.volume === volume).slice().sort((a, b) => b.number - a.number).map(chapter => <ChapterArchiveRow projectId={project?.id} key={chapter.id} chapter={chapter} current={selectedId === chapter.id} activeArchive={archive?.chapterId === chapter.id ? archive.id : undefined} preview={preview} local={archives[chapter.id] || []} revision={archiveRevision} onChapter={() => selectChapter(chapter.id)} onArchive={entry => viewArchive(chapter, entry)} />)}</details>)}</div></section>
     </aside>}
-    <footer className={`studio-bottom studio-chrome${hidden ? ' is-hidden' : ''}`}><button onClick={() => void leave(() => navigate('/'))}>返回书架</button><span>{preview ? '交互预览 · Agent 流程为示例' : '真实章节 · 新流程待接入'}</span>{!preview && selected && <button onClick={() => void leave(() => navigate(`/projects/${project?.id}/chapters/${selected.id}`))}>现有工作台</button>}</footer>
+    <footer className={`studio-bottom studio-chrome${hidden ? ' is-hidden' : ''}`}><button onClick={() => void leave(() => navigate('/'))}>返回书架</button><span>{preview ? '交互预览 · Agent 流程为示例' : '真实章节 · 流程已接通'}</span>{!preview && selected && <button onClick={() => void leave(() => navigate(`/projects/${project?.id}/chapters/${selected.id}`))}>现有工作台</button>}</footer>
     <Assistant hidden={hidden} project={project} chapter={selected} currentView={selected?.stage || page} preview={preview} />
     {(toast || storageError) && <div className="studio-toast" role={storageError ? 'alert' : 'status'}>{storageError || toast}<button aria-label="关闭提示" onClick={() => { setToast(''); setStorageError('') }}>×</button></div>}
     {publishing && <PublishDialog preview={preview} busy={Boolean(productionBusyId)} error={selected?.productionError} onClose={() => setPublishing(false)} onConfirm={() => void publish()} />}

@@ -1,14 +1,14 @@
 import { beforeEach, expect, it, vi } from 'vitest'
-import { readDocumentContent } from './api/client'
+import { readDocumentContent, readStudioFeedback, submitStudioFeedback } from './api/client'
 import { getChapterProductionRun, getChapterProductionReviewReport, listChapterProductionRuns, reconcileChapterProduction,
-  resolveChapterProductionAction, triggerChapterReview, requestReviewRevision, finalizeChapterProduction, type ChapterProductionState, type ChapterProductionReviewReport } from './api/chapterProductionV2Client'
+  resolveChapterProductionAction, triggerChapterReview, requestReviewRevision, finalizeChapterProduction, requestStudioFeedbackRevision, type ChapterProductionState, type ChapterProductionReviewReport } from './api/chapterProductionV2Client'
 import { newStudioChapter } from './studioPreview'
-import { advanceStudioReview, finalizeStudioChapter, reviseStudioReview, studioRevisionSelection } from './studioProduction'
+import { advanceStudioReview, finalizeStudioChapter, prepareStudioFeedbackRevision, reviseStudioFeedback, reviseStudioReview, studioRevisionSelection } from './studioProduction'
 
-vi.mock('./api/client', async original => ({ ...await original<typeof import('./api/client')>(), readDocumentContent: vi.fn() }))
+vi.mock('./api/client', async original => ({ ...await original<typeof import('./api/client')>(), readDocumentContent: vi.fn(), readStudioFeedback: vi.fn(), submitStudioFeedback: vi.fn() }))
 vi.mock('./api/chapterProductionV2Client', async original => ({ ...await original<typeof import('./api/chapterProductionV2Client')>(),
   getChapterProductionRun: vi.fn(), getChapterProductionReviewReport: vi.fn(), listChapterProductionRuns: vi.fn(),
-  reconcileChapterProduction: vi.fn(), resolveChapterProductionAction: vi.fn(), triggerChapterReview: vi.fn(), requestReviewRevision: vi.fn(), finalizeChapterProduction: vi.fn() }))
+  reconcileChapterProduction: vi.fn(), resolveChapterProductionAction: vi.fn(), triggerChapterReview: vi.fn(), requestReviewRevision: vi.fn(), finalizeChapterProduction: vi.fn(), requestStudioFeedbackRevision: vi.fn() }))
 
 const chapter = { ...newStudioChapter('chapter', 1, '第一章', '第一卷'), documentId: 'doc', versionId: 'saved', draft: '保存后的正文' }
 const state = (status: ChapterProductionState['status'], patch: Partial<ChapterProductionState> = {}): ChapterProductionState => ({
@@ -164,4 +164,63 @@ it('rejects warning consent from another run or version before any mutation', as
   }
   expect(resolveChapterProductionAction).not.toHaveBeenCalled()
   expect(triggerChapterReview).not.toHaveBeenCalled()
+})
+
+it('prepares feedback revision request from author gate, rejecting orphaned or empty feedback', async () => {
+  const current = { ...chapter, requirements: '增加更多环境描写', productionState: state('AUTHOR_REVISION') }
+  vi.mocked(getChapterProductionRun).mockResolvedValue(state('AUTHOR_REVISION'))
+  vi.mocked(readStudioFeedback).mockResolvedValue({
+    chapter_id: 'chapter', region: 'draft', document_id: 'doc', source_version_id: 'saved', revision: 2,
+    requirements: '增加更多环境描写', comments: [{ id: 'c1', start: 0, end: 4, quote: '保存', text: '修改词句', color: '#ffcc00', submitted: true, orphaned: false }],
+    read_only: false,
+  })
+  const request = await prepareStudioFeedbackRevision('project', current, new AbortController().signal)
+  expect(request).toMatchObject({
+    runId: 'run', documentId: 'doc', actionId: 'action',
+    submission: { expected_current_version_id: 'saved', expected_revision: 2, comment_ids: ['c1'] },
+  })
+
+  // Rejects orphaned comments
+  vi.mocked(readStudioFeedback).mockResolvedValueOnce({
+    chapter_id: 'chapter', region: 'draft', document_id: 'doc', source_version_id: 'saved', revision: 2,
+    requirements: '增加更多环境描写', comments: [{ id: 'c2', start: 0, end: 0, quote: '', text: '位置丢失的评论', color: '#ffcc00', submitted: true, orphaned: true }],
+    read_only: false,
+  })
+  await expect(prepareStudioFeedbackRevision('project', current, new AbortController().signal)).rejects.toThrow('评论已失去原文位置')
+
+  // Rejects empty feedback
+  const empty = { ...chapter, requirements: '', productionState: state('AUTHOR_REVISION') }
+  vi.mocked(readStudioFeedback).mockResolvedValueOnce({
+    chapter_id: 'chapter', region: 'draft', document_id: 'doc', source_version_id: 'saved', revision: 2,
+    requirements: '', comments: [], read_only: false,
+  })
+  await expect(prepareStudioFeedbackRevision('project', empty, new AbortController().signal)).rejects.toThrow('请先填写写作要求或评论内容')
+})
+
+it('submits snapshot, calls feedback revision and adopts server candidate version', async () => {
+  const current = { ...chapter, requirements: '写得更生动', productionState: state('AUTHOR_REVISION') }
+  const request = {
+    runId: 'run', documentId: 'doc', actionId: 'action',
+    submission: { request_id: 'sub-1', expected_current_version_id: 'saved', expected_revision: 1, comment_ids: [] },
+  }
+  vi.mocked(submitStudioFeedback).mockResolvedValue({
+    id: 'sub-1', chapter_id: 'chapter', region: 'draft', document_id: 'doc', source_version_id: 'saved',
+    feedback_revision: 2, comments: [], requirements: '写得更生动', created_at: '2026-09-13T00:00:00Z',
+  })
+  vi.mocked(requestStudioFeedbackRevision).mockResolvedValue({
+    workflow_run_id: 'run', draft_document_id: 'doc', draft_version_id: 'new-version', action_request_id: 'new-action',
+  })
+  vi.mocked(readDocumentContent).mockResolvedValue({ document_id: 'doc', version_id: 'new-version', content: 'Agent 修改后的新正文' })
+  const updatedRun = state('AUTHOR_REVISION', { document_version_id: 'new-version', action_request_id: 'new-action' })
+  vi.mocked(getChapterProductionRun).mockResolvedValue(updatedRun)
+
+  const result = await reviseStudioFeedback('project', current, request, new AbortController().signal)
+  expect(submitStudioFeedback).toHaveBeenCalledWith('project', 'chapter', 'draft', request.submission)
+  expect(requestStudioFeedbackRevision).toHaveBeenCalledWith('project', 'chapter', 'run', {
+    submission_id: 'sub-1', document_id: 'doc', version_id: 'saved', action_request_id: 'action',
+  }, expect.any(AbortSignal))
+  expect(result).toMatchObject({
+    draft: 'Agent 修改后的新正文', versionId: 'new-version', stage: 'Draft', review: 'idle',
+    productionStatus: 'AUTHOR_REVISION', productionState: updatedRun,
+  })
 })
