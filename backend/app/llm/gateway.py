@@ -321,6 +321,9 @@ class StructuredOutputProfile(Generic[OutputT]):
     timeout_seconds: float = 30.0
     max_input_chars: int = 1_000_000
     max_output_bytes: int = 1_000_000
+    temperature: float | None = None
+    top_p: float | None = None
+    max_tokens: int | None = None
 
     def __post_init__(self) -> None:
         _validate_machine_identifier(self.profile_id)
@@ -348,6 +351,24 @@ class StructuredOutputProfile(Generic[OutputT]):
         ):
             if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= upper:
                 raise ValueError(f"{label} must be a positive bounded integer")
+        if self.temperature is not None and (
+            isinstance(self.temperature, bool)
+            or not isinstance(self.temperature, (int, float))
+            or not 0.0 <= self.temperature <= 2.0
+        ):
+            raise ValueError("temperature must be a float between 0.0 and 2.0")
+        if self.top_p is not None and (
+            isinstance(self.top_p, bool)
+            or not isinstance(self.top_p, (int, float))
+            or not 0.0 < self.top_p <= 1.0
+        ):
+            raise ValueError("top_p must be a float between 0.0 and 1.0")
+        if self.max_tokens is not None and (
+            isinstance(self.max_tokens, bool)
+            or not isinstance(self.max_tokens, int)
+            or not 1 <= self.max_tokens <= 128_000
+        ):
+            raise ValueError("max_tokens must be a positive bounded integer")
 
     @property
     def provenance(self) -> StructuredOutputProvenance:
@@ -381,6 +402,9 @@ class StructuredTransportRequest:
     timeout_seconds: float
     system_prompt: str = field(repr=False)
     user_prompt: str = field(repr=False)
+    temperature: float | None = None
+    top_p: float | None = None
+    max_tokens: int | None = None
 
 
 @dataclass(frozen=True)
@@ -475,6 +499,9 @@ class StructuredOutputGateway(Generic[OutputT]):
             timeout_seconds=self.__profile.timeout_seconds,
             system_prompt=self.__profile.system_prompt,
             user_prompt=request.user_prompt,
+            temperature=self.__profile.temperature,
+            top_p=self.__profile.top_p,
+            max_tokens=self.__profile.max_tokens,
         )
         provider_error: Exception | None = None
         try:

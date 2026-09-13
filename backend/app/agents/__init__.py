@@ -34,6 +34,7 @@ from app.agents.chapter_writer_fakes import (
     DeterministicChapterWriterProvider,
     canonical_chapter_json_bytes,
 )
+from app.agents.chapter_writer_providers import OpenAICompatibleChapterWriterProvider
 from app.agents.chapter_review_agents import (
     ChiefEditorChapterFinalAgent,
     ChiefEditorChapterFinalProvider,
@@ -61,6 +62,7 @@ from app.agents.chapter_review_fakes import (
     DeterministicChapterReviewProvider,
     canonical_review_json_bytes,
 )
+from app.agents.chapter_review_providers import OpenAICompatibleChapterReviewProvider
 from app.agents.contracts import (
     ConceptAgentRequest,
     ConceptGenerationOutput,
@@ -243,6 +245,8 @@ __all__ = [
     "PostChangeRequest",
     "ProposedDocumentEdit",
     "ProposedEditOperation",
+    "OpenAICompatibleChapterReviewProvider",
+    "OpenAICompatibleChapterWriterProvider",
     "PlotArchitectAgent",
     "ProjectCreationComposition",
     "ConceptArtifactWorkflowError",
