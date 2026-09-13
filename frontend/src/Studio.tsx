@@ -291,10 +291,12 @@ function ChapterScroll({ children }: { children: ReactNode }) {
     }
     follow()
     body?.addEventListener('transitionrun', move)
+    body?.addEventListener('transitionend', move)
+    body?.addEventListener('transitioncancel', move)
     const observer = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(measure)
     observer?.observe(element)
     window.addEventListener('resize', measure)
-    return () => { observer?.disconnect(); window.removeEventListener('resize', measure); body?.removeEventListener('transitionrun', move); cancelAnimationFrame(frame) }
+    return () => { observer?.disconnect(); window.removeEventListener('resize', measure); body?.removeEventListener('transitionrun', move); body?.removeEventListener('transitionend', move); body?.removeEventListener('transitioncancel', move); cancelAnimationFrame(frame) }
   }, [])
   return <div className="studio-manuscript-viewport" ref={viewport}>
     <div className="studio-chapter-scroll" tabIndex={0} role="region" aria-label="章节滚动区域"><div className="studio-chapter-content">{children}</div></div>

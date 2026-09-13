@@ -14,9 +14,11 @@ export function useFloatingComment(sheet: RefObject<HTMLDivElement | null>, enab
     let timer = 0, dragged = false, entrance: Animation | undefined
     let drag: { x: number; y: number; left: number; top: number } | null = null
     const grip = box.querySelector<HTMLElement>('.studio-comment-grip')!
+    let rightLimit = window.innerWidth - 12
+    let bottomLimit = window.innerHeight - 65
     const place = (left: number, top: number) => {
-      box.style.left = `${Math.max(12, Math.min(left, window.innerWidth - box.offsetWidth - 12))}px`
-      box.style.top = `${Math.max(85, Math.min(top, window.innerHeight - box.offsetHeight - 65))}px`
+      box.style.left = `${Math.max(12, Math.min(left, rightLimit - box.offsetWidth))}px`
+      box.style.top = `${Math.max(85, Math.min(top, bottomLimit - box.offsetHeight))}px`
     }
     const layout = () => {
       const width = window.innerWidth > 760 ? 230 : Math.max(140, window.innerWidth * .4)
@@ -29,6 +31,8 @@ export function useFloatingComment(sheet: RefObject<HTMLDivElement | null>, enab
       const bottom = obstacles.filter(rect => !beside && rect.left <= 40)
       const rightEdge = Math.min(window.innerWidth - 12, ...side.map(rect => rect.left - 16))
       const bottomEdge = Math.min(window.innerHeight - 65, ...bottom.map(rect => rect.top - 16))
+      rightLimit = rightEdge
+      bottomLimit = bottomEdge
       box.style.maxHeight = `${Math.max(120, bottomEdge - 85)}px`
       const pageOffset = prose.closest<HTMLElement>('.studio-page-surface')?.getBoundingClientRect().left || 0
       // Reserve only the missing side gutter; the panel remains outside the scrolling text.

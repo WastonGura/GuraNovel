@@ -139,6 +139,31 @@ describe('creation studio', () => {
     expect(launcher).toHaveFocus()
   })
 
+  it('opens Gura, switches to Draft, collapses and handles rapid reverse with correct gutter and comment placement', async () => {
+    const comment = { id: 'pending-1', start: 0, end: 2, quote: '正文', text: '修改意见', color: commentColors[0] }
+    localStorage.setItem('guranovel:studio-preview:v1', JSON.stringify({ 'preview-10': { outline: '大纲', draft: '正文测试内容', draftComments: [comment] } }))
+    openPreview()
+    const launcher = screen.getByRole('button', { name: 'Gura' })
+    await stage('Gura')
+    expect(launcher).toHaveAttribute('aria-expanded', 'true')
+    await stage('Draft')
+    const viewport = document.querySelector<HTMLElement>('.studio-manuscript-viewport')!
+    expect(viewport).toBeInTheDocument()
+    const commentPanel = document.querySelector<HTMLElement>('.studio-floating-comment')!
+    expect(commentPanel).toBeInTheDocument()
+    // Collapse assistant
+    await stage('收起助手')
+    expect(launcher).toHaveAttribute('aria-expanded', 'false')
+    // Rapid reverse: reopen and close immediately
+    await stage('Gura')
+    expect(launcher).toHaveAttribute('aria-expanded', 'true')
+    await stage('收起助手')
+    expect(launcher).toHaveAttribute('aria-expanded', 'false')
+    expect(commentPanel).toBeInTheDocument()
+    expect(viewport).toBeInTheDocument()
+    expect(commentPanel.dataset.occluded).not.toBe('true')
+  })
+
   it('waits for the actual page transition before showing comments, then idles, wakes and moves by keyboard', async () => {
     const comment = { id: 'pending', start: 0, end: 2, quote: '正文', text: '意见', color: commentColors[0] }
     localStorage.setItem('guranovel:studio-preview:v1', JSON.stringify({ 'preview-10': { outline: '大纲', draft: '正文测试', draftComments: [comment] } }))
