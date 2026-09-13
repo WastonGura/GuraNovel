@@ -65,8 +65,7 @@ def validate_reader_panel_text(value: str, label: str = "text", *, max_bytes: in
     return stripped
 
 
-class _StrictContractModel(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
+
 
 
 class Severity(StrEnum):
@@ -147,6 +146,52 @@ class DiscussionStatus(StrEnum):
 class SpeakerType(StrEnum):
     READER = "reader"
     MODERATOR = "moderator"
+
+
+class _StrictContractModel(BaseModel):
+    model_config = ConfigDict(strict=True, extra="forbid", frozen=True)
+
+    @field_validator(
+        "severity",
+        "suggested_action",
+        "confidence",
+        "continue_reading",
+        "stance",
+        "novelty",
+        "target_audience_relevance",
+        "consensus_class",
+        "priority",
+        "recommended_priority",
+        "discussion_status",
+        "speaker_type",
+        mode="before",
+        check_fields=False,
+    )
+    @classmethod
+    def _coerce_str_enums(cls, value: object, info: object) -> object:
+        if isinstance(value, str):
+            field_name = getattr(info, "field_name", None)
+            enum_map = {
+                "severity": Severity,
+                "suggested_action": SuggestedAction,
+                "confidence": Confidence,
+                "continue_reading": ContinueReadingVote,
+                "stance": DiscussionStance,
+                "novelty": DiscussionNovelty,
+                "target_audience_relevance": TargetAudienceRelevance,
+                "consensus_class": ConsensusClass,
+                "priority": EditorialDecision,
+                "recommended_priority": EditorialDecision,
+                "discussion_status": DiscussionStatus,
+                "speaker_type": SpeakerType,
+            }
+            target_enum = enum_map.get(field_name)
+            if target_enum is not None:
+                try:
+                    return target_enum(value)
+                except ValueError:
+                    raise ValueError(f"invalid {field_name} value: {value!r}")
+        return value
 
 
 class EvidenceRef(_StrictContractModel):

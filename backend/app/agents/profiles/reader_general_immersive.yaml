@@ -3,8 +3,8 @@ version: v1
 description: General immersive reader evaluating story immersion, narrative flow, and reading momentum.
 agent_role: reader_agent
 model:
-  provider: fake
-  model: deterministic-reader-panel-v1
+  provider: openai_compatible
+  model: reader-panel-reader-v1
   temperature: 0.2
   top_p: 1.0
   max_tokens: 4096

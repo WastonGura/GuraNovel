@@ -37,6 +37,20 @@ from app.agents.concept_providers import (
     OpenAICompatibleConceptProvider,
 )
 from app.agents.maintenance_providers import OpenAICompatibleMaintenanceProvider
+from app.agents.reader_panel_providers import OpenAICompatibleReaderPanelProvider
+from app.agents.reader_panel_agents import (
+    build_blind_ballot_request,
+    build_cold_read_request,
+)
+from app.agents.reader_panel_contracts import (
+    EvidenceRef,
+    ExtractedIssueItem,
+    ModeratorDiscussionSummaryRequest,
+    ModeratorIssueExtractionRequest,
+    ModeratorReportSynthesisRequest,
+    ReaderDiscussionTurnRequest,
+    ReaderFinalBallotRequest,
+)
 from app.agents.contracts import (
     ConceptAgentRequest,
     ConceptGenerationOutput,
@@ -464,6 +478,175 @@ async def run_smoke(
             finally:
                 await provider.aclose()
 
+        elif role in (
+            "reader_reading",
+            "moderator_extraction",
+            "reader_ballot",
+            "reader_discussion",
+            "moderator_summary",
+            "reader_final_ballot",
+            "moderator_report",
+        ):
+            provider = OpenAICompatibleReaderPanelProvider(
+                base_url=base_url,
+                api_key=api_key,
+                model=model,
+                timeout_seconds=timeout_seconds,
+            )
+            try:
+                segments_map = {
+                    f"S{idx:03d}": seg["content"]
+                    for idx, seg in enumerate(candidate_segments, 1)
+                }
+                sample_issue = ExtractedIssueItem(
+                    issue_number=1,
+                    title="Dialogue pacing and exposition load",
+                    category="pacing",
+                    symptom="Dialogue exposition slows scene tempo",
+                    root_cause_hypotheses=["Lore inserted mid-conversation"],
+                    evidence=[EvidenceRef(segment_ids=["S001"], note="Opening scene dialogue")],
+                    source_reader_ids=["general_immersive"],
+                )
+
+                if role == "reader_reading":
+                    reading_req = build_cold_read_request(
+                        project_id=project_id,
+                        chapter_id=chapter_id,
+                        workflow_run_id=workflow_run_id,
+                        reader_profile_id="general_immersive",
+                        genre="gothic fantasy",
+                        target_audience=["fantasy readers"],
+                        manuscript_segments=segments_map,
+                    )
+                    reading_res = await provider.generate_initial_reading(reading_req)
+                    elapsed = time.monotonic() - start_time
+                    print(f"[SUCCESS] Reader cold reading completed in {elapsed:.2f}s")
+                    print(f"Reaction: {reading_res.overall_reaction[:120]}...")
+                    print(f"Continue: {reading_res.continue_reading.value}, Confidence: {reading_res.confidence.value}")
+                    print(f"Strengths: {len(reading_res.strengths)}, Concerns: {len(reading_res.concerns)}")
+
+                elif role == "moderator_extraction":
+                    extract_req = ModeratorIssueExtractionRequest(
+                        project_id=project_id,
+                        chapter_id=chapter_id,
+                        workflow_run_id=workflow_run_id,
+                        reader_initial_reports={
+                            "general_immersive": {
+                                "overall_reaction": "Immersive opening but dialogue drags slightly.",
+                                "continue_reading": "yes",
+                                "concerns": [
+                                    {
+                                        "category": "pacing",
+                                        "symptom": "Dialogue exposition slows scene tempo",
+                                        "severity": "minor",
+                                        "evidence": [{"segment_ids": ["S001"], "note": "Dialogue"}],
+                                    }
+                                ],
+                            }
+                        },
+                        manuscript_segments=segments_map,
+                    )
+                    extract_res = await provider.extract_issues(extract_req)
+                    elapsed = time.monotonic() - start_time
+                    print(f"[SUCCESS] Moderator extracted {len(extract_res.issues)} issues in {elapsed:.2f}s")
+                    for iss in extract_res.issues:
+                        print(f"  - Issue #{iss.issue_number}: {iss.title} ({iss.category})")
+
+                elif role == "reader_ballot":
+                    ballot_req = build_blind_ballot_request(
+                        project_id=project_id,
+                        chapter_id=chapter_id,
+                        workflow_run_id=workflow_run_id,
+                        reader_profile_id="general_immersive",
+                        issue=sample_issue,
+                        manuscript_segments=segments_map,
+                    )
+                    ballot_res = await provider.generate_blind_ballot(ballot_req)
+                    elapsed = time.monotonic() - start_time
+                    print(f"[SUCCESS] Blind ballot completed in {elapsed:.2f}s")
+                    print(f"Severity: {ballot_res.severity.value}, Action: {ballot_res.suggested_action.value}")
+                    print(f"Reason: {ballot_res.reason[:120]}...")
+
+                elif role == "reader_discussion":
+                    turn_req = ReaderDiscussionTurnRequest(
+                        project_id=project_id,
+                        chapter_id=chapter_id,
+                        workflow_run_id=workflow_run_id,
+                        reader_profile_id="general_immersive",
+                        issue=sample_issue,
+                        round_number=1,
+                        turn_number=1,
+                        prior_messages=[],
+                        prior_ballot={"severity": "minor", "suggested_action": "compress"},
+                        manuscript_segments=segments_map,
+                    )
+                    turn_res = await provider.generate_discussion_turn(turn_req)
+                    elapsed = time.monotonic() - start_time
+                    print(f"[SUCCESS] Discussion turn completed in {elapsed:.2f}s")
+                    print(f"Stance: {turn_res.stance.value}, Claim: {turn_res.claim[:120]}...")
+
+                elif role == "moderator_summary":
+                    summary_req = ModeratorDiscussionSummaryRequest(
+                        project_id=project_id,
+                        chapter_id=chapter_id,
+                        workflow_run_id=workflow_run_id,
+                        issue=sample_issue,
+                        round_number=1,
+                        round_messages=[
+                            {"sender": "general_immersive", "claim": "Pacing slows down mid scene."},
+                            {"sender": "style_sensitive", "claim": "I agree, prose needs tightening."},
+                        ],
+                    )
+                    summary_res = await provider.summarize_discussion(summary_req)
+                    elapsed = time.monotonic() - start_time
+                    print(f"[SUCCESS] Discussion summary completed in {elapsed:.2f}s")
+                    print(f"Summary: {summary_res.round_summary[:120]}...")
+                    print(f"Consensus reached: {summary_res.is_consensus_reached}")
+
+                elif role == "reader_final_ballot":
+                    final_req = ReaderFinalBallotRequest(
+                        project_id=project_id,
+                        chapter_id=chapter_id,
+                        workflow_run_id=workflow_run_id,
+                        reader_profile_id="general_immersive",
+                        issue=sample_issue,
+                        round_summaries=["Readers agreed dialogue could be tightened."],
+                        initial_ballot={"severity": "minor", "suggested_action": "compress"},
+                        manuscript_segments=segments_map,
+                    )
+                    final_res = await provider.generate_final_ballot(final_req)
+                    elapsed = time.monotonic() - start_time
+                    print(f"[SUCCESS] Final ballot completed in {elapsed:.2f}s")
+                    print(f"Severity: {final_res.severity.value}, Changed: {final_res.position_changed}")
+
+                elif role == "moderator_report":
+                    report_req = ModeratorReportSynthesisRequest(
+                        project_id=project_id,
+                        chapter_id=chapter_id,
+                        workflow_run_id=workflow_run_id,
+                        initial_reports={"general_immersive": {"overall_reaction": "Good", "continue_reading": "yes"}},
+                        extracted_issues=[sample_issue],
+                        final_consensus_results={
+                            1: {
+                                "consensus_class": "strong_consensus",
+                                "recommended_priority": "must_fix",
+                                "suggested_action": "compress",
+                            }
+                        },
+                    )
+                    report_res = await provider.synthesize_report(report_req)
+                    elapsed = time.monotonic() - start_time
+                    print(f"[SUCCESS] Report synthesis completed in {elapsed:.2f}s")
+                    print(f"Executive Summary: {report_res.executive_summary[:120]}...")
+                    print(f"Recommendations: {len(report_res.actionable_recommendations)}")
+
+                print(
+                    f"Input Tokens: {provider.last_input_tokens}, Output Tokens: {provider.last_output_tokens}"
+                )
+                return 0
+            finally:
+                await provider.aclose()
+
         else:
             print(f"[ERROR] Unsupported role: {role}", file=sys.stderr)
             return 1
@@ -496,6 +679,13 @@ def main() -> None:
             "revision_plan",
             "archivist",
             "consistency_review",
+            "reader_reading",
+            "moderator_extraction",
+            "reader_ballot",
+            "reader_discussion",
+            "moderator_summary",
+            "reader_final_ballot",
+            "moderator_report",
         ],
         default="writer",
         help="Agent role to invoke (default: writer).",

@@ -4,8 +4,8 @@ version: v1
 description: Moderator agent facilitating structured round discussion and generating neutral round summaries.
 agent_role: moderator_agent
 model:
-  provider: fake
-  model: deterministic-moderator-v1
+  provider: openai_compatible
+  model: reader-panel-moderator-v1
   temperature: 0.0
   top_p: 1.0
   max_tokens: 4096
