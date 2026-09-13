@@ -240,6 +240,28 @@ describe('project list', () => {
     expect(await screen.findByRole('region', { name: 'Create 工作区' })).toBeInTheDocument()
   })
 
+  it('navigates to studio create view when clicking create button in novel details', async () => {
+    mockedApi.listProjects.mockResolvedValue([project()])
+    mockedApi.getProject.mockResolvedValue(project())
+    mockedApi.listChapters.mockResolvedValue([chapter()])
+    renderApp('/?project=project-1')
+    const dialog = await screen.findByRole('dialog', { name: 'Archive of Ash' })
+    fireEvent.click(within(dialog).getByRole('button', { name: 'create' }))
+    await waitFor(() => expect(screen.getByTestId('location')).toHaveTextContent('/projects/project-1/studio'))
+    expect(await screen.findByRole('region', { name: 'Create 工作区' })).toBeInTheDocument()
+  })
+
+  it('returns from studio to dashboard when clicking return to bookshelf', async () => {
+    mockedApi.listProjects.mockResolvedValue([project()])
+    mockedApi.getProject.mockResolvedValue(project())
+    mockedApi.listChapters.mockResolvedValue([chapter()])
+    renderApp('/projects/project-1/studio/chapter-1?view=Create')
+    expect(await screen.findByRole('region', { name: 'Create 工作区' })).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: '返回书架' }))
+    await waitFor(() => expect(screen.getByTestId('location')).toHaveTextContent('/'))
+    expect(await screen.findAllByRole('button', { name: 'Open Archive of Ash' })).toHaveLength(2)
+  })
+
   it('moves the dashboard search through hover, active, and leaving states', async () => {
     mockedApi.listProjects.mockResolvedValue([project()])
     renderApp()

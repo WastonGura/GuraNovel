@@ -4,7 +4,7 @@ import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import Studio from './Studio'
 import { draftRecoveryCopies } from './useDraftAutosave'
 import { writeStudioDraft } from './api/client'
-import { approveStudioOutline, createChapter, getProject, listChapters, readDocumentContent, readStudioFeedback, writeDocument, type Chapter, type Project } from './api/client'
+import { ApiError, approveStudioOutline, createChapter, getProject, listChapters, readDocumentContent, readStudioFeedback, writeDocument, type Chapter, type Project } from './api/client'
 import { getChapterProductionRun, getChapterProductionReviewReport, listChapterProductionRuns, resolveChapterProductionAction, triggerChapterReview, resumeChapterProduction, startChapterProductionV2, type ChapterProductionState, type ChapterProductionReviewReport } from './api/chapterProductionV2Client'
 
 vi.mock('./api/client', async original => ({ ...await original<typeof import('./api/client')>(), writeStudioDraft: vi.fn(), approveStudioOutline: vi.fn(), createChapter: vi.fn(), getProject: vi.fn(), listChapters: vi.fn(), readDocumentContent: vi.fn(), readStudioFeedback: vi.fn(), writeDocument: vi.fn() }))
@@ -317,4 +317,24 @@ it('creates a server chapter once, uses its assigned identity, and keeps the old
   expect(screen.queryByRole('alert')).not.toBeInTheDocument()
   fireEvent.click(screen.getByRole('button', { name: '展开章节侧边栏' }))
   expect(screen.getByRole('button', { name: '第42话 Chapter server-chapter' })).toBeInTheDocument()
+})
+
+it('reports missing project with an alert when project does not exist', async () => {
+  vi.mocked(getProject).mockRejectedValue(new ApiError(404, 'not_found', 'Project not found'))
+  open('/projects/unknown/studio')
+  expect(await screen.findByRole('alert')).toHaveTextContent('未找到此作品，可能已被删除或无权访问。')
+  expect(screen.getByRole('link', { name: '返回首页' })).toHaveAttribute('href', '/')
+})
+
+it('handles invalid chapter in preview without crashing', async () => {
+  render(
+    <MemoryRouter initialEntries={['/preview/studio/unknown']}>
+      <Routes>
+        <Route path="/preview/studio" element={<Studio />} />
+        <Route path="/preview/studio/:chapterId" element={<Studio />} />
+      </Routes>
+    </MemoryRouter>,
+  )
+  expect(await screen.findByRole('alert')).toHaveTextContent('此作品中未找到该章节')
+  expect(screen.getByRole('link', { name: '返回作品' })).toHaveAttribute('href', '/preview/studio')
 })
