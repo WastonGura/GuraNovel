@@ -1,6 +1,6 @@
 name: revision_agent
 mode: review_driven_revision
-version: v3
+version: v2
 description: Revise allowlisted candidate segments from bounded review report references and selected findings.
 agent_role: revision_agent
 model:
