@@ -1,5 +1,5 @@
 import { useRef } from 'react'
-import { act, cleanup, render, screen } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import { useFloatingComment } from './useFloatingComment'
 
@@ -58,3 +58,23 @@ it('keeps a narrow overlay directory usable and places the comment above a botto
   expect(parseFloat(box.style.top) + box.offsetHeight).toBeLessThan(540)
   expect(screen.getByRole('textbox')).toHaveValue('保留评论')
 })
+
+it('bounds keyboard and pointer movement away from open obstacles and nudges dragged panels', async () => {
+  const view = render(<Fixture />)
+  const sidebar = view.container.querySelector('.studio-sidebar')!
+  const grip = screen.getByRole('button', { name: '移动' })
+  const box = grip.parentElement!
+  // Nudge box to the far right while sidebar is closed
+  for (let i = 0; i < 30; i++) fireEvent.keyDown(grip, { key: 'ArrowRight' })
+  expect(parseFloat(box.style.left) + 230).toBeGreaterThan(1184)
+  // Opening the sidebar recalculates layout and nudges the dragged panel to safety
+  await act(async () => { sidebar.classList.add('is-open') })
+  expect(parseFloat(box.style.left) + 230).toBeLessThanOrEqual(1184)
+  // Further ArrowRight keystrokes cannot push it into the obstacle
+  for (let i = 0; i < 10; i++) fireEvent.keyDown(grip, { key: 'ArrowRight' })
+  expect(parseFloat(box.style.left) + 230).toBeLessThanOrEqual(1184)
+  // Home key returns it to its default sheet anchor
+  fireEvent.keyDown(grip, { key: 'Home' })
+  expect(parseFloat(box.style.left) + 230).toBeLessThan(1184)
+})
+
