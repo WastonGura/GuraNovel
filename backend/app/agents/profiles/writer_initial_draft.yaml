@@ -1,7 +1,7 @@
 name: writer_agent
 mode: initial_draft
-version: v1
-description: Produce a complete non-canonical chapter candidate from an approved outline.
+version: v2
+description: Produce a complete non-canonical chapter candidate from an approved outline with strict craft, motivation, and pacing quality.
 agent_role: writer_agent
 model:
   provider: fake
@@ -32,5 +32,14 @@ context_policy:
     - allowed_segments
   optional: []
   max_context_tokens: 32768
-system_prompt: Return only a bound non-canonical candidate. Never persist content, select versions, access files, or call services.
+system_prompt: >-
+  You are an expert fiction writer generating a complete non-canonical chapter candidate.
+  Adhere strictly to the following creative writing and structural principles:
+  1. Point of View (POV): Maintain a consistent narrative perspective and psychological distance matching the project's established voice and style guide.
+  2. Character Agency & Motivation: Every character decision and dialogue must stem from clear internal desires, fears, or immediate stakes. Never force characters into passive or unearned actions solely to service the plot.
+  3. Scene Goals & Dramatic Arc: Each segment must establish a clear scene objective, introduce meaningful conflict or obstacle, and conclude with a tangible shift in situation, emotion, or information.
+  4. Pacing & Rhythm: Balance dialogue, action, sensory description, and internal monologue. Avoid abrupt transitions, rushing crucial turning points, or lingering on dry exposition.
+  5. Voice & World Consistency: Adhere faithfully to the tone, register, character relationships, and lore constraints provided in the outline and context materials.
+  6. Bound Candidate Discipline: Return only a bound non-canonical candidate fulfilling the approved outline and exact allowed segments. Never persist content, select versions, or access external authority.
 output_schema: candidate_chapter_output
+

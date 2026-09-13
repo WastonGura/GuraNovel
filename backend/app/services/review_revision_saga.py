@@ -24,10 +24,10 @@ from app.services.chapter_production_v2_contracts import (
 )
 from app.services.chapter_review_validation import (
     validated_persisted_review_report,
-    validated_resolved_review_action,
 )
 from app.services.document_service import DocumentCommitIndeterminateError
 from app.services.review_revision_handoff import ReviewRevisionPlan
+from app.services.review_revision_selection import revision_input_hash, revision_intent
 from app.workflows.chapter_production import (
     ChapterProductionStatus,
     ChapterReviewStage,
@@ -291,7 +291,7 @@ async def _revalidate_revision_prewrite(
         raise _invalid() from None
     if (
         current.segment_map.canonical_bytes() != plan.segment_map.canonical_bytes()
-        or service._review_report_input_hash(current.reports) != plan.report_input_hash
+        or revision_input_hash(service, current.run, current.reports) != plan.report_input_hash
     ):
         raise _invalid() from None
     attempt = service._run_metadata(current.run)["provider_attempt"]
@@ -414,7 +414,8 @@ async def _finalize_review_revision(
         service, identity=identity, run=run, report_slots=report_slots,
     )
     trigger_mode = report_slots[-1][1]
-    await validated_resolved_review_action(
+    from app.services.studio_review_revision import validate_revision_authority
+    await validate_revision_authority(
         service,
         run=run,
         document=source_document,
@@ -422,7 +423,7 @@ async def _finalize_review_revision(
         report=reports[-1],
         stage=_review_stage(trigger_mode),
     )
-    if service._review_report_input_hash(reports) != identity.report_input_hash:
+    if revision_input_hash(service, run, reports) != identity.report_input_hash:
         raise _reconcile() from None
     document, version = await service._locked_current_revision(
         project_id=identity.project_id, chapter_id=identity.chapter_id,
@@ -439,6 +440,10 @@ async def _finalize_review_revision(
         document_version_id=str(version.id),
         content_hash=version.content_hash,
     )
+    intent = revision_intent(run)
+    if intent is not None and intent.selection.version_id == identity.source_version_id:
+        run.metadata_ = {**run.metadata_, "review_revision_intent":
+            intent.model_copy(update={"result_version_id": identity.version_id}).model_dump(mode="json")}
     service._set_attempt(run, None)
     service._append_state(run, checkpoint, next_state)
     await service._commit()
@@ -522,7 +527,7 @@ async def _candidate_matches_provider_attempt(
     if set(reports_by_id) != set(report_ids):
         return False
     reports = tuple(reports_by_id[item] for item in report_ids)
-    report_input_hash = service._review_report_input_hash(reports)
+    report_input_hash = revision_input_hash(service, run, reports)
     expected_key = service._review_operation_key(
         workflow_run_id=run.id, source_version_id=UUID(state.document_version_id),
         report_ids=report_ids, target_segment_ids=targets,

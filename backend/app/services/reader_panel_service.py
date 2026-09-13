@@ -186,6 +186,23 @@ class ReaderPanelService:
     def __init__(self, db: AsyncSession) -> None:
         self._db = db
 
+    async def _manuscript_segments(self, panel, version):
+        if version is None or version.content_hash != panel.source_hash:
+            raise ReaderPanelInvalidStateError()
+        if getattr(version, "snapshot_path", None):
+            from app.services.document_service import DocumentService
+            segment_map = await DocumentService(self._db).derive_chapter_segment_map(
+                project_id=panel.project_id, chapter_id=panel.chapter_id,
+                document_id=panel.document_id, version_id=panel.document_version_id)
+            return {str(segment.segment_id): segment.content for segment in segment_map.segments}
+        # Legacy Reader fixtures/imports may carry explicit segments; never invent manuscript text.
+        segments = version.metadata_.get("segments") if isinstance(version.metadata_, dict) else None
+        if not isinstance(segments, dict) or not segments or not all(
+            isinstance(key, str) and isinstance(value, str) for key, value in segments.items()
+        ):
+            raise ReaderPanelInvalidStateError()
+        return segments
+
     @staticmethod
     def _safe_provider_error(exc: BaseException) -> tuple[str, bool]:
         if isinstance(exc, _ReaderPanelPermanentWorkError):
@@ -1494,6 +1511,7 @@ class ReaderPanelService:
             )
 
         runs = [row for row in await rows_for(ReaderRun) if row.session_id == panel.id]
+        reader_profiles = {row.id: row.reader_profile_id for row in runs}
         issues = [row for row in await rows_for(ReaderPanelIssue) if row.session_id == panel.id]
         ballots = [row for row in await rows_for(ReaderPanelBallot) if row.session_id == panel.id]
         messages = [row for row in await rows_for(ReaderPanelMessage) if row.session_id == panel.id]
@@ -1613,6 +1631,8 @@ class ReaderPanelService:
             "document_id": panel.document_id,
             "document_version_id": panel.document_version_id,
             "source_hash": panel.source_hash,
+            "reader_profile_ids": list(panel.config_snapshot["reader_profile_ids"]),
+            "simulated": True if panel.model_snapshot.get("provider") == "fake" else None,
             "mode": panel.mode,
             "status": panel.status,
             "is_noop": False,
@@ -1643,14 +1663,14 @@ class ReaderPanelService:
             )
             try:
                 result["initial_reports"] = [
-                    ReaderInitialReadingOutput(
+                    {"reader_profile_id": reader_profiles[row.reader_run_id], **ReaderInitialReadingOutput(
                         overall_reaction=row.overall_reaction,
                         continue_reading=row.continue_reading,
                         confidence=row.confidence,
                         strengths=row.strengths,
                         reactions=row.reactions,
                         concerns=row.concerns,
-                    ).model_dump(mode="json")
+                    ).model_dump(mode="json")}
                     for row in reports[:data_limit]
                 ]
             except Exception:
@@ -1696,6 +1716,7 @@ class ReaderPanelService:
                             "round_number": row.round_number,
                             "turn_number": row.turn_number,
                             "speaker_type": row.speaker_type,
+                            "reader_profile_id": reader_profiles[row.reader_run_id] if row.speaker_type == "reader" else None,
                             "stance": stance,
                             "claim": validate_reader_panel_text(row.claim, "claim", max_bytes=4000),
                             "evidence": [
@@ -1900,11 +1921,7 @@ class ReaderPanelService:
         if doc_version is None:
             raise ReaderPanelInvalidStateError()
 
-        segments: dict[str, str] = {}
-        if isinstance(doc_version.metadata_, dict) and "segments" in doc_version.metadata_:
-            segments = doc_version.metadata_["segments"]
-        else:
-            segments = {"S001": f"Chapter content (hash={panel_session.source_hash[:8]})"}
+        segments = await self._manuscript_segments(panel_session, doc_version)
 
         project = await self._db.get(Project, panel_session.project_id)
         genre = project.genre if project and project.genre else "fantasy"
@@ -2208,11 +2225,7 @@ class ReaderPanelService:
             raise ReaderPanelInvalidStateError()
         initial_source_snapshot = source_snapshot(panel_session, eligible_runs)
         doc_version = await self._db.get(DocumentVersion, panel_session.document_version_id)
-        segments = (
-            doc_version.metadata_.get("segments")
-            if doc_version is not None and isinstance(doc_version.metadata_, dict)
-            else None
-        )
+        segments = await self._manuscript_segments(panel_session, doc_version)
         if (
             not isinstance(segments, dict)
             or not segments
@@ -2977,11 +2990,7 @@ class ReaderPanelService:
         ballots = await load_ballots()
         initial_ballots = [ballot for ballot in ballots if ballot.phase == "initial"]
         doc_version = await self._db.get(DocumentVersion, panel_session.document_version_id)
-        all_segments = (
-            doc_version.metadata_.get("segments")
-            if doc_version is not None and isinstance(doc_version.metadata_, dict)
-            else None
-        )
+        all_segments = await self._manuscript_segments(panel_session, doc_version)
         if not isinstance(all_segments, dict):
             await self._db.commit()
             raise ReaderPanelInvalidStateError()
@@ -3899,11 +3908,7 @@ class ReaderPanelService:
                 if workflow_run is not None and isinstance(workflow_run.metadata_, dict)
                 else {}
             )
-            segments = (
-                version.metadata_.get("segments")
-                if version is not None and isinstance(version.metadata_, dict)
-                else None
-            )
+            segments = await self._manuscript_segments(session, version)
             if (
                 session.status
                 not in {

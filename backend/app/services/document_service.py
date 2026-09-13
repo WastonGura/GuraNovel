@@ -236,6 +236,10 @@ class DocumentService:
         await self.session.flush()
         return version, (document.path, content), (version.snapshot_path or "", content)
 
+    async def commit_staged_document(self, document: Document, writes: Sequence[tuple[str, str]]) -> None:
+        """Commit a staged version and related DB rows with the usual file recovery."""
+        await self._commit_with_file_writes(self._store_for(document), writes)
+
     def write_staged_files(self, document: Document, writes: Sequence[tuple[str, str]]) -> None:
         """Called only after known DB commit; failures are explicit reconciliation cases."""
         try:

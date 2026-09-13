@@ -64,12 +64,23 @@ class ReaderPanelStartRequest(BaseModel):
     test_goals: list[BoundedText] = Field(default_factory=list, max_length=16)
     target_audience: list[BoundedText] = Field(default_factory=list, max_length=16)
     idempotency_key: IdempotencyKey | None = None
+    reader_profile_ids: list[Literal["studio_plot", "studio_character", "studio_world", "studio_emotion", "studio_language", "studio_casual"]] | None = Field(default=None, min_length=1, max_length=6)
+
+    def panel_config(self):
+        config = get_mode_preset_config(PanelMode(self.mode))
+        if self.reader_profile_ids is not None:
+            ids = self.reader_profile_ids
+            if len(ids) != len(set(ids)) or len(ids) > config.reader_count:
+                raise ValueError("Invited readers exceed the mode budget or contain duplicates")
+            config = replace(config, reader_profile_ids=list(ids), reader_count=len(ids),
+                             min_valid_readers=min(config.min_valid_readers, len(ids)))
+        if self.config_overrides is not None:
+            config = replace(config, **self.config_overrides.model_dump(exclude_none=True))
+        return config
 
     @model_validator(mode="after")
     def validate_combined_config(self) -> ReaderPanelStartRequest:
-        config = get_mode_preset_config(PanelMode(self.mode))
-        if self.config_overrides is not None:
-            config = replace(config, **self.config_overrides.model_dump(exclude_none=True))
+        config = self.panel_config()
         if (
             config.min_valid_readers > config.reader_count
             or config.max_discussion_issues > config.max_ballot_issues
@@ -134,6 +145,7 @@ class ReaderPanelBlockingIssueResponse(BaseModel):
 
 class ReaderPanelInitialReportResponse(BaseModel):
     model_config = ConfigDict(extra="forbid", from_attributes=True)
+    reader_profile_id: str | None = Field(default=None, min_length=1, max_length=64)
 
     overall_reaction: str = Field(min_length=1, max_length=2000)
     continue_reading: Literal["yes", "maybe", "no"]
@@ -150,6 +162,7 @@ class ReaderPanelInitialReportResponse(BaseModel):
 
 class ReaderPanelMessageResponse(BaseModel):
     model_config = ConfigDict(extra="forbid", from_attributes=True)
+    reader_profile_id: str | None = Field(default=None, min_length=1, max_length=64)
 
     issue_id: UUID
     round_number: int = Field(ge=1)
@@ -218,6 +231,8 @@ class ReaderPanelDetailResponse(BaseModel):
     document_id: UUID
     document_version_id: UUID
     source_hash: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    reader_profile_ids: list[str] = Field(default_factory=list, max_length=6)
+    simulated: bool | None = None
     mode: Literal["off", "quick", "standard", "panel"]
     status: str
     is_noop: bool = False

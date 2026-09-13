@@ -167,6 +167,9 @@ class ChapterProductionRepository:
         outline = await self.session.scalar(statement)
         if outline is None or outline.current_version_id is None:
             raise _validation_error() from None
+        if (chapter.approved_outline_version_id is not None
+                and chapter.approved_outline_version_id != outline.current_version_id):
+            raise _validation_error() from None
         version_statement = (
             select(DocumentVersion)
             .where(

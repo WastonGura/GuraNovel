@@ -25,6 +25,7 @@ from app.workflows.chapter_production import (
     ChapterFailureCode,
     ChapterProductionStatus,
 )
+from app.services.review_revision_selection import revision_input_hash
 
 
 def _invalid() -> ChapterProductionV2ValidationError:
@@ -169,8 +170,7 @@ class ReviewRevisionHandoff:
             request = service._review_revision_request(  # type: ignore[attr-defined]
                 context=context, project_id=scope.project_id, chapter_id=scope.chapter_id,
                 target_segment_ids=scope.target_segment_ids)
-            report_input_hash = service._review_report_input_hash(  # type: ignore[attr-defined]
-                context.reports)
+            report_input_hash = revision_input_hash(service, context.run, context.reports)
             operation_key = service._review_operation_key(  # type: ignore[attr-defined]
                 workflow_run_id=scope.workflow_run_id, source_version_id=context.version.id,
                 report_ids=scope.report_ids, target_segment_ids=scope.target_segment_ids,

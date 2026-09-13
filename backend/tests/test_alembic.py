@@ -130,3 +130,26 @@ def test_reader_panel_recovery_migration_downgrades_ledger() -> None:
 
     assert "DROP TABLE reader_panel_invocations" in sql
     assert "config_snapshot -" in sql
+
+
+def test_studio_assistant_migration_generates_upgrade_sql() -> None:
+    sql = run_alembic(
+        "upgrade", "0009_outline_approval:0010_studio_assistant", "--sql"
+    )
+
+    assert "CREATE TABLE studio_assistant_conversations" in sql
+    assert "CREATE TABLE studio_assistant_messages" in sql
+    assert "idx_studio_assistant_conversations_project" in sql
+    assert "idx_studio_assistant_messages_conversation" in sql
+    assert "ck_studio_assistant_messages_role" in sql
+
+
+def test_studio_assistant_migration_downgrades() -> None:
+    sql = run_alembic(
+        "downgrade", "0010_studio_assistant:0009_outline_approval", "--sql"
+    )
+
+    msg = sql.index("DROP TABLE studio_assistant_messages")
+    conv = sql.index("DROP TABLE studio_assistant_conversations")
+    assert msg < conv
+

@@ -1,6 +1,5 @@
 """Thin, exact-scope HTTP routes for Reader Panel lifecycle operations."""
 
-from dataclasses import replace
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, Query, status
@@ -13,7 +12,7 @@ from app.api.schemas_reader_panel import (
     ReaderPanelStartRequest,
 )
 from app.services.reader_panel_service import ReaderPanelInvalidStateError, ReaderPanelService
-from app.workflows.reader_panel import PanelMode, get_mode_preset_config
+from app.workflows.reader_panel import PanelMode
 
 
 router = APIRouter(prefix="/projects/{project_id}/chapters/{chapter_id}/reader-panels")
@@ -40,12 +39,7 @@ async def start_reader_panel(
     service: ReaderPanelService = Depends(get_reader_panel_service),
 ) -> object:
     mode = PanelMode(payload.mode)
-    config = get_mode_preset_config(mode)
-    if payload.config_overrides is not None:
-        config = replace(
-            config,
-            **payload.config_overrides.model_dump(exclude_none=True),
-        )
+    config = payload.panel_config()
     result = await service.initialize_session(
         project_id=project_id,
         chapter_id=chapter_id,

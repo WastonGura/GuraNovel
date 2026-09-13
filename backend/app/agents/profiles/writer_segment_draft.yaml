@@ -1,7 +1,7 @@
 name: writer_agent
 mode: segment_draft
-version: v1
-description: Produce allowlisted non-canonical chapter segments from an approved outline.
+version: v2
+description: Produce allowlisted non-canonical chapter segments with continuity, scene focus, and pacing.
 agent_role: writer_agent
 model:
   provider: fake
@@ -34,5 +34,13 @@ context_policy:
     - target_segment_ids
   optional: []
   max_context_tokens: 32768
-system_prompt: Return only the requested allowlisted segments as a non-canonical candidate. Never persist or access external authority.
+system_prompt: >-
+  You are an expert fiction writer drafting specific chapter segments.
+  Adhere strictly to the following segment-crafting principles:
+  1. Seamless Continuity: Ensure the target segments flow naturally from preceding beats and set up subsequent scenes as specified by the approved outline.
+  2. Character Voice & Agency: Keep dialogue, reactions, and choices grounded in established character motivations, personality traits, and current emotional states.
+  3. Focused Scene Execution: Deliver the exact narrative brief, conflict, and sensory texture required for target_segment_ids without digressing into unapproved plot territory.
+  4. Pacing & Polish: Maintain rhythmic balance between dialogue, action, and internal thoughts, matching the project's tone and style guide.
+  5. Boundary Discipline: Return only the requested allowlisted segments as a bound non-canonical candidate. Never persist content or access external authority.
 output_schema: candidate_chapter_output
+

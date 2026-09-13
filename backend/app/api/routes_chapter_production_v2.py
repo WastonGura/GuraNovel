@@ -16,6 +16,7 @@ from app.api.deps import (
 )
 from app.api.schemas_chapter_production import (
     ChapterProductionRunSummaryResponse,
+    ChapterProductionReviewReportResponse,
     ChapterProductionStateResponse,
     ChapterProductionV2FinalizedResponse,
     ChapterProductionV2StartedResponse,
@@ -27,10 +28,15 @@ from app.api.schemas_chapter_production import (
     StartChapterProductionRequest,
     TriggerChapterReviewRequest,
 )
-from app.core.errors import NotFoundError
-from app.models import ActionRequest, Chapter, Project, WorkflowRun, WorkflowType
+from app.core.errors import ConflictError, NotFoundError
+from app.models import ActionRequest, Chapter, Document, DocumentVersion, Project, ReviewReport, WorkflowRun, WorkflowType
 from app.services.chapter_production_v2_contracts import ChapterProductionV2ValidationError
 from app.services.chapter_production_v2_service import ChapterProductionV2Service
+from app.services.chapter_review_validation import validated_persisted_review_report
+from app.services.review_revision_selection import ReviewRevisionSelection
+from app.services.studio_review_revision import request_review_revision
+from app.services.studio_feedback_revision import StudioFeedbackRevisionRequest, request_studio_feedback_revision
+from app.workflows.chapter_production import ChapterReviewStage
 
 router = APIRouter(prefix="/projects/{project_id}/chapters/{chapter_id}/production-v2")
 _ERROR_RESPONSES = {
@@ -59,7 +65,8 @@ async def _resolve_project_and_actor(
     project = await session.get(Project, project_id)
     if project is None:
         raise NotFoundError("Project not found.")
-    actor_id = project.owner_id if project.owner_id is not None else default_actor_id
+    # asyncpg may return its UUID subclass; workflow contracts require stdlib UUIDs.
+    actor_id = UUID(str(project.owner_id if project.owner_id is not None else default_actor_id))
     return project, chapter, actor_id
 
 
@@ -231,6 +238,36 @@ async def get_chapter_production_run(
     )
 
 
+@router.get("/{workflow_run_id}/reports/{report_id}",
+            response_model=ChapterProductionReviewReportResponse, responses=_ERROR_RESPONSES)
+async def get_chapter_production_review_report(
+    project_id: UUID, chapter_id: UUID, workflow_run_id: UUID, report_id: UUID,
+    session: AsyncSession = Depends(get_db_session),
+    service: ChapterProductionV2Service = Depends(get_chapter_production_v2_service),
+    default_actor_id: UUID = Depends(get_default_actor_user_id),
+) -> ChapterProductionReviewReportResponse:
+    await _resolve_project_and_actor(session, project_id, chapter_id, default_actor_id)
+    run = await _require_run(session, project_id, chapter_id, workflow_run_id)
+    row = await session.scalar(select(ReviewReport).where(
+        ReviewReport.id == report_id, ReviewReport.project_id == project_id,
+        ReviewReport.chapter_id == chapter_id, ReviewReport.workflow_run_id == workflow_run_id,
+    ))
+    if row is None:
+        raise NotFoundError("Review report not found.")
+    stage = {"editor_agent": ChapterReviewStage.EDITOR,
+             "chief_editor_agent": ChapterReviewStage.CHIEF_EDITOR,
+             "lore_agent": ChapterReviewStage.LORE}.get(row.reviewer_agent_role)
+    document = await session.get(Document, row.target_document_id) if row.target_document_id else None
+    version = await session.get(DocumentVersion, row.target_version_id) if row.target_version_id else None
+    if stage is None or document is None or version is None:
+        raise ChapterProductionV2ValidationError()
+    report = await validated_persisted_review_report(
+        service, row=row, run=run, document=document, version=version, stage=stage,
+    )
+    # The validated public contract deliberately excludes raw claims and operation metadata.
+    return ChapterProductionReviewReportResponse(id=UUID(str(row.id)), **report.model_dump())
+
+
 @router.post(
     "/{workflow_run_id}/resume",
     response_model=ChapterProductionV2StartedResponse,
@@ -260,6 +297,40 @@ async def resume_chapter_production(
         draft_document_id=started.draft_document_id,
         draft_version_id=started.draft_version_id,
     )
+
+
+@router.post("/{workflow_run_id}/review-revisions", response_model=ChapterProductionV2UpdatedResponse,
+             responses=_ERROR_RESPONSES)
+async def request_selected_review_revision(
+    project_id: UUID, chapter_id: UUID, workflow_run_id: UUID,
+    payload: ReviewRevisionSelection,
+    session: AsyncSession = Depends(get_db_session),
+    service: ChapterProductionV2Service = Depends(get_chapter_production_v2_service),
+    default_actor_id: UUID = Depends(get_default_actor_user_id),
+) -> ChapterProductionV2UpdatedResponse:
+    _, _, actor_id = await _resolve_project_and_actor(session, project_id, chapter_id, default_actor_id)
+    await _require_run(session, project_id, chapter_id, workflow_run_id)
+    result = await request_review_revision(service, project_id, chapter_id, workflow_run_id,
+                                          actor_id, payload)
+    return ChapterProductionV2UpdatedResponse(workflow_run_id=result.workflow_run_id,
+        draft_document_id=result.draft_document_id, draft_version_id=result.draft_version_id,
+        action_request_id=result.action_request_id)
+
+
+@router.post("/{workflow_run_id}/feedback-revisions", response_model=ChapterProductionV2UpdatedResponse,
+             responses=_ERROR_RESPONSES)
+async def revise_studio_feedback(
+    project_id: UUID, chapter_id: UUID, workflow_run_id: UUID, payload: StudioFeedbackRevisionRequest,
+    session: AsyncSession = Depends(get_db_session),
+    service: ChapterProductionV2Service = Depends(get_chapter_production_v2_service),
+    default_actor_id: UUID = Depends(get_default_actor_user_id),
+) -> ChapterProductionV2UpdatedResponse:
+    _, _, actor_id = await _resolve_project_and_actor(session, project_id, chapter_id, default_actor_id)
+    await _require_run(session, project_id, chapter_id, workflow_run_id)
+    result = await request_studio_feedback_revision(service, project_id, chapter_id, workflow_run_id, actor_id, payload)
+    return ChapterProductionV2UpdatedResponse(workflow_run_id=result.workflow_run_id,
+        draft_document_id=result.draft_document_id, draft_version_id=result.draft_version_id,
+        action_request_id=result.action_request_id)
 
 
 @router.post(
@@ -292,6 +363,8 @@ async def resolve_chapter_production_action(
             action_id,
             actor_user_id=actor_id,
             decision="accept",
+            **({"expected_current_version_id": payload.expected_current_version_id}
+               if payload.expected_current_version_id is not None else {}),
         )
     elif decision == "request_feedback_revision":
         if payload.feedback is None or payload.target_segment_ids is None:
@@ -402,6 +475,12 @@ async def finalize_chapter_production(
         session, project_id, chapter_id, default_actor_id
     )
     await _require_run(session, project_id, chapter_id, workflow_run_id)
+    if payload is not None and payload.expected_current_version_id is not None:
+        await service._chapter(project_id, chapter_id, lock=True)
+        run = await service._run(project_id, chapter_id, workflow_run_id, lock=True)
+        state, _ = await service._locked_state(run)
+        if state.document_version_id != str(payload.expected_current_version_id):
+            raise ConflictError("The version selected for finalization has changed.")
     finalized = await service.finalize_without_reader_panel(
         project_id, chapter_id, workflow_run_id, actor_user_id=actor_id
     )

@@ -664,6 +664,12 @@ class ChapterProductionState:
             action.current_content_hash,
         )
 
+    def request_selected_review_revision(self) -> ChapterProductionState:
+        self._require_status(ChapterProductionStatus.REVISION_READY)
+        if self.awaiting_user:
+            raise ChapterProductionValidationError("A pending action must be resolved first.")
+        return self._without_action(status=ChapterProductionStatus.REVIEW_REVISION)
+
     def submit_review_revision(
         self, *, document_id: str, document_version_id: str, content_hash: str
     ) -> ChapterProductionState:

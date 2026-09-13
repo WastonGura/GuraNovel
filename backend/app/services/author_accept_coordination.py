@@ -10,6 +10,7 @@ path; every write reuses the facade's locked helpers through the service.
 
 from __future__ import annotations
 
+from functools import partial
 from uuid import UUID
 
 from sqlalchemy import func, select
@@ -49,10 +50,16 @@ class AuthorAcceptCoordinator:
         workflow_run_id: UUID,
         action_request_id: UUID,
         actor_user_id: UUID,
+        expected_current_version_id: UUID | None = None,
     ) -> ChapterProductionV2Updated:
         service = self.service
         try:
-            context = await service._author_context(
+            context_loader = service._author_context
+            if expected_current_version_id is not None:
+                from app.services.chapter_production_recovery_evidence import author_context
+
+                context_loader = partial(author_context, service, expected_current_version_id=expected_current_version_id)
+            context = await context_loader(
                 project_id=project_id,
                 chapter_id=chapter_id,
                 workflow_run_id=workflow_run_id,

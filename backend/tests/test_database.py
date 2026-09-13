@@ -99,6 +99,11 @@ def test_mvp_models_are_imported_and_registered() -> None:
         "reader_panel_ballots",
         "reader_panel_messages",
         "reader_panel_invocations",
+        "studio_restore_points",
+        "studio_feedback",
+        "studio_feedback_submissions",
+        "studio_assistant_conversations",
+        "studio_assistant_messages",
     }
     assert Project.__table__.c.metadata.name == "metadata"
     assert "metadata" not in Project.__dict__

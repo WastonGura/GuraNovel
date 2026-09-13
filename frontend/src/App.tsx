@@ -1,15 +1,13 @@
 import { useEffect, useRef, useState, type FormEvent } from 'react'
-import { Link, Route, Routes, useNavigate, useParams } from 'react-router-dom'
+import { Link, Route, Routes, useLocation, useNavigate, useParams } from 'react-router-dom'
 import {
   ApiError,
   createChapter,
-  createProject,
   getChapter,
   getDocument,
   getProject,
   listChapters,
   listDocumentVersions,
-  listProjects,
   readDocumentContent,
   readDocumentVersionContent,
   restoreDocument,
@@ -26,6 +24,8 @@ import {
   type Project,
 } from './api/client'
 import ConceptGate from './ConceptGate'
+import Dashboard from './Dashboard'
+import Studio from './Studio'
 import ProjectCreationForm from './ProjectCreationForm'
 import ProjectMaintenancePage from './ProjectMaintenancePage'
 import { ChapterProductionV2Workbench } from './ChapterProductionV2Workbench'
@@ -35,81 +35,6 @@ const requestError = 'This workspace could not be loaded. Try again.'
 
 function LoadError({ children = requestError }: { children?: string }) {
   return <p className="notice" role="alert">{children}</p>
-}
-
-function ProjectForm() {
-  const navigate = useNavigate()
-  const [slug, setSlug] = useState('')
-  const [title, setTitle] = useState('')
-  const [genre, setGenre] = useState('')
-  const [platform, setPlatform] = useState('')
-  const [pending, setPending] = useState(false)
-  const [error, setError] = useState<string | null>(null)
-
-  async function submit(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault()
-    if (pending) return
-    if (!slug.trim() || !title.trim()) {
-      setError('Slug and title are required.')
-      return
-    }
-    setPending(true)
-    setError(null)
-    try {
-      const project = await createProject({
-        slug: slug.trim(), title: title.trim(), genre: genre.trim() || null, target_platform: platform.trim() || null,
-      })
-      navigate(`/projects/${project.id}`)
-    } catch {
-      setError('Project could not be created. Try again.')
-    } finally {
-      setPending(false)
-    }
-  }
-
-  return (
-    <form className="workspace-form" onSubmit={submit} aria-label="Create project">
-      <h2>Create project</h2>
-      <div className="form-grid">
-        <label>Slug<input value={slug} onChange={(event) => setSlug(event.target.value)} required /></label>
-        <label>Title<input value={title} onChange={(event) => setTitle(event.target.value)} required /></label>
-        <label>Genre (optional)<input value={genre} onChange={(event) => setGenre(event.target.value)} /></label>
-        <label>Target platform (optional)<input value={platform} onChange={(event) => setPlatform(event.target.value)} /></label>
-      </div>
-      {error && <LoadError>{error}</LoadError>}
-      <button type="submit" disabled={pending}>{pending ? 'Creating project…' : 'Create project'}</button>
-    </form>
-  )
-}
-
-function ProjectListPage() {
-  const [projects, setProjects] = useState<Project[] | null>(null)
-  const [failed, setFailed] = useState(false)
-
-  useEffect(() => {
-    let active = true
-    listProjects().then(
-      (result) => { if (active) setProjects(result) },
-      () => { if (active) setFailed(true) },
-    )
-    return () => { active = false }
-  }, [])
-
-  return (
-    <section className="page" aria-labelledby="route-title">
-      <p className="eyebrow">Drafting desk</p>
-      <h1 id="route-title">Projects</h1>
-      {projects === null && !failed && <p className="muted">Loading projects…</p>}
-      {failed && <LoadError>Projects could not be loaded. Try again.</LoadError>}
-      {projects?.length === 0 && <p className="muted">No projects yet. Create one to begin.</p>}
-      {projects && projects.length > 0 && (
-        <ul className="workspace-list" aria-label="Projects">
-          {projects.map((project) => <li key={project.id}><Link to={`/projects/${project.id}`}>{project.title}</Link></li>)}
-        </ul>
-      )}
-      <ProjectForm />
-    </section>
-  )
 }
 
 function ChapterForm({ projectId }: { projectId: string }) {
@@ -539,12 +464,16 @@ function NotFound() {
 }
 
 export default function App() {
+  const pathname = useLocation().pathname
+  const dashboard = pathname === '/'
+  const studio = pathname === '/preview/studio' || /^\/projects\/[^/]+\/studio(?:\/[^/]+)?$/.test(pathname)
+  if (studio) return <div className="app-shell studio-app-shell"><div className="workspace"><main><Routes><Route path="/preview/studio" element={<Studio />} /><Route path="/projects/:projectId/studio" element={<Studio />} /><Route path="/projects/:projectId/studio/:chapterId" element={<Studio />} /></Routes></main></div></div>
   return (
-    <div className="app-shell">
-      <header className="topbar" aria-label="GuraNovel workbench"><Link className="wordmark" to="/">GuraNovel</Link><span className="workspace-name">Creative workbench</span></header>
-      <div className="workspace">
-        <nav aria-label="Workbench navigation"><Link to="/">Projects</Link><span>Approvals</span><span>Documents</span></nav>
-        <main><Routes><Route path="/" element={<ProjectListPage />} /><Route path="/projects/:projectId" element={<ProjectWorkspace />} /><Route path="/projects/:projectId/chapters/:chapterId" element={<ChapterWorkspace />} /><Route path="/projects/:projectId/chapters/:chapterId/documents/:documentId/versions/:documentVersionId/reader-panel" element={<ReaderPanelPage />} /><Route path="/projects/:projectId/chapters/:chapterId/documents/:documentId/versions/:documentVersionId/reader-panel/:sessionId" element={<ReaderPanelPage />} /><Route path="/projects/:projectId/creation/start" element={<ProjectCreationPage />} /><Route path="/projects/:projectId/creation/:workflowRunId/gate" element={<ConceptGatePage />} /><Route path="/projects/:projectId/maintenance" element={<ProjectMaintenancePage mode="history" />} /><Route path="/projects/:projectId/maintenance/start" element={<ProjectMaintenancePage mode="start" />} /><Route path="/projects/:projectId/maintenance/:workflowRunId/status" element={<ProjectMaintenancePage mode="handoff" />} /><Route path="/projects/:projectId/maintenance/:workflowRunId" element={<ProjectMaintenancePage mode="gate" />} /><Route path="*" element={<NotFound />} /></Routes></main>
+    <div className={`app-shell${dashboard ? ' dashboard-app-shell' : ''}`}>
+      {!dashboard && <header className="topbar" aria-label="GuraNovel workbench"><Link className="wordmark" to="/">GuraNovel</Link><span className="workspace-name">Creative workbench</span></header>}
+      <div className={`workspace${dashboard ? ' dashboard-workspace' : ''}`}>
+        {!dashboard && <nav aria-label="Workbench navigation"><Link to="/">Projects</Link><span>Approvals</span><span>Documents</span></nav>}
+        <main><Routes><Route path="/" element={<Dashboard />} /><Route path="/projects/:projectId" element={<ProjectWorkspace />} /><Route path="/projects/:projectId/chapters/:chapterId" element={<ChapterWorkspace />} /><Route path="/projects/:projectId/chapters/:chapterId/documents/:documentId/versions/:documentVersionId/reader-panel" element={<ReaderPanelPage />} /><Route path="/projects/:projectId/chapters/:chapterId/documents/:documentId/versions/:documentVersionId/reader-panel/:sessionId" element={<ReaderPanelPage />} /><Route path="/projects/:projectId/creation/start" element={<ProjectCreationPage />} /><Route path="/projects/:projectId/creation/:workflowRunId/gate" element={<ConceptGatePage />} /><Route path="/projects/:projectId/maintenance" element={<ProjectMaintenancePage mode="history" />} /><Route path="/projects/:projectId/maintenance/start" element={<ProjectMaintenancePage mode="start" />} /><Route path="/projects/:projectId/maintenance/:workflowRunId/status" element={<ProjectMaintenancePage mode="handoff" />} /><Route path="/projects/:projectId/maintenance/:workflowRunId" element={<ProjectMaintenancePage mode="gate" />} /><Route path="*" element={<NotFound />} /></Routes></main>
       </div>
     </div>
   )

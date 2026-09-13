@@ -103,6 +103,7 @@ export interface ReaderPanelReviewReport {
 }
 
 export interface ReaderPanelInitialReport {
+  reader_profile_id?: string | null
   overall_reaction: string
   continue_reading: ContinueReadingVote
   confidence: Confidence
@@ -112,6 +113,7 @@ export interface ReaderPanelInitialReport {
 }
 
 export interface ReaderPanelMessage {
+  reader_profile_id?: string | null
   issue_id: string
   round_number: number
   turn_number: number
@@ -147,6 +149,7 @@ export interface ReaderPanelConfigOverrides {
 }
 
 export interface ReaderPanelStartPayload {
+  reader_profile_ids?: string[]
   document_id: string
   document_version_id: string
   mode?: PanelMode
@@ -202,6 +205,8 @@ export interface ReaderPanelNoOpDetail {
 }
 
 export interface ReaderPanelSessionDetail {
+  reader_profile_ids?: string[]
+  simulated?: boolean | null
   is_noop: false
   session_id: string
   workflow_run_id: string
@@ -539,7 +544,7 @@ export function decodeReaderPanelReviewReport(value: unknown): ReaderPanelReview
 
 export function decodeReaderPanelInitialReport(value: unknown): ReaderPanelInitialReport {
   if (!isRecord(value)) throw invalidResponse()
-  const allowedKeys = ['overall_reaction', 'continue_reading', 'confidence', 'strengths', 'reactions', 'concerns'] as const
+  const allowedKeys = ['reader_profile_id', 'overall_reaction', 'continue_reading', 'confidence', 'strengths', 'reactions', 'concerns'] as const
   if (!hasOnlyKeys(value, allowedKeys)) throw invalidResponse()
   const overall_reaction = validateNonEmptyString(value.overall_reaction, 2000)
   if (typeof value.continue_reading !== 'string' || !CONTINUE_READING_VOTES.has(value.continue_reading as ContinueReadingVote)) {
@@ -557,6 +562,7 @@ export function decodeReaderPanelInitialReport(value: unknown): ReaderPanelIniti
 
   return {
     overall_reaction,
+    ...(value.reader_profile_id !== undefined ? { reader_profile_id: validateNullableString(value.reader_profile_id, 64) } : {}),
     continue_reading: value.continue_reading as ContinueReadingVote,
     confidence: value.confidence as Confidence,
     strengths,
@@ -568,6 +574,7 @@ export function decodeReaderPanelInitialReport(value: unknown): ReaderPanelIniti
 export function decodeReaderPanelMessage(value: unknown): ReaderPanelMessage {
   if (!isRecord(value)) throw invalidResponse()
   const allowedKeys = [
+    'reader_profile_id',
     'issue_id',
     'round_number',
     'turn_number',
@@ -615,6 +622,7 @@ export function decodeReaderPanelMessage(value: unknown): ReaderPanelMessage {
 
   return {
     issue_id,
+    ...(value.reader_profile_id !== undefined ? { reader_profile_id: validateNullableString(value.reader_profile_id, 64) } : {}),
     round_number,
     turn_number,
     speaker_type,
@@ -703,6 +711,8 @@ export function decodeReaderPanelIssue(value: unknown): ReaderPanelIssue {
 export function decodeReaderPanelDetail(value: unknown): ReaderPanelDetail {
   if (!isRecord(value)) throw invalidResponse()
   const allowedKeys = [
+    'reader_profile_ids',
+    'simulated',
     'session_id',
     'workflow_run_id',
     'project_id',
@@ -742,6 +752,13 @@ export function decodeReaderPanelDetail(value: unknown): ReaderPanelDetail {
   const document_id = validateUuid(value.document_id)
   const document_version_id = validateUuid(value.document_version_id)
   const source_hash = validateContentHash(value.source_hash)
+  const reader_profile_ids = value.reader_profile_ids === undefined ? undefined : (() => {
+    if (!Array.isArray(value.reader_profile_ids) || value.reader_profile_ids.length > 6) throw invalidResponse()
+    const ids = value.reader_profile_ids.map(item => validateNonEmptyString(item, 64))
+    if (new Set(ids).size !== ids.length) throw invalidResponse()
+    return ids
+  })()
+  const simulated = value.simulated == null ? value.simulated : validateBoolean(value.simulated)
 
   if (typeof value.mode !== 'string' || !PANEL_MODES.has(value.mode as PanelMode)) {
     throw invalidResponse()
@@ -868,6 +885,8 @@ export function decodeReaderPanelDetail(value: unknown): ReaderPanelDetail {
 
   return {
     is_noop: false,
+    ...(reader_profile_ids !== undefined ? { reader_profile_ids } : {}),
+    ...(simulated !== undefined ? { simulated } : {}),
     session_id,
     workflow_run_id,
     project_id,
@@ -1040,6 +1059,14 @@ export function startReaderPanel(
     document_id: docId,
     document_version_id: docVerId,
     mode,
+  }
+  if (payload.reader_profile_ids !== undefined) {
+    const ids = payload.reader_profile_ids
+    if (!Array.isArray(ids) || !ids.length || ids.length > 6 || new Set(ids).size !== ids.length
+      || ids.some(id => !['studio_plot', 'studio_character', 'studio_world', 'studio_emotion', 'studio_language', 'studio_casual'].includes(id))) {
+      throw new ApiError(422, 'invalid_request', 'Invalid invited readers.')
+    }
+    cleanPayload.reader_profile_ids = ids
   }
 
   if (payload.config_overrides !== undefined && payload.config_overrides !== null) {

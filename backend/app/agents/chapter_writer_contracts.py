@@ -6,6 +6,7 @@ must reload the referenced rows to prove existence and currentness before invoca
 
 from __future__ import annotations
 
+from enum import StrEnum
 import json
 from typing import Self
 from uuid import UUID
@@ -20,6 +21,7 @@ from pydantic import (
 )
 
 from app.llm.errors import ProviderInvalidOutputError
+from app.agents.chapter_review_contracts import ChapterReviewFinding
 
 
 _UUID_FIELDS = (
@@ -41,7 +43,7 @@ _UUID_FIELDS = (
 
 MAX_CANDIDATE_CONTENT_BYTES = 524_288
 MAX_CANDIDATE_ENVELOPE_BYTES = 600_000
-MAX_CHAPTER_REQUEST_ENVELOPE_BYTES = 32_768
+MAX_CHAPTER_REQUEST_ENVELOPE_BYTES = 262_144
 
 
 def _canonical_uuid(value: object) -> UUID:
@@ -80,9 +82,11 @@ class _StrictChapterModel(BaseModel):
         "target_segment_ids",
         "feedback_refs",
         "review_report_refs",
+        "selected_findings",
         "segments",
         "self_check",
         "uncertainty_markers",
+        "contexts",
         mode="before",
         check_fields=False,
     )
@@ -94,12 +98,20 @@ class _StrictChapterModel(BaseModel):
 
 
 class ApprovedOutlineReference(_StrictChapterModel):
-    """An approved outline identity; provider-controlled paths are intentionally absent."""
+    """An approved outline identity with bound content; paths are intentionally absent."""
 
     project_id: UUID
     chapter_id: UUID
     document_id: UUID
     version_id: UUID
+    content: str = Field(default="", max_length=32_768, repr=False)
+
+    @field_validator("content")
+    @classmethod
+    def valid_content(cls, value: str) -> str:
+        if not value:
+            return ""
+        return _bounded_text(value, "outline content")
 
 
 class SourceDraftSegment(_StrictChapterModel):
@@ -179,12 +191,46 @@ class ReviewReportReference(_StrictChapterModel):
         return _bounded_text(value, "review summary")
 
 
+class WriterContextKind(StrEnum):
+    STYLE_GUIDE = "style_guide"
+    PREVIOUS_CHAPTER_SUMMARY = "previous_chapter_summary"
+    CHARACTER_STATE = "character_state"
+    LORE_BOUNDARY = "lore_boundary"
+    TIMELINE = "timeline"
+
+
+class WriterContextSnapshot(_StrictChapterModel):
+    project_id: UUID
+    document_id: UUID
+    version_id: UUID
+    kind: WriterContextKind
+    content: str = Field(min_length=1, max_length=32_768, repr=False)
+
+    @field_validator("kind", mode="before")
+    @classmethod
+    def typed_kind(cls, value: object) -> WriterContextKind:
+        if isinstance(value, WriterContextKind):
+            return value
+        if type(value) is str:
+            try:
+                return WriterContextKind(value)
+            except ValueError:
+                pass
+        raise ValueError("invalid writer context kind")
+
+    @field_validator("content")
+    @classmethod
+    def valid_content(cls, value: str) -> str:
+        return _bounded_text(value, "writer context")
+
+
 class _DraftRequest(_StrictChapterModel):
     project_id: UUID
     chapter_id: UUID
     workflow_run_id: UUID
     approved_outline: ApprovedOutlineReference
     allowed_segments: tuple[AllowedChapterSegment, ...] = Field(min_length=1, max_length=64)
+    contexts: tuple[WriterContextSnapshot, ...] = Field(default=(), max_length=16)
 
     @model_validator(mode="after")
     def consistent_bindings(self) -> Self:
@@ -193,6 +239,11 @@ class _DraftRequest(_StrictChapterModel):
             self.chapter_id,
         ):
             raise ValueError("cross-project outline reference")
+        if any(item.project_id != self.project_id for item in self.contexts):
+            raise ValueError("cross-project writer context")
+        context_docs = [item.document_id for item in self.contexts]
+        if len(context_docs) != len(set(context_docs)):
+            raise ValueError("duplicate writer context reference")
         ids = [item.segment_id for item in self.allowed_segments]
         indexes = [item.index for item in self.allowed_segments]
         if len(ids) != len(set(ids)) or len(indexes) != len(set(indexes)):
@@ -292,14 +343,27 @@ class UserFeedbackRevisionRequest(_RevisionRequest):
         return self
 
 
+class SelectedReviewFinding(_StrictChapterModel):
+    report_id: UUID
+    finding: ChapterReviewFinding
+
+
 class ReviewDrivenRevisionRequest(_RevisionRequest):
     review_report_refs: tuple[ReviewReportReference, ...] = Field(min_length=1, max_length=16)
+    selected_findings: tuple[SelectedReviewFinding, ...] = Field(default=(), max_length=384)
 
     @model_validator(mode="after")
     def valid_reports(self) -> Self:
         ids = [item.report_id for item in self.review_report_refs]
         if len(ids) != len(set(ids)):
             raise ValueError("duplicate review report reference")
+        selected = [(item.report_id, item.finding.sequence) for item in self.selected_findings]
+        if len(selected) != len(set(selected)) or any(
+            item.report_id not in ids
+            or not set(item.finding.evidence_segment_ids) <= set(self.target_segment_ids)
+            for item in self.selected_findings
+        ):
+            raise ValueError("invalid selected review finding")
         lineage = (
             self.project_id,
             self.chapter_id,
@@ -497,5 +561,7 @@ __all__ = [
     "SourceDraftSegment",
     "UserFeedbackReference",
     "UserFeedbackRevisionRequest",
+    "WriterContextKind",
+    "WriterContextSnapshot",
     "validate_candidate_chapter_output",
 ]

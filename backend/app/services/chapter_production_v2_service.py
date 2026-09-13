@@ -7,6 +7,8 @@ independent of provider or persistence authority.
 
 from __future__ import annotations
 
+from app.core.errors import ConflictError
+
 import asyncio
 import json
 from collections.abc import Mapping, Sequence
@@ -112,6 +114,7 @@ from app.services.feedback_candidate_saga import (
 from app.services.review_revision_saga import (
     ReviewRevisionSaga,
 )
+from app.services.review_revision_selection import revision_intent, selected_findings
 from app.services.revision_readiness_store import (
     RevisionReadyPair,
     RevisionReadinessStore,
@@ -407,6 +410,7 @@ class ChapterProductionV2Service:
         *,
         actor_user_id: UUID,
         decision: str,
+        expected_current_version_id: UUID | None = None,
     ) -> ChapterProductionV2Updated:
         """Accept the exact current author gate and enter Editor review."""
 
@@ -419,6 +423,8 @@ class ChapterProductionV2Service:
         )
         if decision != ChapterActionDecision.ACCEPT.value:
             raise _invalid() from None
+        if expected_current_version_id is not None:
+            self._validated_ids(expected_current_version_id)
         try:
             return await self._author_accept.accept(
                 project_id=project_id,
@@ -426,10 +432,12 @@ class ChapterProductionV2Service:
                 workflow_run_id=workflow_run_id,
                 action_request_id=action_request_id,
                 actor_user_id=actor_user_id,
+                **({"expected_current_version_id": expected_current_version_id}
+                   if expected_current_version_id is not None else {}),
             )
         except ChapterProductionV2CommitIndeterminateError:
             raise
-        except ChapterProductionV2ValidationError:
+        except (ChapterProductionV2ValidationError, ConflictError):
             await self._rollback()
             raise
         except Exception:
@@ -861,6 +869,9 @@ class ChapterProductionV2Service:
         if type(target_segment_ids) not in (tuple, list):
             raise _invalid()
         selected = tuple(target_segment_ids)
+        intent = revision_intent(context.run)
+        if intent is not None and intent.selection.version_id == context.version.id and selected != intent.target_segment_ids:
+            raise _invalid()
         known_order = {item.segment_id: item.ordinal for item in context.segment_map.segments}
         if (
             not 1 <= len(selected) <= 64
@@ -908,6 +919,8 @@ class ChapterProductionV2Service:
                     for item in context.segment_map.segments
                 ),
                 target_segment_ids=selected,
+                selected_findings=(selected_findings(context.reports, intent.selection)
+                                   if intent is not None and intent.selection.version_id == context.version.id else ()),
                 review_report_refs=tuple(
                     ReviewReportReference(
                         report_id=report.id,
@@ -1593,12 +1606,11 @@ class ChapterProductionV2Service:
         if type(metadata) is dict and "reviewer_claim" not in metadata:
             metadata = {**metadata, "reviewer_claim": None}
             run.metadata_ = metadata
-        if type(metadata) is not dict or set(metadata) not in (legacy, expected):
+        if type(metadata) is not dict or set(metadata) - {"review_revision_intent", "studio_feedback_revision"} not in (legacy, expected):
             raise _invalid()
-
-
-
-
+        revision_intent(run)
+        from app.services.studio_feedback_revision import feedback_revision_intent
+        feedback_revision_intent(run)
         if "chapter_production_runtime" in metadata:
             try:
                 strict_runtime(metadata["chapter_production_runtime"])
