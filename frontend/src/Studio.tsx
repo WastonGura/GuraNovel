@@ -16,7 +16,7 @@ import { useCommentDrag } from './useCommentDrag'
 import { restoreOutlineComments, reanchorComments, reanchorFeedbackComments, type OutlineComment } from './studioPreview'
 import './studio.css'
 import { MotionFrame, TextSweep, StreamText } from './StudioMotion'
-import { getOrCreateAssistantConversation, sendAssistantMessage, type AssistantMessage } from './api/studioAssistantClient'
+import GlobalAssistant from './GlobalAssistant'
 
 const asset = (name: string) => name === 'setting' ? '/ui/icons/setting.svg' : `/ui/studio/${name}.svg${name === 'notification' ? '?solid=1' : ''}`
 const storageKey = 'guranovel:studio-preview:v1'
@@ -52,204 +52,6 @@ function PageName({ page, direction }: { page: Page; direction: number }) {
 
 function Pin({ pinned, onChange, label }: { pinned: boolean; onChange: () => void; label: string }) {
   return <IconButton icon={pinned ? 'pin' : 'unpin'} label={`${pinned ? '取消固定' : '固定'}${label}`} aria-pressed={pinned} onClick={onChange} />
-}
-
-const assistantToolLabels: Record<string, string> = {
-  get_project_summary: '工程状态概览',
-  get_chapter_outline: '章节大纲',
-  get_chapter_draft_summary: '正文草稿摘要',
-  get_chapter_review_reports: '审阅报告与警告',
-  list_chapter_restore_points: '历史还原点',
-  get_software_guidance: '软件使用指南',
-}
-
-function Assistant({
-  hidden,
-  project,
-  chapter,
-  currentView,
-  preview,
-}: {
-  hidden: boolean
-  project?: Project | null
-  chapter?: StudioChapter | null
-  currentView?: string
-  preview?: boolean
-}) {
-  const [open, setOpen] = useState(false)
-  const [draft, setDraft] = useState('')
-  const [previewMessages, setPreviewMessages] = useState<string[]>([])
-  const [realMessages, setRealMessages] = useState<AssistantMessage[]>([])
-  const [conversationId, setConversationId] = useState<string | null>(null)
-  const [loadedKey, setLoadedKey] = useState<string | null>(null)
-  const [sending, setSending] = useState(false)
-  const [pendingDraft, setPendingDraft] = useState<string | null>(null)
-  const [error, setError] = useState('')
-
-  const isReal = !preview && Boolean(project?.id)
-  const currentKey = isReal && open && project?.id ? `${project.id}:${chapter?.id || ''}` : null
-  const loading = isReal && open && currentKey !== null && loadedKey !== currentKey
-  const input = useRef<HTMLTextAreaElement>(null)
-  const launcher = useRef<HTMLButtonElement>(null)
-  const history = useRef<HTMLDivElement>(null)
-  const wasOpen = useRef(false)
-
-  useLayoutEffect(() => {
-    const previous = wasOpen.current
-    wasOpen.current = open
-    if (open) {
-      input.current?.focus({ preventScroll: true })
-      const timer = setTimeout(() => {
-        input.current?.focus({ preventScroll: true })
-      }, 200)
-      return () => clearTimeout(timer)
-    }
-    if (previous) {
-      launcher.current?.focus({ preventScroll: true })
-      const timer = setTimeout(() => {
-        launcher.current?.focus({ preventScroll: true })
-      }, 50)
-      return () => clearTimeout(timer)
-    }
-  }, [open])
-
-  useLayoutEffect(() => {
-    const textarea = input.current
-    if (!textarea) return
-    const resize = () => { textarea.style.height = '0px'; textarea.style.height = `${textarea.scrollHeight}px` }
-    resize()
-    let width = textarea.clientWidth
-    const observer = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(() => {
-      if (width !== textarea.clientWidth) { width = textarea.clientWidth; resize() }
-    })
-    observer?.observe(textarea)
-    return () => observer?.disconnect()
-  }, [draft])
-
-  useLayoutEffect(() => {
-    const list = history.current
-    if (list) list.scrollTop = list.scrollHeight
-  }, [previewMessages, realMessages, pendingDraft, open])
-
-  useEffect(() => {
-    if (!isReal || !open || !project?.id) return
-    let active = true
-    const key = `${project.id}:${chapter?.id || ''}`
-    getOrCreateAssistantConversation(project.id, chapter?.id)
-      .then(conv => {
-        if (!active) return
-        setConversationId(conv.id)
-        setRealMessages(conv.messages || [])
-        setError('')
-        setLoadedKey(key)
-      })
-      .catch(() => {
-        if (!active) return
-        setError('无法连接 Gura 助手服务')
-        setLoadedKey(key)
-      })
-    return () => { active = false }
-  }, [isReal, open, project?.id, chapter?.id])
-
-  async function send() {
-    if (!draft.trim()) return
-    const text = draft.trim()
-    if (!isReal || !project?.id) {
-      setPreviewMessages(items => [...items, text])
-      setDraft('')
-      input.current?.focus({ preventScroll: true })
-      return
-    }
-
-    if (sending) return
-    setSending(true)
-    setPendingDraft(text)
-    setDraft('')
-    setError('')
-    try {
-      let convId = conversationId
-      if (!convId) {
-        const conv = await getOrCreateAssistantConversation(project.id, chapter?.id)
-        convId = conv.id
-        setConversationId(conv.id)
-      }
-      const res = await sendAssistantMessage(project.id, convId, text, chapter?.id, currentView)
-      setRealMessages(res.messages || [])
-    } catch {
-      setError('发送失败，请稍后重试。')
-      setDraft(text)
-    } finally {
-      setPendingDraft(null)
-      setSending(false)
-      input.current?.focus({ preventScroll: true })
-    }
-  }
-
-  return <aside className={`studio-assistant${open ? ' is-open' : ''}${hidden && !open ? ' is-hidden' : ''}`} aria-label="Gura 助手"
-    onKeyDown={event => { if (open && event.key === 'Escape') { event.stopPropagation(); setOpen(false) } }}>
-    <button ref={launcher} type="button" className="studio-assistant-launcher" aria-label="Gura" aria-expanded={open} aria-controls="studio-assistant-dialog" inert={open} onClick={() => setOpen(true)}><img src={asset('shark')} alt="" /></button>
-    <div id="studio-assistant-dialog" className="studio-assistant-dialog" role="dialog" aria-label="与 Gura 对话" aria-hidden={!open} inert={!open} onTransitionEnd={() => { if (open) input.current?.focus({ preventScroll: true }) }}>
-      <header>
-        <IconButton icon="hide" label="收起助手" onClick={() => setOpen(false)} />
-        <span>Gura</span>
-        <small>{!isReal ? '交互预览' : '只读助手'}</small>
-      </header>
-      <div className="studio-assistant-history" ref={history} role="log" aria-label="助手对话记录" tabIndex={0}>
-        {!isReal ? (
-          <>
-            {!previewMessages.length && <div className="studio-assistant-empty"><img src={asset('shark')} alt="" /><p>软件哪里不会用？</p><small>问我操作方法，或说说你想完成的事。</small></div>}
-            {previewMessages.map((message, index) => <div className="studio-assistant-message" key={index}><small>你 · 未发送</small><p>{message}</p></div>)}
-          </>
-        ) : (
-          <>
-            {loading && !realMessages.length && (
-              <div className="studio-assistant-empty"><p className="studio-muted">正在载入助手会话…</p></div>
-            )}
-            {!loading && !realMessages.length && !pendingDraft && (
-              <div className="studio-assistant-empty"><img src={asset('shark')} alt="" /><p>软件哪里不会用？</p><small>问我操作方法、大纲、审阅或还原点状态。</small></div>
-            )}
-            {realMessages.map(msg => (
-              <div className={`studio-assistant-message${msg.role === 'user' ? ' is-user' : ''}`} key={msg.id}>
-                <small>{msg.role === 'user' ? '你' : 'Gura'}</small>
-                <p>{msg.content}</p>
-                {msg.role === 'assistant' && msg.tool_calls && msg.tool_calls.length > 0 && (
-                  <div className="studio-assistant-tools" aria-label="已调用的工具">
-                    {msg.tool_calls.map(tool => (
-                      <span key={tool.id} className="studio-assistant-tool-tag">
-                        已查阅 {assistantToolLabels[tool.name] || tool.name}
-                      </span>
-                    ))}
-                  </div>
-                )}
-              </div>
-            ))}
-            {pendingDraft && (
-              <>
-                <div className="studio-assistant-message is-user">
-                  <small>你</small>
-                  <p>{pendingDraft}</p>
-                </div>
-                <div className="studio-assistant-message">
-                  <small>Gura</small>
-                  <p className="studio-muted">正在查阅工程状态并思考…</p>
-                </div>
-              </>
-            )}
-            {error && <div className="studio-assistant-message"><small>系统提示</small><p className="studio-muted">{error}</p></div>}
-          </>
-        )}
-      </div>
-      <form className="studio-assistant-composer" onSubmit={event => { event.preventDefault(); void send() }}>
-        <textarea ref={input} aria-label="给 Gura 的消息" aria-describedby="studio-assistant-note" placeholder="询问用法，或描述要完成的操作…" rows={1} value={draft} onChange={event => setDraft(event.target.value)} onKeyDown={event => {
-          if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing && event.nativeEvent.keyCode !== 229) { event.preventDefault(); void send() }
-        }} />
-        <div>
-          <small id="studio-assistant-note">{!isReal ? '仅本次预览 · Agent 尚未接入' : '受限只读业务助手 · 无修改定稿权限'}</small>
-          <IconButton icon="send" label={!isReal ? '发送给 Gura（仅预览）' : sending ? '正在思考…' : '发送给 Gura'} type="submit" disabled={!draft.trim() || sending} />
-        </div>
-      </form>
-    </div>
-  </aside>
 }
 
 function OutlineGeneration({ chapter, preview, refresh, onIdea, onGenerate, onChoose, onRefresh }: {
@@ -748,36 +550,6 @@ function StudioWorkspace({ title, initial, initialId, project, preview }: {
     ], { duration: 680 }))
     blockedMotion.current.forEach(animation => { void animation.finished.catch(() => {}) })
   }
-  function changeStage(stage: Stage) {
-    if (archiveSaving.current) return
-    if (archive) setArchive(null)
-    if (!selected || selected.published || stage === selected.stage) return
-    if (!preview && selected.productionStatus && !['AUTHOR_REVISION', 'CANCELLED'].includes(selected.productionStatus)) {
-      if (stage === 'Review') { void leave(() => { sessionStorage.removeItem(readerStageKey(selected.id, selected.versionId!)); update(selected.id, { stage }) }); return }
-      if (stage === 'Draft') { setToast('正文已进入审阅，请通过修改流程继续写作。'); return }
-    }
-    if (!preview && (stage === 'Reader' || stage === 'Final')) {
-      if (selected.productionState?.status !== 'REVISION_READY' || selected.productionState.awaiting_user
-        || selected.revisionRequest || selected.productionError) { rejectStage(stage); return }
-      void leave(() => {
-        if (stage === 'Reader') sessionStorage.setItem(readerStageKey(selected.id, selected.versionId!), 'open')
-        else sessionStorage.removeItem(readerStageKey(selected.id, selected.versionId!))
-        update(selected.id, { stage })
-      }); return
-    }
-    if (!preview && selected.versionId) sessionStorage.removeItem(readerStageKey(selected.id, selected.versionId))
-    if (!preview && stage === 'Draft' && !selected.documentId) { setToast('请先确认大纲并生成正文。'); return }
-    if (stage === 'Review') {
-      if (selected.review === 'idle') startReview(selected.id)
-      else void leave(() => update(selected.id, { stage }))
-      return
-    }
-    if (stage === 'Draft' && !selected.outline.trim()) { setToast('请先确认本章大纲。'); return }
-    if ((stage === 'Reader' || stage === 'Final') && (selected.review !== 'done' || selected.issues.some(issue => issue.level === 'Block'))) {
-      rejectStage(stage); return
-    }
-    void leave(() => update(selected.id, { stage }))
-  }
   async function runFormalReview(id: string, warning?: StudioChapter['productionState'], revisedIds?: string[]) {
     if (productionPending.current || archiveSaving.current || !project || id !== selectedId) return
     const controller = new AbortController()
@@ -817,7 +589,17 @@ function StudioWorkspace({ title, initial, initialId, project, preview }: {
       if (origin !== navigation.current || controller.signal.aborted) return
       const chapter = currentChapters.current.find(item => item.id === id)
       if (!chapter) return
-      const request = chapter.feedbackRequest || await prepareStudioFeedbackRevision(project.id, chapter, controller.signal)
+      let request = chapter.feedbackRequest
+      if (!request) {
+        try {
+          request = await prepareStudioFeedbackRevision(project.id, chapter, controller.signal)
+        } catch (valError: unknown) {
+          if (!controller.signal.aborted) {
+            setToast(valError instanceof Error && valError.message ? valError.message : '反馈前置校验未通过，请检查评论位置。')
+          }
+          return
+        }
+      }
       sessionStorage.setItem(feedbackRevisionKey(project.id, id), JSON.stringify(request))
       update(id, { feedbackRequest: request, productionError: undefined })
       const patch = await reviseStudioFeedback(project.id, chapter, request, controller.signal)
@@ -855,6 +637,48 @@ function StudioWorkspace({ title, initial, initialId, project, preview }: {
       }, delay)))
     })
   }
+  function changeStage(stage: Stage) {
+    if (archiveSaving.current) return
+    if (archive) setArchive(null)
+    if (!selected || selected.published || stage === selected.stage) return
+    if (!preview && selected.productionStatus && !['AUTHOR_REVISION', 'CANCELLED'].includes(selected.productionStatus)) {
+      if (stage === 'Review') { void leave(() => { sessionStorage.removeItem(readerStageKey(selected.id, selected.versionId!)); update(selected.id, { stage }) }); return }
+      if (stage === 'Draft') { setToast('正文已进入审阅，请通过修改流程继续写作。'); return }
+    }
+    if (!preview && (stage === 'Reader' || stage === 'Final')) {
+      if (selected.productionState?.status !== 'REVISION_READY' || selected.productionState.awaiting_user
+        || selected.revisionRequest || selected.productionError) { rejectStage(stage); return }
+      void leave(() => {
+        if (stage === 'Reader') sessionStorage.setItem(readerStageKey(selected.id, selected.versionId!), 'open')
+        else sessionStorage.removeItem(readerStageKey(selected.id, selected.versionId!))
+        update(selected.id, { stage })
+      }); return
+    }
+    if (!preview && selected.versionId) sessionStorage.removeItem(readerStageKey(selected.id, selected.versionId))
+    if (!preview && stage === 'Draft' && !selected.documentId) { setToast('请先确认大纲并生成正文。'); return }
+    if (stage === 'Review') {
+      if (selected.review === 'idle') startReview(selected.id)
+      else void leave(() => update(selected.id, { stage }))
+      return
+    }
+    if (stage === 'Draft' && !selected.outline.trim()) { setToast('请先确认本章大纲。'); return }
+    if ((stage === 'Reader' || stage === 'Final') && (selected.review !== 'done' || selected.issues.some(issue => issue.level === 'Block'))) {
+      rejectStage(stage); return
+    }
+    void leave(() => update(selected.id, { stage }))
+  }
+  useEffect(() => {
+    const rawStage = new URLSearchParams(location.search).get('stage')
+    if (!rawStage) return
+    const matched = stages.find(s => s.toLowerCase() === rawStage.toLowerCase())
+    if (matched && selected && selected.stage !== matched && !selected.published) {
+      const timer = window.setTimeout(() => {
+        changeStage(matched)
+      }, 0)
+      return () => window.clearTimeout(timer)
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [location.search, selected?.id, selected?.stage, selected?.published])
   function addChapter(volume: string) {
     if (creatingChapter.current) return
     void leave(() => {
@@ -1050,7 +874,7 @@ function StudioWorkspace({ title, initial, initialId, project, preview }: {
       <section className={`studio-directory studio-floating${pins.directory ? ' is-pinned' : ''}${hidden && !pins.directory ? ' is-hidden' : ''}`} inert={(hidden || !sidebarOpen) && !pins.directory} aria-label="章节目录"><div className="studio-directory-tools"><Pin label="章节目录" pinned={pins.directory} onChange={() => setPins(value => ({ ...value, directory: !value.directory }))} /></div><div className="studio-directory-title"><h2>{title}</h2><IconButton icon="add" label="新建卷" disabled={!preview} onClick={() => setVolumes(items => [...items, `第${items.length + 1}卷`])} /></div><div className="studio-directory-scroll">{volumes.slice().reverse().map(volume => <details key={volume} open><summary><span>{volume}</span><IconButton icon="add" label={`在${volume}新建章节`} disabled={chapterPending} onClick={event => { event.preventDefault(); addChapter(volume) }} /></summary>{chapters.filter(chapter => chapter.volume === volume).slice().sort((a, b) => b.number - a.number).map(chapter => <ChapterArchiveRow projectId={project?.id} key={chapter.id} chapter={chapter} current={selectedId === chapter.id} activeArchive={archive?.chapterId === chapter.id ? archive.id : undefined} preview={preview} local={archives[chapter.id] || []} revision={archiveRevision} onChapter={() => selectChapter(chapter.id)} onArchive={entry => viewArchive(chapter, entry)} />)}</details>)}</div></section>
     </aside>}
     <footer className={`studio-bottom studio-chrome${hidden ? ' is-hidden' : ''}`}><button onClick={() => void leave(() => navigate('/'))}>返回书架</button><span>{preview ? '交互预览 · Agent 流程为示例' : '真实章节 · 流程已接通'}</span>{!preview && selected && <button onClick={() => void leave(() => navigate(`/projects/${project?.id}/chapters/${selected.id}`))}>现有工作台</button>}</footer>
-    <Assistant hidden={hidden} project={project} chapter={selected} currentView={selected?.stage || page} preview={preview} />
+    <GlobalAssistant hidden={hidden} project={project} chapter={selected} currentView={selected?.stage || page} preview={preview} />
     {(toast || storageError) && <div className="studio-toast" role={storageError ? 'alert' : 'status'}>{storageError || toast}<button aria-label="关闭提示" onClick={() => { setToast(''); setStorageError('') }}>×</button></div>}
     {publishing && <PublishDialog preview={preview} busy={Boolean(productionBusyId)} error={selected?.productionError} onClose={() => setPublishing(false)} onConfirm={() => void publish()} />}
   </div>

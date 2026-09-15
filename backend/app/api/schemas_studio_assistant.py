@@ -22,6 +22,7 @@ class AssistantSendMessageRequest(BaseModel):
     content: str = Field(min_length=1, max_length=16384)
     chapter_id: UUID | None = None
     current_view: str | None = Field(default=None, max_length=64)
+    client_message_id: str | None = Field(default=None, max_length=128)
 
 
 class AssistantMessageResponse(BaseModel):

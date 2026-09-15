@@ -169,6 +169,11 @@ class OpenAICompatibleChapterWriterProvider:
             "Echo the exact lineage IDs given above. Generate segments with matching segment_id, "
             "index, title, and prose content. Include summary, self_check, and uncertainty_markers."
         )
+        if assembled.source_segments and getattr(request, "target_segment_ids", None) is not None:
+            lines.append(
+                "CRITICAL NON-TARGET PRESERVATION: For any segment marked [CONTEXT ONLY] (not in target_segment_ids), "
+                "you MUST preserve its source draft prose content exactly verbatim without modifying any characters."
+            )
 
         return "\n".join(lines)
 

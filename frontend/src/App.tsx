@@ -30,6 +30,7 @@ import ProjectCreationForm from './ProjectCreationForm'
 import ProjectMaintenancePage from './ProjectMaintenancePage'
 import { ChapterProductionV2Workbench } from './ChapterProductionV2Workbench'
 import { ReaderPanelWorkbench } from './ReaderPanelWorkbench'
+import GlobalAssistant from './GlobalAssistant'
 
 const requestError = 'This workspace could not be loaded. Try again.'
 
@@ -475,6 +476,7 @@ export default function App() {
         {!dashboard && <nav aria-label="Workbench navigation"><Link to="/">Projects</Link><span>Approvals</span><span>Documents</span></nav>}
         <main><Routes><Route path="/" element={<Dashboard />} /><Route path="/projects/:projectId" element={<ProjectWorkspace />} /><Route path="/projects/:projectId/chapters/:chapterId" element={<ChapterWorkspace />} /><Route path="/projects/:projectId/chapters/:chapterId/documents/:documentId/versions/:documentVersionId/reader-panel" element={<ReaderPanelPage />} /><Route path="/projects/:projectId/chapters/:chapterId/documents/:documentId/versions/:documentVersionId/reader-panel/:sessionId" element={<ReaderPanelPage />} /><Route path="/projects/:projectId/creation/start" element={<ProjectCreationPage />} /><Route path="/projects/:projectId/creation/:workflowRunId/gate" element={<ConceptGatePage />} /><Route path="/projects/:projectId/maintenance" element={<ProjectMaintenancePage mode="history" />} /><Route path="/projects/:projectId/maintenance/start" element={<ProjectMaintenancePage mode="start" />} /><Route path="/projects/:projectId/maintenance/:workflowRunId/status" element={<ProjectMaintenancePage mode="handoff" />} /><Route path="/projects/:projectId/maintenance/:workflowRunId" element={<ProjectMaintenancePage mode="gate" />} /><Route path="*" element={<NotFound />} /></Routes></main>
       </div>
+      <GlobalAssistant />
     </div>
   )
 }

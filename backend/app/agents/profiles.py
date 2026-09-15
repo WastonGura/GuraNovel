@@ -168,6 +168,16 @@ class _ProfileManifest:
     context_optional: frozenset[str] | None = None
 
 
+_STUDIO_READER_PROFILE_MAP: dict[str, str] = {
+    "studio_plot": "low_patience",
+    "studio_character": "character_emotion",
+    "studio_world": "genre_experienced",
+    "studio_emotion": "general_immersive",
+    "studio_language": "style_sensitive",
+    "studio_casual": "newcomer",
+}
+
+
 class ProfileRegistry:
     """Load only exact bundled agent/mode pairs known to this application version.
 
@@ -706,7 +716,8 @@ class ProfileRegistry:
         self._profiles_directory = profiles_directory or Path(__file__).with_name("profiles")
 
     def load(self, name: str, mode: str | None = None) -> AgentProfile:
-        manifest = self._MANIFESTS.get((name, mode))
+        canonical_name = _STUDIO_READER_PROFILE_MAP.get(name, name)
+        manifest = self._MANIFESTS.get((canonical_name, mode))
         if manifest is None:
             raise ProfileRegistryError()
         profile: AgentProfile | None = None
@@ -715,7 +726,7 @@ class ProfileRegistry:
             profile = AgentProfile.model_validate(raw)
         except (OSError, yaml.YAMLError, TypeError, ValueError, ValidationError):
             pass
-        if profile is None or not self._matches_manifest(profile, name, mode, manifest):
+        if profile is None or not self._matches_manifest(profile, canonical_name, mode, manifest):
             raise ProfileRegistryError() from None
         return profile
 
