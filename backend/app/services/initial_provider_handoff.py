@@ -170,7 +170,7 @@ class _InitialEvidencePhase:
         _, outline, version = await self.repository.approved_outline(
             project_id, chapter_id, lock=True
         )
-        outline_content = await self.documents.read_version_content(outline.id, version.id)
+        outline_content = (await self.documents.read_version_content(outline.id, version.id) or "").strip()
         segment_map = await self.documents.derive_chapter_production_segment_map(
             project_id=project_id, chapter_id=chapter_id,
             document_id=outline.id, version_id=version.id,

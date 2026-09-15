@@ -106,12 +106,17 @@ class ApprovedOutlineReference(_StrictChapterModel):
     version_id: UUID
     content: str = Field(default="", max_length=32_768, repr=False)
 
-    @field_validator("content")
+    @field_validator("content", mode="before")
     @classmethod
-    def valid_content(cls, value: str) -> str:
+    def valid_content(cls, value: object) -> str:
         if not value:
             return ""
-        return _bounded_text(value, "outline content")
+        if isinstance(value, str):
+            stripped = value.strip()
+            if not stripped:
+                return ""
+            return _bounded_text(stripped, "outline content")
+        raise ValueError("invalid outline content")
 
 
 class SourceDraftSegment(_StrictChapterModel):
