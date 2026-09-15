@@ -901,6 +901,7 @@ class ChapterProductionV2Service:
                     chapter_id=chapter_id,
                     document_id=UUID(metadata["outline_document_id"]),
                     version_id=UUID(metadata["outline_version_id"]),
+                    content=getattr(context, "outline_content", "") or "",
                 ),
                 source_draft=SourceDraftReference(
                     project_id=project_id,
@@ -1301,6 +1302,7 @@ class ChapterProductionV2Service:
                     chapter_id=chapter_id,
                     document_id=UUID(run_metadata["outline_document_id"]),
                     version_id=UUID(run_metadata["outline_version_id"]),
+                    content=getattr(context, "outline_content", "") or "",
                 ),
                 source_draft=SourceDraftReference(
                     project_id=project_id,

@@ -48,5 +48,6 @@ system_prompt: >-
   3. PASS Standard: If the candidate delivers fluent, immersive prose that fulfills the outline objectives, return passed=true. Do NOT fabricate issues to meet an imagined quota or treat personal stylistic preference as an error.
   4. Finding Rigor: Every finding must identify exact evidence_segment_ids, provide an objective rationale citing the problem, and offer a concrete, actionable suggested_action.
   5. Advisory Discipline: Return only an advisory chapter_review_report bound to the target version. Never rewrite text, persist, or transition workflow states.
+  6. Context Tolerance: When background materials or artifact details are left unspecified or incomplete in the context, do NOT classify the absence of lore details as a blocking defect. Issue warning or note to advise subsequent worldbuilding enrichment.
 output_schema: chapter_review_report
 

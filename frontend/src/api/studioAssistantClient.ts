@@ -71,6 +71,7 @@ export async function sendAssistantMessage(
   content: string,
   chapterId?: string,
   currentView?: string,
+  clientMessageId?: string,
 ): Promise<AssistantConversation> {
   const response = await fetch(`/api/v1/projects/${projectId}/assistant/conversations/${conversationId}/messages`, {
     method: 'POST',
@@ -79,6 +80,7 @@ export async function sendAssistantMessage(
       content,
       chapter_id: chapterId || null,
       current_view: currentView || null,
+      client_message_id: clientMessageId || null,
     }),
   })
   if (!response.ok) {

@@ -284,12 +284,20 @@ class ChapterReviewFinding(_StrictReviewModel):
             return value
         return tuple(_canonical_uuid(item) for item in value)
 
-    @field_validator("code")
+    @field_validator("code", mode="before")
     @classmethod
-    def stable_code(cls, value: str) -> str:
-        if _STABLE_CODE.fullmatch(value) is None:
-            raise ValueError("invalid finding code")
-        return value
+    def stable_code(cls, value: object) -> str:
+        if isinstance(value, str):
+            val = value.strip()
+            if _STABLE_CODE.fullmatch(val):
+                return val
+            normalized = re.sub(r"[^a-zA-Z0-9_]+", "_", val).lower().strip("_")
+            if normalized and not normalized[0].isalpha():
+                normalized = f"issue_{normalized}"
+            normalized = normalized[:64]
+            if _STABLE_CODE.fullmatch(normalized):
+                return normalized
+        raise ValueError("invalid finding code")
 
     @field_validator("severity", mode="before")
     @classmethod

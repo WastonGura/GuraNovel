@@ -149,6 +149,7 @@ class _Evidence:
     attempt: ProviderAttempt | None
     operation_key: str
     segment_map: object = field(repr=False)
+    outline_content: str = field(default="", repr=False)
 
 
 class _InitialEvidencePhase:
@@ -169,6 +170,7 @@ class _InitialEvidencePhase:
         _, outline, version = await self.repository.approved_outline(
             project_id, chapter_id, lock=True
         )
+        outline_content = (await self.documents.read_version_content(outline.id, version.id) or "").strip()
         segment_map = await self.documents.derive_chapter_production_segment_map(
             project_id=project_id, chapter_id=chapter_id,
             document_id=outline.id, version_id=version.id,
@@ -198,7 +200,7 @@ class _InitialEvidencePhase:
         attempt = self._attempt(run, pristine_run_metadata(binding), key)
         state = self._history(run, checkpoints, binding)
         self._align(attempt, state, checkpoints[-1].checkpoint_index, key)
-        return _Evidence(run, checkpoints, state, attempt, key, segment_map)
+        return _Evidence(run, checkpoints, state, attempt, key, segment_map, outline_content)
 
     @staticmethod
     def _attempt(
@@ -241,11 +243,7 @@ class _InitialEvidencePhase:
             raise _reconcile() from None
         for index, checkpoint in enumerate(checkpoints):
             payload = checkpoint.state_json
-            valid = (
-                _exact_json(payload, pristine)
-                if index % 2 == 0
-                else any(_exact_json(payload, failure) for failure in failures)
-            )
+            valid = _exact_json(payload, pristine) if index % 2 == 0 else any(_exact_json(payload, failure) for failure in failures)
             node = "drafting" if index % 2 == 0 else "failed"
             if not valid or checkpoint.node_name != node:
                 raise _reconcile() from None
@@ -286,10 +284,9 @@ class _InitialEvidencePhase:
             project_id=UUID(str(evidence.run.project_id)),
             chapter_id=UUID(str(evidence.run.chapter_id)), workflow_run_id=run_id,
             approved_outline=ApprovedOutlineReference(
-                project_id=UUID(str(evidence.run.project_id)),
-                chapter_id=UUID(str(evidence.run.chapter_id)),
-                document_id=UUID(str(segment_map.document_id)),
-                version_id=UUID(str(segment_map.version_id)),
+                project_id=UUID(str(evidence.run.project_id)), chapter_id=UUID(str(evidence.run.chapter_id)),
+                document_id=UUID(str(segment_map.document_id)), version_id=UUID(str(segment_map.version_id)),
+                content=evidence.outline_content,
             ),
             allowed_segments=tuple(AllowedChapterSegment(
                 segment_id=UUID(str(item.segment_id)), index=item.ordinal,

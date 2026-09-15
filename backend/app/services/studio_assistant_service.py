@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from uuid import UUID
 
 from sqlalchemy import select
@@ -11,6 +12,8 @@ from app.agents.studio_assistant import StudioAssistantAgent
 from app.api.schemas_studio_assistant import AssistantSendMessageRequest
 from app.core.errors import NotFoundError, ValidationError
 from app.models import Chapter, Project, StudioAssistantConversation, StudioAssistantMessage
+
+_CONVERSATION_LOCKS: dict[UUID, asyncio.Lock] = {}
 
 
 class StudioAssistantService:
@@ -80,8 +83,10 @@ class StudioAssistantService:
         self,
         project_id: UUID,
         conversation_id: UUID,
+        *,
+        lock: bool = False,
     ) -> StudioAssistantConversation:
-        conv = await self.session.scalar(
+        statement = (
             select(StudioAssistantConversation)
             .where(
                 StudioAssistantConversation.id == conversation_id,
@@ -89,6 +94,9 @@ class StudioAssistantService:
             )
             .execution_options(populate_existing=True)
         )
+        if lock:
+            statement = statement.with_for_update()
+        conv = await self.session.scalar(statement)
         if conv is None:
             raise NotFoundError("Assistant conversation not found.")
         return conv
@@ -99,42 +107,64 @@ class StudioAssistantService:
         conversation_id: UUID,
         payload: AssistantSendMessageRequest,
     ) -> StudioAssistantConversation:
-        conv = await self.get_conversation(project_id, conversation_id)
-        target_chapter = payload.chapter_id or conv.chapter_id
-        if target_chapter is not None:
-            chapter = await self.session.scalar(
-                select(Chapter).where(Chapter.id == target_chapter, Chapter.project_id == project_id)
+        conversation_lock = _CONVERSATION_LOCKS.setdefault(conversation_id, asyncio.Lock())
+        async with conversation_lock:
+            conv = await self.get_conversation(project_id, conversation_id, lock=True)
+            target_chapter = payload.chapter_id or conv.chapter_id
+            if target_chapter is not None:
+                chapter = await self.session.scalar(
+                    select(Chapter).where(Chapter.id == target_chapter, Chapter.project_id == project_id)
+                )
+                if chapter is None:
+                    raise ValidationError("Specified chapter does not belong to this project.")
+
+            # 1. Fetch prior messages for conversation context & deduplication check
+            history_msgs = list(
+                await self.session.scalars(
+                    select(StudioAssistantMessage)
+                    .where(StudioAssistantMessage.conversation_id == conv.id)
+                    .order_by(StudioAssistantMessage.created_at.asc())
+                )
             )
-            if chapter is None:
-                raise ValidationError("Specified chapter does not belong to this project.")
+            if payload.client_message_id:
+                for m in history_msgs:
+                    if m.role == "user" and m.tool_calls:
+                        for tc in m.tool_calls:
+                            if isinstance(tc, dict) and tc.get("client_message_id") == payload.client_message_id:
+                                return await self.get_conversation(project_id, conv.id)
 
-        # 1. Save user message
-        user_msg = StudioAssistantMessage(
-            conversation_id=conv.id,
-            role="user",
-            content=payload.content,
-        )
-        self.session.add(user_msg)
-        await self.session.flush()
+            history = [{"role": m.role, "content": m.content} for m in history_msgs]
 
-        # 2. Generate assistant response with bounded tools
-        agent = StudioAssistantAgent(self.session, project_id)
-        reply, tool_calls, tool_results = await agent.generate_reply(
-            user_message=payload.content,
-            chapter_id=target_chapter,
-            current_view=payload.current_view,
-        )
+            # 2. Save user message with optional client_message_id metadata
+            user_tool_calls = [{"client_message_id": payload.client_message_id}] if payload.client_message_id else None
+            user_msg = StudioAssistantMessage(
+                conversation_id=conv.id,
+                role="user",
+                content=payload.content,
+                tool_calls=user_tool_calls,
+            )
+            self.session.add(user_msg)
+            await self.session.flush()
 
-        # 3. Save assistant message
-        assistant_msg = StudioAssistantMessage(
-            conversation_id=conv.id,
-            role="assistant",
-            content=reply,
-            tool_calls=tool_calls if tool_calls else None,
-            tool_results=tool_results if tool_results else None,
-        )
-        self.session.add(assistant_msg)
-        await self.session.commit()
+            # 3. Generate assistant response with bounded tools & history
+            agent = StudioAssistantAgent(self.session, project_id)
+            reply, tool_calls, tool_results = await agent.generate_reply(
+                user_message=payload.content,
+                chapter_id=target_chapter,
+                current_view=payload.current_view,
+                history=history,
+            )
 
-        # 4. Return refreshed conversation
-        return await self.get_conversation(project_id, conv.id)
+            # 4. Save assistant message
+            assistant_msg = StudioAssistantMessage(
+                conversation_id=conv.id,
+                role="assistant",
+                content=reply,
+                tool_calls=tool_calls if tool_calls else None,
+                tool_results=tool_results if tool_results else None,
+            )
+            self.session.add(assistant_msg)
+            await self.session.commit()
+
+            # 5. Return refreshed conversation
+            return await self.get_conversation(project_id, conv.id)

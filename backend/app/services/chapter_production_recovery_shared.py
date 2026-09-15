@@ -41,6 +41,7 @@ class _AuthorContext:
     binding: object
     document: Document
     version: DocumentVersion
+    outline_content: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -52,6 +53,7 @@ class _ReviewRevisionContext:
     version: DocumentVersion
     segment_map: object
     reports: tuple[object, ...]
+    outline_content: str = ""
 
 
 def _review_report_slots(

@@ -49,15 +49,9 @@ from app.workflows.chapter_production import (
 
 
 async def author_context(
-    service: object,
-    *,
-    project_id: UUID,
-    chapter_id: UUID,
-    workflow_run_id: UUID,
-    action_request_id: UUID,
-    actor_user_id: UUID,
-    adopt_stale: bool = True,
-    expected_current_version_id: UUID | None = None,
+    service: object, *, project_id: UUID, chapter_id: UUID,
+    workflow_run_id: UUID, action_request_id: UUID, actor_user_id: UUID,
+    adopt_stale: bool = True, expected_current_version_id: UUID | None = None,
 ) -> _AuthorContext:
     await service._require_project_owner(project_id, actor_user_id)
     chapter = await service._chapter(project_id, chapter_id, lock=True)
@@ -102,16 +96,9 @@ async def author_context(
         if not adopt_stale:
             raise _invalid() from None
         return await _adopt_stale_author_context(
-            service,
-            run=run,
-            state=state,
-            checkpoint=checkpoint,
-            chapter=chapter,
-            action=action,
-            actor_user_id=actor_user_id,
-            document_id=document_id,
-            version_id=version_id,
-            metadata=metadata,
+            service, run=run, state=state, checkpoint=checkpoint, chapter=chapter,
+            action=action, actor_user_id=actor_user_id, document_id=document_id,
+            version_id=version_id, metadata=metadata,
             expected_current_version_id=expected_current_version_id,
         )
     if (
@@ -127,7 +114,12 @@ async def author_context(
         document_id=document.id, version_id=version.id,
     )
     binding = _build_author_binding(action, run, chapter, document, version)
-    return _AuthorContext(run, state, checkpoint, action, binding, document, version)
+    run_meta = service._run_metadata(run)
+    outline_content = await service.documents.read_version_content(
+        UUID(run_meta["outline_document_id"]),
+        UUID(run_meta["outline_version_id"]),
+    )
+    return _AuthorContext(run, state, checkpoint, action, binding, document, version, outline_content)
 
 
 async def validate_scheduling_action(
@@ -527,8 +519,13 @@ async def review_revision_context(
     await _validate_review_revision_reports(
         service, reports, report_slots, run, document, version
     )
+    run_meta = service._run_metadata(run)
+    outline_content = await service.documents.read_version_content(
+        UUID(run_meta["outline_document_id"]),
+        UUID(run_meta["outline_version_id"]),
+    )
     return _ReviewRevisionContext(
-        run, state, checkpoint, document, version, segment_map, tuple(reports)
+        run, state, checkpoint, document, version, segment_map, tuple(reports), outline_content
     )
 
 

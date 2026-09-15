@@ -1,10 +1,12 @@
 .studio-app-shell, .studio-app-shell .workspace { display: block; height: 100dvh; min-height: 0; overflow: hidden; }
 .studio-app-shell .workspace > main { display: block; height: 100%; padding: 0; }
-.studio {
+:root {
   --assistant-width: min(320px, calc((100dvh - 220px) * .75), calc(100vw - 36px));
   --assistant-right: clamp(18px, 3.65vw, 70px);
   --assistant-duration: 360ms;
   --assistant-easing: cubic-bezier(.16, 1, .3, 1);
+}
+.studio {
   --studio-accent: #39b2fd;
   --studio-shadow: 0 3px 12px rgb(0 0 0 / 13%), 0 1px 3px rgb(0 0 0 / 12%);
   background: #fff; color: #171717; font-family: 'Noto Sans SC', 'Microsoft YaHei', sans-serif;
@@ -309,12 +311,12 @@
 .studio-file img { height: 24px; width: 24px; }
 .studio-bottom { align-items: center; bottom: 24px; color: #929292; display: flex; font-size: 11px; gap: 14px; left: 38px; position: absolute; }
 .studio-bottom button { font-size: 12px; }
-.studio:has(.studio-assistant.is-open) { --assistant-duration: 480ms; }
-.studio-assistant { background: white; border: 1px solid #eee; border-radius: 20px; bottom: 35px; box-shadow: 0 8px 18px #00000012, 0 2px 5px #0000000a; height: 40px; overflow: hidden; position: fixed; right: var(--assistant-right); transition: width var(--assistant-duration) var(--assistant-easing), height var(--assistant-duration) var(--assistant-easing), border-radius var(--assistant-duration) var(--assistant-easing), box-shadow var(--assistant-duration) var(--assistant-easing); width: 40px; z-index: 12; }
+:root:has(.studio-assistant.is-open), body:has(.studio-assistant.is-open), .studio:has(.studio-assistant.is-open) { --assistant-duration: 480ms; }
+.studio-assistant { background: white; border: 1px solid #eee; border-radius: 20px; bottom: 35px; box-shadow: 0 8px 18px #00000012, 0 2px 5px #0000000a; color: #171717; font-family: 'Noto Sans SC', 'Microsoft YaHei', sans-serif; height: 40px; overflow: hidden; position: fixed; right: var(--assistant-right); transition: width var(--assistant-duration) var(--assistant-easing), height var(--assistant-duration) var(--assistant-easing), border-radius var(--assistant-duration) var(--assistant-easing), box-shadow var(--assistant-duration) var(--assistant-easing); width: 40px; z-index: 12; }
 .studio-assistant.is-open { border-radius: 24px; box-shadow: 0 16px 30px -10px #00000026, 0 4px 10px #0000000a; height: calc(var(--assistant-width) * 4 / 3); width: var(--assistant-width); }
-.studio .studio-assistant-launcher { align-items: center; border: 0; border-radius: 50%; bottom: 0; display: flex; height: 38px; justify-content: center; padding: 8px; position: absolute; right: 0; transition: opacity 160ms ease-out; width: 38px; }
-.studio .studio-assistant-launcher:hover { background: transparent; }
-.studio-assistant-launcher img { height: 22px; width: 22px; }
+.studio-assistant-launcher { align-items: center; background: transparent; border: 0; border-radius: 50%; bottom: 0; color: inherit; cursor: pointer; display: flex; height: 38px; justify-content: center; padding: 8px; position: absolute; right: 0; transition: opacity 160ms ease-out, background 160ms; width: 38px; }
+.studio-assistant-launcher:hover { background: #f2f2f2; }
+.studio-assistant-launcher svg, .studio-assistant-launcher img { display: block; height: 22px; width: 22px; }
 .studio-assistant.is-open .studio-assistant-launcher { opacity: 0; pointer-events: none; }
 .studio-assistant-dialog { bottom: 0; display: flex; flex-direction: column; height: calc(var(--assistant-width) * 4 / 3 - 2px); opacity: 0; position: absolute; right: 0; transition: opacity 160ms ease-out, visibility 160ms; visibility: hidden; width: calc(var(--assistant-width) - 2px); }
 .studio-assistant.is-open .studio-assistant-dialog { opacity: 1; transition-delay: 80ms; visibility: visible; }
@@ -333,8 +335,17 @@
 .studio-assistant-message p { font-size: 14px; margin: 5px 0 0; overflow-wrap: anywhere; white-space: pre-wrap; }
 .studio-assistant-tools { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 6px; }
 .studio-assistant-tool-tag { background: #e8f0fe; border-radius: 4px; color: #1a73e8; display: inline-block; font-size: 10px; padding: 2px 6px; }
+.studio-assistant-action { margin-top: 8px; }
+.studio-assistant-action-btn { background: #e8f0fe; border: 1px solid #c2e7ff; border-radius: 8px; color: #1a73e8; cursor: pointer; display: inline-block; font-size: 12px; font-weight: 500; padding: 6px 12px; text-decoration: none; transition: background 150ms ease; }
+.studio-assistant-action-btn:hover { background: #d3e3fd; }
+.studio-assistant button { background: transparent; border: 1px solid transparent; border-radius: 8px; color: inherit; cursor: pointer; font-size: 14px; font-weight: 400; min-height: 32px; padding: 6px 12px; position: relative; transition: color 160ms, background 160ms, box-shadow 180ms, transform 180ms, opacity 220ms; }
+.studio-assistant button:hover:not(:disabled) { background: linear-gradient(100deg, #ededed, #fff); color: #1687cb; }
+.studio-assistant button:disabled { background: transparent; color: #777; cursor: not-allowed; opacity: .4; }
+.studio-assistant button:focus-visible { outline: 2px solid #8a8a8a; outline-offset: 3px; }
+.studio-assistant .studio-icon { align-items: center; border: 0; display: inline-flex; flex: 0 0 32px; height: 32px; justify-content: center; min-height: 32px; padding: 5px; width: 32px; }
 .studio-assistant-composer { border-top: 1px solid #eee; flex: 0 0 auto; margin: 0 18px; padding: 14px 0 18px; }
-.studio .studio-assistant-composer textarea { display: block; font-size: 14px; line-height: 1.7; max-height: min(112px, calc(var(--assistant-width) * .35)); min-height: 24px; overflow-y: auto; scrollbar-width: thin; width: 100%; }
+.studio-assistant-composer textarea { background: transparent; border: 0; border-radius: 0; color: inherit; display: block; font-family: inherit; font-size: 14px; line-height: 1.7; max-height: min(112px, calc(var(--assistant-width) * .35)); min-height: 24px; overflow-y: auto; padding: 0; resize: none; scrollbar-width: thin; width: 100%; }
+.studio-assistant-composer textarea:focus-visible { outline: none; }
 .studio-assistant-composer:focus-within { border-top-color: #ccc; }
 .studio-assistant-composer > div { align-items: end; display: flex; gap: 8px; justify-content: space-between; padding-top: 10px; }
 .studio-assistant-composer small { font-size: 10px; line-height: 1.5; padding-bottom: 5px; }

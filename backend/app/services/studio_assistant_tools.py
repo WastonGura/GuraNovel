@@ -8,14 +8,14 @@ Security & authority guarantees:
 
 from __future__ import annotations
 
-from typing import Any
-from uuid import UUID
+from typing import Any, Sequence
+from uuid import UUID, uuid4
 
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.errors import NotFoundError, ValidationError
-from app.models import Chapter, Project, ReviewReport, StudioRestorePoint
+from app.models import Chapter, Document, Project, ReviewReport, StudioRestorePoint
 from app.services.document_service import DocumentService
 
 
@@ -161,6 +161,73 @@ AVAILABLE_ASSISTANT_TOOLS: list[dict[str, Any]] = [
             "required": ["topic"],
         },
     },
+    {
+        "name": "create_chapter",
+        "description": "在当前作品工程中创建新的一章（安全有界写操作）。",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "title": {
+                    "type": "string",
+                    "description": "章节标题，若不提供则自动分配第 N 章",
+                }
+            },
+        },
+    },
+    {
+        "name": "navigate_view",
+        "description": "在工作台界面之间跳转导航（安全有界动作）。",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "view": {
+                    "type": "string",
+                    "enum": ["outline", "draft", "review", "reader", "final", "dashboard", "chapters"],
+                    "description": "目标页面或阶段",
+                },
+                "chapter_id": {
+                    "type": "string",
+                    "description": "目标章节 UUID（可选）",
+                },
+            },
+            "required": ["view"],
+        },
+    },
+    {
+        "name": "trigger_chapter_review",
+        "description": "协助发起当前章节的审阅流程（安全有界动作）。",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "chapter_id": {
+                    "type": "string",
+                    "description": "章节 UUID，若不提供则使用会话关联章节",
+                }
+            },
+        },
+    },
+    {
+        "name": "trigger_feedback_revision",
+        "description": "协助根据审阅或读者反馈指引发起正文修订（安全有界动作）。",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "chapter_id": {
+                    "type": "string",
+                    "description": "章节 UUID，若不提供则使用会话关联章节",
+                },
+                "feedback": {
+                    "type": "string",
+                    "description": "用户的具体修改要求或反馈说明",
+                },
+                "target_segment_ids": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "需要修订的目标段落 UUID 列表，若不指定则自动提取审阅批注中的定位段落",
+                },
+            },
+        },
+    },
 ]
 
 
@@ -252,17 +319,48 @@ async def tool_get_chapter_review_reports(
     session: AsyncSession, project_id: UUID, chapter_id: UUID | None
 ) -> dict[str, Any]:
     chapter = await _resolve_chapter(session, project_id, chapter_id)
-    reports = list(
-        await session.scalars(
+
+    # 1. Resolve chapter's current draft document version
+    current_draft_version_id = None
+    current_draft_version_number = None
+    if chapter.current_draft_document_id:
+        doc = await session.get(Document, chapter.current_draft_document_id)
+        if doc and doc.current_version_id:
+            current_draft_version_id = doc.current_version_id
+            from app.models.core import DocumentVersion
+            ver = await session.get(DocumentVersion, current_draft_version_id)
+            if ver is not None:
+                current_draft_version_number = ver.version_number
+
+    target_version_id = current_draft_version_id
+    target_version_number = current_draft_version_number
+    reports: list[ReviewReport] = []
+
+    if target_version_id is not None:
+        query = (
             select(ReviewReport)
             .where(
                 ReviewReport.chapter_id == chapter.id,
                 ReviewReport.project_id == project_id,
+                ReviewReport.target_version_id == target_version_id,
             )
-            .order_by(ReviewReport.created_at.desc())
-            .limit(10)
+            .order_by(ReviewReport.created_at.asc())
         )
-    )
+        reports = list(await session.scalars(query))
+
+        if target_version_number is None:
+            from app.models.core import DocumentVersion
+            ver = await session.get(DocumentVersion, target_version_id)
+            if ver is not None:
+                target_version_number = ver.version_number
+
+    total_count = await session.scalar(
+        select(func.count(ReviewReport.id)).where(
+            ReviewReport.chapter_id == chapter.id,
+            ReviewReport.project_id == project_id,
+        )
+    ) or 0
+    historical_count = max(0, total_count - len(reports))
 
     summaries = []
     has_blocking = False
@@ -282,6 +380,8 @@ async def tool_get_chapter_review_reports(
                 "reviewer_agent_role": r.reviewer_agent_role,
                 "passed": r.passed,
                 "summary": r.summary,
+                "target_version_id": str(r.target_version_id) if r.target_version_id else None,
+                "target_version_number": target_version_number,
                 "blocking_issues_count": blocking_cnt,
                 "warnings_count": warning_cnt,
                 "notes_count": len(r.notes) if isinstance(r.notes, list) else 0,
@@ -298,7 +398,10 @@ async def tool_get_chapter_review_reports(
         "chapter_id": str(chapter.id),
         "chapter_number": chapter.chapter_number,
         "status": chapter.status,
+        "target_version_id": str(target_version_id) if target_version_id else None,
+        "target_version_number": target_version_number,
         "reports_count": len(summaries),
+        "historical_reports_count": historical_count,
         "has_blocking": has_blocking,
         "has_warnings": has_warnings,
         "reports": summaries,
@@ -341,6 +444,326 @@ def tool_get_software_guidance(topic: str) -> dict[str, Any]:
     }
 
 
+async def tool_create_chapter(
+    session: AsyncSession, project_id: UUID, title: str | None = None
+) -> dict[str, Any]:
+    from app.services.chapter_service import ChapterService
+
+    clean_title = title.strip() if title and isinstance(title, str) and title.strip() else None
+
+    chapter = await ChapterService(session).create_chapter(
+        project_id=project_id,
+        title=clean_title,
+    )
+    target_url = f"/projects/{project_id}/studio/{chapter.id}?view=Create&stage=Outline"
+    return {
+        "action": "create_chapter",
+        "chapter_id": str(chapter.id),
+        "chapter_number": chapter.chapter_number,
+        "title": chapter.title or f"第 {chapter.chapter_number} 章",
+        "target_url": target_url,
+        "status": "created",
+        "message": f"已成功为你创建第 {chapter.chapter_number} 章「{chapter.title or ''}」！你可以前往该章节开始大纲构思或正文创作。",
+    }
+
+
+def tool_navigate_view(
+    project_id: UUID, view: str, chapter_id: UUID | None = None
+) -> dict[str, Any]:
+    clean_view = view.strip().lower() if view else "dashboard"
+    valid_views: dict[str, tuple[str, str]] = {
+        "outline": (
+            "大纲构思",
+            f"/projects/{project_id}/studio/{chapter_id}?view=Create&stage=Outline"
+            if chapter_id
+            else f"/projects/{project_id}",
+        ),
+        "draft": (
+            "正文创作",
+            f"/projects/{project_id}/studio/{chapter_id}?view=Create&stage=Draft"
+            if chapter_id
+            else f"/projects/{project_id}",
+        ),
+        "review": (
+            "编辑审阅",
+            f"/projects/{project_id}/studio/{chapter_id}?view=Create&stage=Review"
+            if chapter_id
+            else f"/projects/{project_id}",
+        ),
+        "reader": (
+            "读者会",
+            f"/projects/{project_id}/studio/{chapter_id}?view=Create&stage=Reader"
+            if chapter_id
+            else f"/projects/{project_id}",
+        ),
+        "final": (
+            "本地定稿",
+            f"/projects/{project_id}/studio/{chapter_id}?view=Create&stage=Final"
+            if chapter_id
+            else f"/projects/{project_id}",
+        ),
+        "dashboard": ("作品看板", f"/projects/{project_id}"),
+        "chapters": ("章节列表", f"/projects/{project_id}"),
+    }
+    label, url = valid_views.get(clean_view, ("工作台", f"/projects/{project_id}"))
+    return {
+        "action": "navigate_view",
+        "view": clean_view,
+        "label": label,
+        "target_url": url,
+        "chapter_id": str(chapter_id) if chapter_id else None,
+        "message": f"正在为你跳转至「{label}」界面。",
+    }
+
+
+async def tool_trigger_chapter_review(
+    session: AsyncSession, project_id: UUID, chapter_id: UUID | None
+) -> dict[str, Any]:
+    chapter = await _resolve_chapter(session, project_id, chapter_id)
+    char_count = 0
+    if chapter.current_draft_document_id:
+        try:
+            content_info = await DocumentService(session).read_current_content(
+                chapter.current_draft_document_id
+            )
+            char_count = len(content_info.content.strip())
+        except Exception:
+            pass
+
+    if char_count == 0:
+        return {
+            "action": "trigger_review",
+            "status": "blocked",
+            "chapter_id": str(chapter.id),
+            "character_count": 0,
+            "message": "当前章节尚未输入正文草稿，无法发起审阅。请先在草稿（Draft）视图中编写正文内容后再提交审阅。",
+        }
+
+    from app.models.core import WorkflowRun
+    from app.models.enums import WorkflowType
+    from app.workflows.chapter_production import ChapterProductionStatus
+
+    project = await session.get(Project, project_id)
+    actor_id = (project.owner_id if project else None) or uuid4()
+
+    latest_run = await session.scalar(
+        select(WorkflowRun)
+        .where(
+            WorkflowRun.project_id == project_id,
+            WorkflowRun.chapter_id == chapter.id,
+            WorkflowRun.workflow_type == WorkflowType.CHAPTER_PRODUCTION.value,
+        )
+        .order_by(WorkflowRun.started_at.desc(), WorkflowRun.id.desc())
+        .limit(1)
+    )
+
+    target_url = f"/projects/{project_id}/studio/{chapter.id}?view=Create&stage=Review"
+    triggered_action = "ready"
+    run_id_str = None
+
+    if latest_run is not None and actor_id is not None:
+        run_id_str = str(latest_run.id)
+        try:
+            from app.api.deps import get_chapter_production_v2_composition
+
+            composition = get_chapter_production_v2_composition()
+            prod_service = composition.create_service(session)
+            state, _ = await prod_service._locked_state(latest_run)
+            if state.status == ChapterProductionStatus.AUTHOR_REVISION and state.awaiting_user and state.action_request_id:
+                await prod_service.resolve_author_action(
+                    project_id=project_id,
+                    chapter_id=chapter.id,
+                    workflow_run_id=latest_run.id,
+                    action_request_id=UUID(str(state.action_request_id)),
+                    actor_user_id=actor_id,
+                    decision="accept",
+                )
+                try:
+                    await prod_service.execute_current_review(
+                        project_id=project_id,
+                        chapter_id=chapter.id,
+                        workflow_run_id=latest_run.id,
+                        actor_user_id=actor_id,
+                    )
+                    triggered_action = "review_executed"
+                except Exception:
+                    triggered_action = "accepted_review_failed"
+            elif state.status in (
+                ChapterProductionStatus.EDITOR_REVIEW,
+                ChapterProductionStatus.CHIEF_FINAL_REVIEW,
+                ChapterProductionStatus.LORE_FINAL_REVIEW,
+            ) and not state.awaiting_user:
+                try:
+                    await prod_service.execute_current_review(
+                        project_id=project_id,
+                        chapter_id=chapter.id,
+                        workflow_run_id=latest_run.id,
+                        actor_user_id=actor_id,
+                    )
+                    triggered_action = "review_executed"
+                except Exception:
+                    triggered_action = "review_failed"
+            else:
+                triggered_action = "ready"
+        except Exception:
+            triggered_action = "review_failed"
+
+    if triggered_action == "review_executed":
+        status = "triggered"
+        msg = f"🦈 已成功为你启动第 {chapter.chapter_number} 章（约 {char_count} 字）的审阅流程！三级编辑正在进行审阅。\n\n👉 [前往审阅面板查看实时进度]({target_url})"
+    elif triggered_action == "accepted_review_failed":
+        status = "failed"
+        msg = f"已完成作者动作确认，但在启动自动审阅执行时失败。你可以点击下方链接前往审阅面板手动重试审阅。\n\n👉 [前往审阅面板]({target_url})"
+    elif triggered_action == "review_failed":
+        status = "failed"
+        msg = f"启动第 {chapter.chapter_number} 章的审阅执行失败。你可以点击下方链接前往审阅面板查看详情并重试。\n\n👉 [前往审阅面板]({target_url})"
+    else:
+        status = "ready"
+        msg = f"第 {chapter.chapter_number} 章正文（约 {char_count} 字）已就绪。你可以点击下方链接前往审阅面板提交审阅。\n\n👉 [前往审阅面板]({target_url})"
+
+    return {
+        "action": "trigger_review",
+        "status": status,
+        "chapter_id": str(chapter.id),
+        "workflow_run_id": run_id_str,
+        "character_count": char_count,
+        "target_url": target_url,
+        "message": msg,
+    }
+
+
+async def tool_trigger_feedback_revision(
+    session: AsyncSession,
+    project_id: UUID,
+    chapter_id: UUID | None,
+    feedback: str | None = None,
+    target_segment_ids: Sequence[str | UUID] | None = None,
+) -> dict[str, Any]:
+    chapter = await _resolve_chapter(session, project_id, chapter_id)
+    reports_info = await tool_get_chapter_review_reports(session, project_id, chapter.id)
+    has_blocking = reports_info.get("has_blocking", False)
+    has_warnings = reports_info.get("has_warnings", False)
+    target_url = f"/projects/{project_id}/studio/{chapter.id}?view=Create&stage=Draft"
+
+    from app.models.core import WorkflowRun
+    from app.models.enums import WorkflowType
+    from app.workflows.chapter_production import ChapterProductionStatus
+
+    project = await session.get(Project, project_id)
+    actor_id = (project.owner_id if project else None) or uuid4()
+
+    latest_run = await session.scalar(
+        select(WorkflowRun)
+        .where(
+            WorkflowRun.project_id == project_id,
+            WorkflowRun.chapter_id == chapter.id,
+            WorkflowRun.workflow_type == WorkflowType.CHAPTER_PRODUCTION.value,
+        )
+        .order_by(WorkflowRun.started_at.desc(), WorkflowRun.id.desc())
+        .limit(1)
+    )
+
+    executed_revision = False
+    if latest_run is not None and actor_id is not None:
+        try:
+            from app.api.deps import get_chapter_production_v2_composition
+
+            composition = get_chapter_production_v2_composition()
+            prod_service = composition.create_service(session)
+            state, _ = await prod_service._locked_state(latest_run)
+            if state.status == ChapterProductionStatus.AUTHOR_REVISION and state.awaiting_user and state.action_request_id:
+                if chapter.current_draft_document_id and state.document_version_id:
+                    targets: tuple[UUID, ...] = ()
+                    if target_segment_ids:
+                        valid_targets = []
+                        for s in target_segment_ids:
+                            try:
+                                valid_targets.append(UUID(str(s)))
+                            except (ValueError, TypeError):
+                                pass
+                        targets = tuple(valid_targets)
+                    else:
+                        extracted_sids: list[UUID] = []
+                        for r in reports_info.get("reports", []):
+                            for issue in (r.get("blocking_issues") or []) + (r.get("warnings") or []):
+                                for sid in issue.get("evidence_segment_ids") or []:
+                                    try:
+                                        u = UUID(str(sid))
+                                        if u not in extracted_sids:
+                                            extracted_sids.append(u)
+                                    except (ValueError, TypeError):
+                                        pass
+                        if extracted_sids:
+                            targets = tuple(extracted_sids)
+                        else:
+                            segments = await prod_service.documents.derive_chapter_segment_map(
+                                project_id=project_id,
+                                chapter_id=chapter.id,
+                                document_id=chapter.current_draft_document_id,
+                                version_id=UUID(state.document_version_id),
+                            )
+                            targets = tuple(s.segment_id for s in segments.segments)
+
+                    if feedback and feedback.strip():
+                        revision_feedback = feedback.strip()
+                    else:
+                        rationales: list[str] = []
+                        for r in reports_info.get("reports", []):
+                            for issue in (r.get("blocking_issues") or []) + (r.get("warnings") or []):
+                                rat = issue.get("rationale") or issue.get("suggested_action")
+                                if rat and rat not in rationales:
+                                    rationales.append(str(rat).strip())
+                        if rationales:
+                            revision_feedback = "根据审阅批注进行修订：" + "；".join(rationales[:5])
+                        else:
+                            revision_feedback = "根据审阅批注与读者反馈进行修订，纠正不符合设定或剧情走向之处。"
+
+                    if targets:
+                        await prod_service.request_user_feedback_revision(
+                            project_id=project_id,
+                            chapter_id=chapter.id,
+                            workflow_run_id=latest_run.id,
+                            action_request_id=UUID(str(state.action_request_id)),
+                            actor_user_id=actor_id,
+                            feedback=revision_feedback,
+                            target_segment_ids=targets,
+                        )
+                        executed_revision = True
+        except Exception:
+            pass
+
+    if executed_revision:
+        return {
+            "action": "trigger_feedback_revision",
+            "status": "executed",
+            "chapter_id": str(chapter.id),
+            "target_url": target_url,
+            "message": f"🦈 已成功为你启动第 {chapter.chapter_number} 章的反馈修订流程！Writer 正在结合反馈意见生成新稿。\n\n👉 [前往草稿界面查看]({target_url})",
+        }
+
+    if has_blocking or has_warnings:
+        kind = "阻塞项" if has_blocking else "警告项"
+        return {
+            "action": "trigger_feedback_revision",
+            "status": "guided",
+            "chapter_id": str(chapter.id),
+            "target_url": target_url,
+            "message": (
+                f"🦈 本章审阅发现了{kind}！\n\n"
+                "你可以前往草稿界面，在右侧审阅批注栏中勾选需要修改的问题，点击「修改选中的问题」发起修订；"
+                "或者直接在正文编辑器中自行调整。\n\n"
+                f"👉 [前往草稿界面修订]({target_url})"
+            ),
+        }
+    return {
+        "action": "trigger_feedback_revision",
+        "status": "no_issues",
+        "chapter_id": str(chapter.id),
+        "target_url": target_url,
+        "message": f"当前章节未发现未解决的阻塞审阅问题。你可以继续写作或前往读者会环节。\n\n👉 [前往草稿界面]({target_url})",
+    }
+
+
 async def execute_assistant_tool(
     session: AsyncSession,
     project_id: UUID,
@@ -348,7 +771,7 @@ async def execute_assistant_tool(
     arguments: dict[str, Any],
     default_chapter_id: UUID | None = None,
 ) -> dict[str, Any]:
-    """Execute a strictly read-only business tool and return the result dictionary."""
+    """Execute a business tool and return the result dictionary."""
     target_chapter_id = default_chapter_id
     if "chapter_id" in arguments and arguments["chapter_id"]:
         try:
@@ -369,5 +792,23 @@ async def execute_assistant_tool(
     elif tool_name == "get_software_guidance":
         topic = str(arguments.get("topic", "general"))
         return tool_get_software_guidance(topic)
+    elif tool_name == "create_chapter":
+        title = arguments.get("title")
+        return await tool_create_chapter(session, project_id, title)
+    elif tool_name == "navigate_view":
+        view = str(arguments.get("view", "dashboard"))
+        return tool_navigate_view(project_id, view, target_chapter_id)
+    elif tool_name == "trigger_chapter_review":
+        return await tool_trigger_chapter_review(session, project_id, target_chapter_id)
+    elif tool_name == "trigger_feedback_revision":
+        feedback = arguments.get("feedback")
+        target_segment_ids = arguments.get("target_segment_ids")
+        return await tool_trigger_feedback_revision(
+            session,
+            project_id,
+            target_chapter_id,
+            feedback=feedback,
+            target_segment_ids=target_segment_ids,
+        )
     else:
         raise ValidationError(f"Unknown assistant tool: {tool_name}")
