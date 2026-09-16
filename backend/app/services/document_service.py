@@ -748,10 +748,6 @@ class DocumentService:
     def _ensure_actor_permission(document: Document, actor_user_id: UUID | None) -> None:
         if actor_user_id is None:
             return
-        project = getattr(document, "project", None)
-        if project is not None and getattr(project, "owner_id", None) is not None:
-            if project.owner_id != actor_user_id:
-                raise ForbiddenError("You do not have permission to modify this document.")
         setting_collection = getattr(document, "setting_collection", None)
         if setting_collection is not None and getattr(setting_collection, "owner_id", None) is not None:
             if setting_collection.owner_id != actor_user_id:

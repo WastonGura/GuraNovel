@@ -75,7 +75,10 @@ async def async_session(integration_database_url: str) -> AsyncIterator[AsyncSes
     try:
         async with session_factory() as session:
             yield session
-            await session.rollback()
+            try:
+                await session.rollback()
+            except Exception:
+                pass
     finally:
         try:
             await clean_test_data(engine)
@@ -84,8 +87,9 @@ async def async_session(integration_database_url: str) -> AsyncIterator[AsyncSes
 
 
 @pytest.fixture(autouse=True)
-def mock_markdown_store_on_non_posix(monkeypatch: pytest.MonkeyPatch) -> None:
+def mock_markdown_store_on_non_posix(request: pytest.FixtureRequest) -> None:
     if os.name != "posix":
+        monkeypatch = request.getfixturevalue("monkeypatch")
         from app.workspace.markdown_store import MarkdownStore
 
         def _init(self: MarkdownStore, root: Path) -> None:
