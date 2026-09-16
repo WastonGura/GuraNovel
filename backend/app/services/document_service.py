@@ -579,7 +579,10 @@ class DocumentService:
 
     @staticmethod
     def _ensure_document_is_mutable(document: Document) -> None:
-        if bool(document.metadata_.get("legacy_setting_context")):
+        metadata = getattr(document, "metadata_", None)
+        if metadata is None:
+            metadata = getattr(document, "metadata", None)
+        if isinstance(metadata, dict) and bool(metadata.get("legacy_setting_context")):
             raise ConflictError("Legacy project setting documents are read-only and cannot be modified.")
 
     @staticmethod
