@@ -164,15 +164,16 @@ async def test_precommit_failure_compensates_workspace_when_rollback_also_fails(
     async def fail_rollback() -> None:
         raise RuntimeError("database rollback failed")
 
-    monkeypatch.setattr(async_session, "flush", fail_flush)
-    monkeypatch.setattr(async_session, "rollback", fail_rollback)
+    with monkeypatch.context() as m:
+        m.setattr(async_session, "flush", fail_flush)
+        m.setattr(async_session, "rollback", fail_rollback)
 
-    with pytest.raises(RuntimeError, match="database write failed") as error_info:
-        await service.create_project(slug="rollback-failure", title="Rollback failure")
+        with pytest.raises(RuntimeError, match="database write failed") as error_info:
+            await service.create_project(slug="rollback-failure", title="Rollback failure")
 
-    assert error_info.value.__cause__ is not None
-    assert str(error_info.value.__cause__) == "database rollback failed"
-    assert not workspace.root_for("rollback-failure").exists()
+        assert error_info.value.__cause__ is not None
+        assert str(error_info.value.__cause__) == "database rollback failed"
+        assert not workspace.root_for("rollback-failure").exists()
 
 
 @pytest.mark.integration

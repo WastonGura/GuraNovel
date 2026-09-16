@@ -12,7 +12,7 @@ from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from app.core.errors import AppError, ConflictError, NotFoundError
+from app.core.errors import AppError, ConflictError, ForbiddenError, NotFoundError
 from app.core.logging import log_event
 from app.documents.chapter_segments import (
     CURRENT_CHAPTER_SEGMENTER_VERSION,
@@ -22,11 +22,32 @@ from app.documents.chapter_segments import (
     normalize_chapter_content,
     validate_segment_map_evidence_integrity,
 )
-from app.models import Chapter, Document, DocumentSource, DocumentType, DocumentVersion, Project
+from app.models import (
+    Chapter,
+    Document,
+    DocumentSource,
+    DocumentType,
+    DocumentVersion,
+    Project,
+    SettingCollection,
+)
 from app.workspace.hashing import sha256_content
 from app.workspace.markdown_store import MarkdownStore
 from app.workspace.paths import version_snapshot_path, workspace_path_parts
 from app.workspace.word_count import count_words
+
+SETTING_COLLECTION_DOCUMENT_TYPES: frozenset[DocumentType] = frozenset(
+    {
+        DocumentType.WORLD_OVERVIEW,
+        DocumentType.POWER_SYSTEM,
+        DocumentType.FACTIONS,
+        DocumentType.GEOGRAPHY,
+        DocumentType.HISTORY,
+        DocumentType.CHARACTER_PROFILE,
+        DocumentType.GLOSSARY,
+    }
+)
+
 
 
 class DocumentVersionConflictError(ConflictError):
@@ -100,38 +121,100 @@ class DocumentService:
     async def create_document(
         self,
         *,
-        project_id: UUID,
         document_type: DocumentType,
         title: str | None,
         path: str,
         content: str,
         source: DocumentSource,
+        project_id: UUID | None = None,
+        setting_collection_id: UUID | None = None,
         chapter_id: UUID | None = None,
         actor_user_id: UUID | None = None,
         agent_role: str | None = None,
         workflow_run_id: UUID | None = None,
         change_summary: str | None = None,
+        metadata: dict[str, object] | None = None,
         version_metadata: dict[str, object] | None = None,
     ) -> Document:
         version_metadata = self._validated_version_metadata(version_metadata)
         self._ensure_document_path_is_not_reserved(path)
-        project = await self.session.get(Project, project_id)
-        if project is None:
-            raise NotFoundError("Project not found.")
-        await self._lock_create_path(project_id, path)
-        existing = await self.session.scalar(
-            select(Document.id).where(Document.project_id == project_id, Document.path == path)
-        )
-        if existing is not None:
-            raise ConflictError("A document already exists at this path.")
 
-        document = Document(
-            project_id=project_id,
-            chapter_id=chapter_id,
-            type=document_type.value,
-            title=title,
-            path=path,
-        )
+        if (project_id is None and setting_collection_id is None) or (
+            project_id is not None and setting_collection_id is not None
+        ):
+            raise ConflictError("Document must belong to either a project or a setting collection.")
+
+        if project_id is not None:
+            project = await self.session.get(Project, project_id)
+            if project is None:
+                raise NotFoundError("Project not found.")
+            project_owner = getattr(project, "owner_id", None)
+            if (
+                actor_user_id is not None
+                and project_owner is not None
+                and actor_user_id != project_owner
+            ):
+                raise ForbiddenError("You do not have permission to modify this project.")
+            await self._lock_create_path(project_id, path)
+            existing = await self.session.scalar(
+                select(Document.id).where(Document.project_id == project_id, Document.path == path)
+            )
+            if existing is not None:
+                raise ConflictError("A document already exists at this path.")
+
+            document = Document(
+                project_id=project_id,
+                setting_collection_id=None,
+                chapter_id=chapter_id,
+                type=document_type.value,
+                title=title,
+                path=path,
+                metadata_=metadata or {},
+            )
+            workspace_root = project.workspace_root
+        else:
+            assert setting_collection_id is not None
+            if chapter_id is not None:
+                raise ConflictError("Setting collection documents cannot have a chapter_id.")
+            if document_type not in SETTING_COLLECTION_DOCUMENT_TYPES:
+                raise ConflictError(
+                    f"Document type '{document_type.value}' is not permitted for setting collections."
+                )
+            collection = await self.session.get(SettingCollection, setting_collection_id)
+            if collection is None:
+                raise NotFoundError("Setting collection not found.")
+            collection_owner = getattr(collection, "owner_id", None)
+            if (
+                actor_user_id is not None
+                and collection_owner is not None
+                and actor_user_id != collection_owner
+            ):
+                raise ForbiddenError("You do not have permission to modify this setting collection.")
+            if getattr(collection, "status", None) == "archived":
+                raise ConflictError("Archived setting collection cannot be modified.")
+
+            await self._lock_create_path(setting_collection_id, path)
+            existing = await self.session.scalar(
+                select(Document.id).where(
+                    Document.setting_collection_id == setting_collection_id,
+                    Document.path == path,
+                )
+            )
+            if existing is not None:
+                raise ConflictError("A document already exists at this path.")
+
+            collection.revision += 1
+            document = Document(
+                project_id=None,
+                setting_collection_id=setting_collection_id,
+                chapter_id=None,
+                type=document_type.value,
+                title=title,
+                path=path,
+                metadata_=metadata or {},
+            )
+            workspace_root = collection.workspace_root
+
         self.session.add(document)
         try:
             await self.session.flush()
@@ -154,7 +237,7 @@ class DocumentService:
         document.current_version = version
         self.session.add(version)
         await self._commit_with_file_writes(
-            MarkdownStore(Path(project.workspace_root)),
+            self._store_for_root(workspace_root),
             ((document.path, content), (version.snapshot_path, content)),
         )
         log_event("document_written", document_id=document.id, version_id=version.id)
@@ -167,29 +250,90 @@ class DocumentService:
         kwargs["version_metadata"] = self._validated_version_metadata(
             kwargs.get("version_metadata")
         )
-        project_id = kwargs["project_id"]
+        project_id = kwargs.get("project_id")
+        setting_collection_id = kwargs.get("setting_collection_id")
         path = kwargs["path"]
         content = kwargs["content"]
         self._ensure_document_path_is_not_reserved(path)
-        project = await self.session.get(Project, project_id)
-        if project is None:
-            raise NotFoundError("Project not found.")
-        await self._lock_create_path(project_id, path)
-        if (
-            await self.session.scalar(
-                select(Document.id).where(Document.project_id == project_id, Document.path == path)
-            )
-            is not None
+
+        if (project_id is None and setting_collection_id is None) or (
+            project_id is not None and setting_collection_id is not None
         ):
-            raise ConflictError("A document already exists at this path.")
-        document = Document(
-            project_id=project_id,
-            chapter_id=kwargs.get("chapter_id"),
-            type=kwargs["document_type"].value,
-            title=kwargs.get("title"),
-            path=path,
-        )
-        document.project = project
+            raise ConflictError("Document must belong to either a project or a setting collection.")
+
+        if project_id is not None:
+            project = await self.session.get(Project, project_id)
+            if project is None:
+                raise NotFoundError("Project not found.")
+            project_owner = getattr(project, "owner_id", None)
+            if (
+                kwargs.get("actor_user_id") is not None
+                and project_owner is not None
+                and kwargs["actor_user_id"] != project_owner
+            ):
+                raise ForbiddenError("You do not have permission to modify this project.")
+            await self._lock_create_path(project_id, path)
+            if (
+                await self.session.scalar(
+                    select(Document.id).where(Document.project_id == project_id, Document.path == path)
+                )
+                is not None
+            ):
+                raise ConflictError("A document already exists at this path.")
+            document = Document(
+                project_id=project_id,
+                setting_collection_id=None,
+                chapter_id=kwargs.get("chapter_id"),
+                type=kwargs["document_type"].value,
+                title=kwargs.get("title"),
+                path=path,
+                metadata_=kwargs.get("metadata") or {},
+            )
+            document.project = project
+        else:
+            assert setting_collection_id is not None
+            if kwargs.get("chapter_id") is not None:
+                raise ConflictError("Setting collection documents cannot have a chapter_id.")
+            if kwargs["document_type"] not in SETTING_COLLECTION_DOCUMENT_TYPES:
+                raise ConflictError(
+                    f"Document type '{kwargs['document_type'].value}' is not permitted for setting collections."
+                )
+            collection = await self.session.get(SettingCollection, setting_collection_id)
+            if collection is None:
+                raise NotFoundError("Setting collection not found.")
+            collection_owner = getattr(collection, "owner_id", None)
+            if (
+                kwargs.get("actor_user_id") is not None
+                and collection_owner is not None
+                and kwargs["actor_user_id"] != collection_owner
+            ):
+                raise ForbiddenError("You do not have permission to modify this setting collection.")
+            if getattr(collection, "status", None) == "archived":
+                raise ConflictError("Archived setting collection cannot be modified.")
+
+            await self._lock_create_path(setting_collection_id, path)
+            if (
+                await self.session.scalar(
+                    select(Document.id).where(
+                        Document.setting_collection_id == setting_collection_id,
+                        Document.path == path,
+                    )
+                )
+                is not None
+            ):
+                raise ConflictError("A document already exists at this path.")
+            collection.revision += 1
+            document = Document(
+                project_id=None,
+                setting_collection_id=setting_collection_id,
+                chapter_id=None,
+                type=kwargs["document_type"].value,
+                title=kwargs.get("title"),
+                path=path,
+                metadata_=kwargs.get("metadata") or {},
+            )
+            document.setting_collection = collection
+
         self.session.add(document)
         await self.session.flush()
         version = self._new_version(
@@ -218,7 +362,11 @@ class DocumentService:
         )
         document = await self._locked_document(kwargs["document_id"])
         self._ensure_document_is_mutable(document)
+        self._ensure_actor_permission(document, kwargs.get("actor_user_id"))
         self._ensure_expected_current_version(document, kwargs["expected_current_version_id"])
+        setting_collection = getattr(document, "setting_collection", None)
+        if setting_collection is not None:
+            setting_collection.revision += 1
         content = kwargs["content"]
         version = self._new_version(
             document=document,
@@ -266,7 +414,11 @@ class DocumentService:
         version_metadata = self._validated_version_metadata(version_metadata)
         document = await self._locked_document(document_id)
         self._ensure_document_is_mutable(document)
+        self._ensure_actor_permission(document, actor_user_id)
         self._ensure_expected_current_version(document, expected_current_version_id)
+        setting_collection = getattr(document, "setting_collection", None)
+        if setting_collection is not None:
+            setting_collection.revision += 1
         version = self._new_version(
             document=document,
             version_number=await self._next_version_number(document.id),
@@ -303,7 +455,11 @@ class DocumentService:
         version_metadata = self._validated_version_metadata(version_metadata)
         document = await self._locked_document(document_id)
         self._ensure_document_is_mutable(document)
+        self._ensure_actor_permission(document, actor_user_id)
         self._ensure_expected_current_version(document, expected_current_version_id)
+        setting_collection = getattr(document, "setting_collection", None)
+        if setting_collection is not None:
+            setting_collection.revision += 1
         target = await self.session.scalar(
             select(DocumentVersion).where(
                 DocumentVersion.id == version_id, DocumentVersion.document_id == document.id
@@ -584,6 +740,18 @@ class DocumentService:
             metadata = getattr(document, "metadata", None)
         if isinstance(metadata, dict) and bool(metadata.get("legacy_setting_context")):
             raise ConflictError("Legacy project setting documents are read-only and cannot be modified.")
+        setting_collection = getattr(document, "setting_collection", None)
+        if setting_collection is not None and getattr(setting_collection, "status", None) == "archived":
+            raise ConflictError("Archived setting collections are read-only and cannot be modified.")
+
+    @staticmethod
+    def _ensure_actor_permission(document: Document, actor_user_id: UUID | None) -> None:
+        if actor_user_id is None:
+            return
+        setting_collection = getattr(document, "setting_collection", None)
+        if setting_collection is not None and getattr(setting_collection, "owner_id", None) is not None:
+            if setting_collection.owner_id != actor_user_id:
+                raise ForbiddenError("You do not have permission to modify this document.")
 
     @staticmethod
     def _ensure_document_path_is_not_reserved(path: str) -> None:
@@ -651,12 +819,14 @@ class DocumentService:
             raise DocumentVersionMetadataError() from None
         return dict(metadata)
 
-    @staticmethod
-    def _store_for(document: Document) -> MarkdownStore:
-        if document.project is not None:
-            return MarkdownStore(Path(document.project.workspace_root))
-        if document.setting_collection is not None:
-            return MarkdownStore(Path(document.setting_collection.workspace_root))
+    def _store_for_root(self, root: str) -> MarkdownStore:
+        return MarkdownStore(Path(root))
+
+    def _store_for(self, document: Document) -> MarkdownStore:
+        if getattr(document, "project", None) is not None:
+            return self._store_for_root(document.project.workspace_root)
+        if getattr(document, "setting_collection", None) is not None:
+            return self._store_for_root(document.setting_collection.workspace_root)
         raise ValueError("Document has neither project nor setting_collection")
 
     @staticmethod

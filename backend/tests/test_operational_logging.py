@@ -407,6 +407,9 @@ async def test_document_creation_logs_only_after_durable_success(
     async def committed(*_: object) -> None:
         return None
 
+    monkeypatch.setattr(
+        service, "_store_for_root", lambda _: SimpleNamespace(exists=lambda _: False)
+    )
     monkeypatch.setattr(service, "_commit_with_file_writes", committed)
     document = await service.create_document(
         project_id=project_id,

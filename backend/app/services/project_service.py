@@ -12,6 +12,9 @@ from app.models import Project, SettingCollection
 from app.workspace import ProjectWorkspace
 
 
+_UNSET: object = object()
+
+
 class ProjectCommitIndeterminateError(AppError):
     """Raised when project commit acknowledgement is lost after workspace allocation."""
 
@@ -121,6 +124,40 @@ class ProjectService:
 
     async def list_projects(self) -> list[Project]:
         return list(await self.session.scalars(select(Project).order_by(Project.created_at, Project.id)))
+
+    async def update_project(
+        self,
+        project_id: UUID,
+        *,
+        title: str | None = None,
+        genre: str | None = None,
+        target_platform: str | None = None,
+        setting_collection_id: UUID | None | object = _UNSET,
+        metadata: dict | None = None,
+    ) -> Project:
+        project = await self.session.get(Project, project_id)
+        if project is None:
+            raise NotFoundError("Project not found.")
+        if setting_collection_id is not _UNSET:
+            if setting_collection_id is None:
+                raise ConflictError("Project must be bound to a setting collection.")
+            setting_collection = await self.session.get(SettingCollection, setting_collection_id)
+            if setting_collection is None:
+                raise NotFoundError("Setting collection not found.")
+            project.setting_collection_id = setting_collection_id
+        if title is not None:
+            project.title = title
+        if genre is not None:
+            project.genre = genre
+        if target_platform is not None:
+            project.target_platform = target_platform
+        if metadata is not None:
+            current_metadata = dict(project.metadata_ or {})
+            current_metadata.update(metadata)
+            project.metadata_ = current_metadata
+        await self.session.commit()
+        await self.session.refresh(project)
+        return project
 
     async def _lock_slug(self, slug: str) -> None:
         await self.session.execute(

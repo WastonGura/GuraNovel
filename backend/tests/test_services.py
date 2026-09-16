@@ -19,6 +19,7 @@ EXPECTED_EXPORTS = {
     "ProjectCommitIndeterminateError": "app.services.project_service",
     "ProjectService": "app.services.project_service",
     "ProjectWorkspaceCleanupError": "app.services.project_service",
+    "SettingCollectionService": "app.services.setting_collection_service",
     "ProjectCreationPendingActionRead": "app.services.project_creation_service",
     "ProjectCreationRunRead": "app.services.project_creation_service",
     "ProjectCreationService": "app.services.project_creation_service",

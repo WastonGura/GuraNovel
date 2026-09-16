@@ -3,7 +3,7 @@
 from datetime import datetime
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 from app.models import DocumentSource, DocumentType
 
@@ -28,16 +28,18 @@ class DocumentVersionResponse(BaseModel):
 
 
 class DocumentResponse(BaseModel):
-    model_config = ConfigDict(from_attributes=True)
+    model_config = ConfigDict(from_attributes=True, populate_by_name=True)
 
     id: UUID
-    project_id: UUID
-    chapter_id: UUID | None
+    project_id: UUID | None = None
+    setting_collection_id: UUID | None = None
+    chapter_id: UUID | None = None
     type: DocumentType
     title: str | None
     path: str
     current_version_id: UUID | None
     current_version: DocumentVersionResponse | None
+    metadata_: dict = Field(default_factory=dict, serialization_alias="metadata")
     created_at: datetime
     updated_at: datetime
 
@@ -49,7 +51,8 @@ class DocumentContentResponse(BaseModel):
 
 
 class CreateDocumentRequest(BaseModel):
-    project_id: UUID
+    project_id: UUID | None = None
+    setting_collection_id: UUID | None = None
     type: DocumentType
     title: str | None = None
     path: str
