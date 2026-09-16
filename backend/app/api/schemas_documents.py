@@ -82,3 +82,8 @@ class RestoreDocumentRequest(BaseModel):
     agent_role: str | None = None
     workflow_run_id: UUID | None = None
     change_summary: str | None = None
+
+
+class UpdateDocumentRequest(BaseModel):
+    title: str | None = None
+    metadata_: dict | None = Field(default=None, validation_alias="metadata")

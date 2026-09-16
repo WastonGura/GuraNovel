@@ -1,5 +1,6 @@
 """Thin HTTP routes for versioned document operations."""
 
+from pathlib import Path
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, Header, Query, status
@@ -14,11 +15,13 @@ from app.api.schemas_documents import (
     DocumentResponse,
     DocumentVersionResponse,
     RestoreDocumentRequest,
+    UpdateDocumentRequest,
     WriteDocumentRequest,
 )
-from app.core.errors import ConflictError, NotFoundError
-from app.models import Document, DocumentVersion
+from app.core.errors import ConflictError, ForbiddenError, NotFoundError
+from app.models import Document, DocumentVersion, Project, SettingCollection
 from app.services import DocumentService
+from app.workspace.markdown_store import MarkdownStore
 
 router = APIRouter(prefix="/documents")
 
@@ -151,3 +154,84 @@ async def restore_document(
         document_id=document_id, version_id=target_version_id, **data
     )
     return await _version_metadata(session, version.id)
+
+
+@router.patch("/{document_id}", response_model=DocumentResponse)
+async def update_document(
+    document_id: UUID,
+    payload: UpdateDocumentRequest,
+    actor_id: UUID | None = Depends(get_actor_user_id),
+    session: AsyncSession = Depends(get_db_session),
+) -> Document:
+    document = await _document_metadata(session, document_id)
+    if document.setting_collection_id is not None:
+        collection = await session.get(SettingCollection, document.setting_collection_id)
+        if collection is not None:
+            if collection.status == "archived":
+                raise ConflictError("Archived setting collection cannot be modified.")
+            if actor_id is not None and collection.owner_id is not None and actor_id != collection.owner_id:
+                raise ForbiddenError("You do not have permission to modify this setting collection.")
+            collection.revision += 1
+    elif document.project_id is not None:
+        project = await session.get(Project, document.project_id)
+        if project is not None:
+            if actor_id is not None and project.owner_id is not None and actor_id != project.owner_id:
+                raise ForbiddenError("You do not have permission to modify this project.")
+    if payload.title is not None:
+        document.title = payload.title
+    if payload.metadata_ is not None:
+        merged = dict(document.metadata_ or {})
+        merged.update(payload.metadata_)
+        document.metadata_ = merged
+    await session.commit()
+    await session.refresh(document)
+    return await _document_metadata(session, document.id)
+
+
+@router.delete("/{document_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_document(
+    document_id: UUID,
+    actor_id: UUID | None = Depends(get_actor_user_id),
+    session: AsyncSession = Depends(get_db_session),
+) -> None:
+    document = await session.scalar(
+        select(Document)
+        .options(
+            selectinload(Document.project),
+            selectinload(Document.setting_collection),
+        )
+        .where(Document.id == document_id)
+    )
+    if document is None:
+        raise NotFoundError("Document not found.")
+    workspace_root: str | None = None
+    if document.setting_collection_id is not None:
+        collection = document.setting_collection or await session.get(SettingCollection, document.setting_collection_id)
+        if collection is not None:
+            if collection.status == "archived":
+                raise ConflictError("Archived setting collection cannot be modified.")
+            if actor_id is not None and collection.owner_id is not None and actor_id != collection.owner_id:
+                raise ForbiddenError("You do not have permission to modify this setting collection.")
+            collection.revision += 1
+            workspace_root = collection.workspace_root
+    elif document.project_id is not None:
+        project = document.project or await session.get(Project, document.project_id)
+        if project is not None:
+            if actor_id is not None and project.owner_id is not None and actor_id != project.owner_id:
+                raise ForbiddenError("You do not have permission to modify this project.")
+            workspace_root = project.workspace_root
+
+    doc_path = document.path
+    document.current_version_id = None
+    await session.flush()
+    await session.delete(document)
+    await session.commit()
+
+    if workspace_root:
+        try:
+            store = MarkdownStore(Path(workspace_root))
+            if store.exists(doc_path):
+                store.delete(doc_path)
+        except Exception:
+            pass
+

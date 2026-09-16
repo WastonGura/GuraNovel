@@ -16,6 +16,14 @@ import {
   submitStudioFeedback,
   readFeedbackSubmission,
   readRestorePointFeedback,
+  getSettingCollection,
+  listSettingCollections,
+  archiveSettingCollection,
+  listCollectionProjects,
+  listCollectionDocuments,
+  createCollectionDocument,
+  patchDocument,
+  deleteDocument,
 } from './client'
 
 const project = {
@@ -368,5 +376,139 @@ describe('typed API client', () => {
         body: JSON.stringify(payload),
       },
     )
+  })
+
+  it('fetches setting collection by id', async () => {
+    const col = {
+      id: 'col-1',
+      owner_id: 'user-1',
+      slug: 'test-col',
+      title: 'Test Collection',
+      description: 'A collection description',
+      status: 'active',
+      workspace_root: '/tmp/col-1',
+      revision: 1,
+      metadata: {},
+      created_at: '2026-07-19T00:00:00Z',
+      updated_at: '2026-07-19T00:00:00Z',
+    }
+    mockJsonResponse(col)
+    await expect(getSettingCollection('col-1')).resolves.toEqual(col)
+    expect(fetch).toHaveBeenCalledWith('/api/v1/setting-collections/col-1', expect.objectContaining({ method: 'GET' }))
+  })
+
+  it('lists setting collections with filter query params', async () => {
+    mockJsonResponse([])
+    await expect(listSettingCollections({ status: 'active', owner_id: 'user-1' })).resolves.toEqual([])
+    expect(fetch).toHaveBeenCalledWith(
+      '/api/v1/setting-collections?status=active&owner_id=user-1',
+      expect.objectContaining({ method: 'GET' }),
+    )
+  })
+
+  it('archives a setting collection', async () => {
+    const archivedCol = {
+      id: 'col-1',
+      owner_id: 'user-1',
+      slug: 'test-col',
+      title: 'Test Collection',
+      description: null,
+      status: 'archived',
+      workspace_root: '/tmp/col-1',
+      revision: 2,
+      metadata: {},
+      created_at: '2026-07-19T00:00:00Z',
+      updated_at: '2026-07-19T00:00:00Z',
+    }
+    mockJsonResponse(archivedCol)
+    await expect(archiveSettingCollection('col-1')).resolves.toEqual(archivedCol)
+    expect(fetch).toHaveBeenCalledWith('/api/v1/setting-collections/col-1/archive', expect.objectContaining({ method: 'POST' }))
+  })
+
+  it('lists projects for a setting collection', async () => {
+    mockJsonResponse([project])
+    await expect(listCollectionProjects('col-1')).resolves.toEqual([project])
+    expect(fetch).toHaveBeenCalledWith('/api/v1/setting-collections/col-1/projects', expect.objectContaining({ method: 'GET' }))
+  })
+
+  it('lists documents for a setting collection', async () => {
+    const doc = {
+      id: 'doc-1',
+      project_id: null,
+      setting_collection_id: 'col-1',
+      chapter_id: null,
+      type: 'character_profile',
+      title: 'Alice',
+      path: 'characters/alice.md',
+      current_version_id: 'ver-1',
+      current_version: null,
+      metadata: {},
+      created_at: '2026-07-19T00:00:00Z',
+      updated_at: '2026-07-19T00:00:00Z',
+    }
+    mockJsonResponse([doc])
+    await expect(listCollectionDocuments('col-1')).resolves.toEqual([doc])
+    expect(fetch).toHaveBeenCalledWith('/api/v1/setting-collections/col-1/documents', expect.objectContaining({ method: 'GET' }))
+  })
+
+  it('creates a setting document in collection', async () => {
+    const doc = {
+      id: 'doc-1',
+      project_id: null,
+      setting_collection_id: 'col-1',
+      chapter_id: null,
+      type: 'character_profile',
+      title: 'Bob',
+      path: 'characters/bob.md',
+      current_version_id: 'ver-1',
+      current_version: null,
+      metadata: {},
+      created_at: '2026-07-19T00:00:00Z',
+      updated_at: '2026-07-19T00:00:00Z',
+    }
+    mockJsonResponse(doc)
+    const payload = {
+      type: 'character_profile' as const,
+      title: 'Bob',
+      path: 'characters/bob.md',
+      content: 'Bob info',
+    }
+    await expect(createCollectionDocument('col-1', payload)).resolves.toEqual(doc)
+    expect(fetch).toHaveBeenCalledWith('/api/v1/setting-collections/col-1/documents', expect.objectContaining({
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }))
+  })
+
+  it('patches a document title and metadata', async () => {
+    const doc = {
+      id: 'doc-1',
+      project_id: null,
+      setting_collection_id: 'col-1',
+      chapter_id: null,
+      type: 'character_profile',
+      title: 'Bob Renamed',
+      path: 'characters/bob.md',
+      current_version_id: 'ver-1',
+      current_version: null,
+      metadata: { role: 'protagonist' },
+      created_at: '2026-07-19T00:00:00Z',
+      updated_at: '2026-07-19T00:00:00Z',
+    }
+    mockJsonResponse(doc)
+    const payload = { title: 'Bob Renamed', metadata: { role: 'protagonist' } }
+    await expect(patchDocument('doc-1', payload)).resolves.toEqual(doc)
+    expect(fetch).toHaveBeenCalledWith('/api/v1/documents/doc-1', expect.objectContaining({
+      method: 'PATCH',
+      body: JSON.stringify(payload),
+    }))
+  })
+
+  it('deletes a document with 204 No Content', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(null, { status: 204 })))
+    await expect(deleteDocument('doc-1')).resolves.toBeUndefined()
+    expect(fetch).toHaveBeenCalledWith('/api/v1/documents/doc-1', expect.objectContaining({
+      method: 'DELETE',
+    }))
   })
 })

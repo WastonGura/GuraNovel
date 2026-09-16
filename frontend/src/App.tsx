@@ -30,6 +30,7 @@ import ProjectCreationForm from './ProjectCreationForm'
 import ProjectMaintenancePage from './ProjectMaintenancePage'
 import { ChapterProductionV2Workbench } from './ChapterProductionV2Workbench'
 import { ReaderPanelWorkbench } from './ReaderPanelWorkbench'
+import SettingCollectionWorkspace from './SettingCollectionWorkspace'
 import GlobalAssistant from './GlobalAssistant'
 
 const requestError = 'This workspace could not be loaded. Try again.'
@@ -469,12 +470,26 @@ export default function App() {
   const dashboard = pathname === '/'
   const studio = pathname === '/preview/studio' || /^\/projects\/[^/]+\/studio(?:\/[^/]+)?$/.test(pathname)
   if (studio) return <div className="app-shell studio-app-shell"><div className="workspace"><main><Routes><Route path="/preview/studio" element={<Studio />} /><Route path="/projects/:projectId/studio" element={<Studio />} /><Route path="/projects/:projectId/studio/:chapterId" element={<Studio />} /></Routes></main></div></div>
+
+  const isSettingWorkspace = /^\/setting-collections\/[^/]+$/.test(pathname)
+  if (isSettingWorkspace) {
+    return (
+      <div className="app-shell studio-app-shell setting-workspace-shell">
+        <main>
+          <Routes>
+            <Route path="/setting-collections/:settingCollectionId" element={<SettingCollectionWorkspace />} />
+          </Routes>
+        </main>
+      </div>
+    )
+  }
+
   return (
     <div className={`app-shell${dashboard ? ' dashboard-app-shell' : ''}`}>
       {!dashboard && <header className="topbar" aria-label="GuraNovel workbench"><Link className="wordmark" to="/">GuraNovel</Link><span className="workspace-name">Creative workbench</span></header>}
       <div className={`workspace${dashboard ? ' dashboard-workspace' : ''}`}>
         {!dashboard && <nav aria-label="Workbench navigation"><Link to="/">Projects</Link><span>Approvals</span><span>Documents</span></nav>}
-        <main><Routes><Route path="/" element={<Dashboard />} /><Route path="/projects/:projectId" element={<ProjectWorkspace />} /><Route path="/projects/:projectId/chapters/:chapterId" element={<ChapterWorkspace />} /><Route path="/projects/:projectId/chapters/:chapterId/documents/:documentId/versions/:documentVersionId/reader-panel" element={<ReaderPanelPage />} /><Route path="/projects/:projectId/chapters/:chapterId/documents/:documentId/versions/:documentVersionId/reader-panel/:sessionId" element={<ReaderPanelPage />} /><Route path="/projects/:projectId/creation/start" element={<ProjectCreationPage />} /><Route path="/projects/:projectId/creation/:workflowRunId/gate" element={<ConceptGatePage />} /><Route path="/projects/:projectId/maintenance" element={<ProjectMaintenancePage mode="history" />} /><Route path="/projects/:projectId/maintenance/start" element={<ProjectMaintenancePage mode="start" />} /><Route path="/projects/:projectId/maintenance/:workflowRunId/status" element={<ProjectMaintenancePage mode="handoff" />} /><Route path="/projects/:projectId/maintenance/:workflowRunId" element={<ProjectMaintenancePage mode="gate" />} /><Route path="*" element={<NotFound />} /></Routes></main>
+        <main><Routes><Route path="/" element={<Dashboard />} /><Route path="/projects/:projectId" element={<ProjectWorkspace />} /><Route path="/projects/:projectId/chapters/:chapterId" element={<ChapterWorkspace />} /><Route path="/projects/:projectId/chapters/:chapterId/documents/:documentId/versions/:documentVersionId/reader-panel" element={<ReaderPanelPage />} /><Route path="/projects/:projectId/chapters/:chapterId/documents/:documentId/versions/:documentVersionId/reader-panel/:sessionId" element={<ReaderPanelPage />} /><Route path="/projects/:projectId/creation/start" element={<ProjectCreationPage />} /><Route path="/projects/:projectId/creation/:workflowRunId/gate" element={<ConceptGatePage />} /><Route path="/projects/:projectId/maintenance" element={<ProjectMaintenancePage mode="history" />} /><Route path="/projects/:projectId/maintenance/start" element={<ProjectMaintenancePage mode="start" />} /><Route path="/projects/:projectId/maintenance/:workflowRunId/status" element={<ProjectMaintenancePage mode="handoff" />} /><Route path="/projects/:projectId/maintenance/:workflowRunId" element={<ProjectMaintenancePage mode="gate" />} /><Route path="/setting-collections/:settingCollectionId" element={<SettingCollectionWorkspace />} /><Route path="*" element={<NotFound />} /></Routes></main>
       </div>
       <GlobalAssistant />
     </div>

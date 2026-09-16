@@ -162,15 +162,63 @@ export interface DocumentVersion {
 
 export interface Document {
   id: string
-  project_id: string
+  project_id: string | null
+  setting_collection_id?: string | null
   chapter_id: string | null
   type: DocumentType
   title: string | null
   path: string
   current_version_id: string | null
   current_version: DocumentVersion | null
+  metadata?: Metadata
   created_at: string
   updated_at: string
+}
+
+export interface SettingCollection {
+  id: string
+  owner_id: string | null
+  slug: string
+  title: string
+  description: string | null
+  status: 'active' | 'archived' | string
+  workspace_root: string
+  revision: number
+  metadata: Metadata
+  created_at: string
+  updated_at: string
+}
+
+export interface CreateSettingCollectionRequest {
+  title: string
+  slug?: string | null
+  description?: string | null
+  owner_id?: string | null
+  metadata?: Metadata
+}
+
+export interface UpdateSettingCollectionRequest {
+  title?: string | null
+  description?: string | null
+  metadata?: Metadata
+}
+
+export interface CreateSettingDocumentRequest {
+  type: DocumentType
+  title?: string | null
+  path: string
+  content: string
+  source?: DocumentSource
+  actor_user_id?: string | null
+  agent_role?: string | null
+  workflow_run_id?: string | null
+  change_summary?: string | null
+  metadata?: Metadata
+}
+
+export interface UpdateDocumentRequest {
+  title?: string | null
+  metadata?: Metadata
 }
 
 export interface DocumentContent {
@@ -528,11 +576,35 @@ function decodeDocument(value: unknown): Document {
   const type = string(data.type)
   if (!documentTypes.has(type as DocumentType)) throw invalidResponse()
   return {
-    id: string(data.id), project_id: string(data.project_id), chapter_id: nullableString(data.chapter_id),
-    type: type as DocumentType, title: nullableString(data.title), path: string(data.path),
+    id: string(data.id),
+    project_id: nullableString(data.project_id),
+    setting_collection_id: nullableString(data.setting_collection_id),
+    chapter_id: nullableString(data.chapter_id),
+    type: type as DocumentType,
+    title: nullableString(data.title),
+    path: string(data.path),
     current_version_id: nullableString(data.current_version_id),
     current_version: data.current_version === null ? null : decodeDocumentVersion(data.current_version),
-    created_at: string(data.created_at), updated_at: string(data.updated_at),
+    metadata: isRecord(data.metadata) ? metadata(data.metadata) : {},
+    created_at: string(data.created_at),
+    updated_at: string(data.updated_at),
+  }
+}
+
+function decodeSettingCollection(value: unknown): SettingCollection {
+  const data = object(value)
+  return {
+    id: string(data.id),
+    owner_id: nullableString(data.owner_id),
+    slug: string(data.slug),
+    title: string(data.title),
+    description: nullableString(data.description),
+    status: string(data.status),
+    workspace_root: string(data.workspace_root),
+    revision: integer(data.revision),
+    metadata: metadata(data.metadata),
+    created_at: string(data.created_at),
+    updated_at: string(data.updated_at),
   }
 }
 
@@ -585,7 +657,7 @@ interface RequestOptions {
 }
 
 async function request<T>(
-  method: 'GET' | 'POST' | 'PUT',
+  method: 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE',
   path: () => string,
   decode: (value: unknown) => T,
   body?: object,
@@ -602,6 +674,10 @@ async function request<T>(
   } catch (error: unknown) {
     if (error instanceof ApiError) throw error
     throw new ApiError(0, 'request_failed', genericErrorMessage)
+  }
+
+  if (response.status === 204) {
+    return decode(undefined)
   }
 
   let payload: unknown
@@ -798,6 +874,54 @@ export function restoreDocument(
 ): Promise<DocumentVersion> {
   return request('POST', () => apiPath('documents', documentId, 'versions', versionId, 'restore'), decodeDocumentVersion, payload)
 }
+
+export function patchDocument(documentId: string, payload: UpdateDocumentRequest): Promise<Document> {
+  return request('PATCH', () => apiPath('documents', documentId), decodeDocument, payload)
+}
+
+export function deleteDocument(documentId: string): Promise<void> {
+  return request('DELETE', () => apiPath('documents', documentId), () => undefined)
+}
+
+export function getSettingCollection(collectionId: string): Promise<SettingCollection> {
+  return request('GET', () => apiPath('setting-collections', collectionId), decodeSettingCollection)
+}
+
+export function listSettingCollections(options?: { status?: string; owner_id?: string }): Promise<SettingCollection[]> {
+  const query = new URLSearchParams()
+  if (options?.status) query.set('status', options.status)
+  if (options?.owner_id) query.set('owner_id', options.owner_id)
+  const qs = query.toString() ? `?${query.toString()}` : ''
+  return request('GET', () => `${apiPath('setting-collections')}${qs}`, (value) => {
+    if (!Array.isArray(value)) throw invalidResponse()
+    return value.map(decodeSettingCollection)
+  })
+}
+
+export function archiveSettingCollection(collectionId: string): Promise<SettingCollection> {
+  return request('POST', () => apiPath('setting-collections', collectionId, 'archive'), decodeSettingCollection)
+}
+
+export function listCollectionProjects(collectionId: string): Promise<Project[]> {
+  return request('GET', () => apiPath('setting-collections', collectionId, 'projects'), (value) => {
+    if (!Array.isArray(value)) throw invalidResponse()
+    return value.map(decodeProject)
+  })
+}
+
+export function listCollectionDocuments(collectionId: string): Promise<Document[]> {
+  return request('GET', () => apiPath('setting-collections', collectionId, 'documents'), (value) => {
+    if (!Array.isArray(value)) throw invalidResponse()
+    return value.map(decodeDocument)
+  })
+}
+
+export function createCollectionDocument(
+  collectionId: string, payload: CreateSettingDocumentRequest
+): Promise<Document> {
+  return request('POST', () => apiPath('setting-collections', collectionId, 'documents'), decodeDocument, payload)
+}
+
 
 export interface ProjectCreationConceptOption {
   id: string
