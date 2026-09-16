@@ -23,6 +23,7 @@ from app.models import (
     ReaderPanelSession,
     ReaderRun,
     ReviewReport,
+    SettingCollection,
     User,
     WorkflowRun,
 )
@@ -99,12 +100,18 @@ def test_mvp_models_are_imported_and_registered() -> None:
         "reader_panel_ballots",
         "reader_panel_messages",
         "reader_panel_invocations",
+        "setting_collections",
         "studio_restore_points",
         "studio_feedback",
         "studio_feedback_submissions",
         "studio_assistant_conversations",
         "studio_assistant_messages",
     }
+    assert SettingCollection.__table__.c.slug.unique is True
+    assert SettingCollection.__table__.c.metadata.name == "metadata"
+    assert Project.__table__.c.setting_collection_id.nullable is False
+    assert Document.__table__.c.setting_collection_id.nullable is True
+    assert Document.__table__.c.project_id.nullable is True
     assert Project.__table__.c.metadata.name == "metadata"
     assert "metadata" not in Project.__dict__
     assert Document.__table__.c.current_version_id.foreign_keys
