@@ -9,9 +9,31 @@ import SettingGraph from './SettingGraph'
 import SettingConversation from './SettingConversation'
 import SettingNoteList from './SettingNoteList'
 import { applySettingChanges, categoryNames, emptySettingConversation, noteLinks, readSettingWorkspace, resolveNote, settingExampleReply, settingStorageKey, stagedSettingComments, type SettingCategory, type SettingChange, type SettingConversation as Conversation, type SettingNote } from './settingNotes'
+import type { SettingCollection } from './api/client'
 import './studioSetting.css'
 
-type SettingView = { id: string; category: SettingCategory; mode: 'note' | 'graph' | 'search' | 'chat' }
+export type SettingView = { id: string; category: SettingCategory; mode: 'note' | 'graph' | 'search' | 'chat' }
+
+export interface StudioSettingProps {
+  preview?: boolean
+  hidden?: boolean
+  activePage?: boolean
+  ready?: boolean
+  onTyping?: () => void
+  ref?: Ref<{ flush: () => Promise<boolean> }>
+  collection?: SettingCollection | null
+  backendNotes?: SettingNote[]
+  readOnly?: boolean
+  onSaveNoteContent?: (noteId: string, content: string, expectedVersionId?: string) => Promise<{ versionId: string } | 'conflict' | false>
+  onRenameNote?: (noteId: string, newTitle: string) => Promise<boolean>
+  onCreateNote?: (category: SettingCategory, title: string, tempId: string) => Promise<SettingNote | null>
+  onDeleteNotes?: (noteIds: string[]) => Promise<boolean>
+  onViewChange?: (view: SettingView) => void
+  initialView?: Partial<SettingView>
+  syncUrlParams?: boolean
+  saveStatusText?: string
+  defaultPinned?: boolean
+}
 
 function LinkedText({ text, notes, references, comments, onOpen }: { text: string; notes: SettingNote[]; references: string[]; comments: OutlineComment[]; onOpen: (title: string) => void }) {
   const parts: ReactNode[] = []
@@ -34,9 +56,34 @@ function LinkedText({ text, notes, references, comments, onOpen }: { text: strin
   return <>{parts}</>
 }
 
-export default function StudioSetting({ preview, hidden, activePage = true, ready = true, onTyping, ref }: { preview: boolean; hidden: boolean; activePage?: boolean; ready?: boolean; onTyping: () => void; ref?: Ref<{ flush: () => Promise<boolean> }> }) {
+export default function StudioSetting({
+  preview = true,
+  hidden = false,
+  activePage = true,
+  ready = true,
+  onTyping = () => {},
+  ref,
+  collection,
+  backendNotes,
+  readOnly: explicitReadOnly,
+  onSaveNoteContent,
+  onRenameNote,
+  onCreateNote,
+  onDeleteNotes,
+  onViewChange,
+  initialView,
+  syncUrlParams = false,
+  saveStatusText,
+  defaultPinned,
+}: StudioSettingProps) {
   const location = useLocation(), navigate = useNavigate()
+  const searchParams = new URLSearchParams(location.search)
+  const initialCategoryParam = searchParams.get('category') as SettingCategory | null
+  const initialNoteParam = searchParams.get('note')
+  const initialModeParam = searchParams.get('mode') as SettingView['mode'] | null
+
   const [initial] = useState(() => {
+    if (backendNotes) return { notes: backendNotes, conversation: emptySettingConversation(), error: '' }
     if (!preview) return { notes: [] as SettingNote[], conversation: emptySettingConversation(), error: '' }
     try { return { ...readSettingWorkspace(), error: '' } }
     catch { return { notes: [] as SettingNote[], conversation: emptySettingConversation(), error: '本机设定未能读取，原始数据已保留。请先备份后重试。' } }
@@ -48,13 +95,19 @@ export default function StudioSetting({ preview, hidden, activePage = true, read
   const [chatVisited, setChatVisited] = useState(Boolean(initial.conversation.messages.length || initial.conversation.draft || initial.conversation.stagedComments?.length))
   const transfer = useRef<ViewTransition | null>(null)
   useEffect(() => () => { transfer.current?.skipTransition(); document.documentElement.removeAttribute('data-setting-transfer') }, [])
-  const [category, setCategory] = useState<SettingCategory>(location.state?.settingView?.category || 'setting')
-  const [selectedId, setSelectedId] = useState(location.state?.settingView?.id || initial.notes[0]?.id || '')
-  const [mode, setMode] = useState<SettingView['mode']>(location.state?.settingView?.mode || 'note')
+  const [category, setCategory] = useState<SettingCategory>(
+    initialCategoryParam || location.state?.settingView?.category || initialView?.category || 'setting'
+  )
+  const [selectedId, setSelectedId] = useState(
+    initialNoteParam || location.state?.settingView?.id || initialView?.id || initial.notes[0]?.id || ''
+  )
+  const [mode, setMode] = useState<SettingView['mode']>(
+    initialModeParam || location.state?.settingView?.mode || initialView?.mode || 'note'
+  )
   const [editing, setEditing] = useState(false)
   const [draftTitle, setDraftTitle] = useState('')
   const [query, setQuery] = useState('')
-  const [pinned, setPinned] = useState(false)
+  const [pinned, setPinned] = useState(defaultPinned ?? false)
   const [sidebarOpen, setSidebarOpen] = useState(false)
   const [sweep, setSweep] = useState(0)
   const [error, setError] = useState(initial.error)
@@ -62,8 +115,31 @@ export default function StudioSetting({ preview, hidden, activePage = true, read
   const [deleted, setDeleted] = useState<{ items: { note: SettingNote; index: number }[]; staged: NonNullable<Conversation['stagedComments']> } | null>(null)
   const search = useRef<HTMLInputElement>(null)
   const noteInput = useRef<HTMLTextAreaElement>(null)
+
+  const [prevBackendNotes, setPrevBackendNotes] = useState(backendNotes)
+  if (backendNotes && backendNotes !== prevBackendNotes) {
+    setPrevBackendNotes(backendNotes)
+    setNotes(backendNotes)
+    if (backendNotes.length > 0) {
+      if (!selectedId || !backendNotes.some(n => n.id === selectedId)) {
+        const initialTarget = initialNoteParam && backendNotes.find(n => n.id === initialNoteParam)
+        if (initialTarget) {
+          setSelectedId(initialTarget.id)
+        } else {
+          const cat = initialCategoryParam || category
+          const found = backendNotes.find(n => n.category === cat) || backendNotes[0]
+          setSelectedId(found.id)
+        }
+      }
+    }
+  }
+
+  useEffect(() => {
+    currentNotes.current = notes
+  }, [notes])
+
   const active = notes.find(note => note.id === selectedId)
-  const readOnly = !preview || Boolean(initial.error)
+  const readOnly = explicitReadOnly !== undefined ? explicitReadOnly : (!preview || Boolean(initial.error))
   const shown = notes.filter(note => note.category === category)
   const results = notes.filter(note => `${note.title}\n${note.body}`.toLocaleLowerCase().includes(query.trim().toLocaleLowerCase()))
   const sidebarVisible = pinned || (sidebarOpen && !hidden)
@@ -74,13 +150,47 @@ export default function StudioSetting({ preview, hidden, activePage = true, read
   function rememberView(next: SettingView) {
     const current = { id: selectedId, category, mode }
     if (JSON.stringify(current) === JSON.stringify(next)) return
-    // Use the router's history so mouse Back/Forward and browser navigation agree.
-    navigate(location, { replace: true, state: { ...location.state, settingView: current } })
-    navigate(location, { state: { ...location.state, settingView: next } })
+    if (syncUrlParams) {
+      const params = new URLSearchParams(location.search)
+      if (next.id) params.set('note', next.id); else params.delete('note')
+      params.set('category', next.category)
+      params.set('mode', next.mode)
+      navigate({ pathname: location.pathname, search: `?${params.toString()}` }, {
+        replace: false,
+        state: { ...location.state, settingView: next },
+      })
+    } else {
+      navigate(location, { replace: true, state: { ...location.state, settingView: current } })
+      navigate(location, { state: { ...location.state, settingView: next } })
+    }
+    if (onViewChange) onViewChange(next)
   }
   function persist(next: SettingNote[], chat = currentConversation.current, requireSave = false) {
     if (readOnly) return false
     let stored = false
+    if (onSaveNoteContent) {
+      currentNotes.current = next
+      currentConversation.current = chat
+      setNotes(next)
+      setConversation(chat)
+      const activeChanged = next.find(n => n.id === active?.id)
+      if (activeChanged && active && (activeChanged.body !== active.body || activeChanged.comments !== active.comments)) {
+        void onSaveNoteContent(activeChanged.id, activeChanged.body, activeChanged.versionId).then(res => {
+          if (res === 'conflict') {
+            setSaved(false)
+          } else if (res) {
+            setSaved(true)
+            setError('')
+            const updated = currentNotes.current.map(n => n.id === activeChanged.id ? { ...n, versionId: res.versionId } : n)
+            currentNotes.current = updated
+            setNotes(updated)
+          } else {
+            setSaved(false)
+          }
+        })
+      }
+      return true
+    }
     try { localStorage.setItem(settingStorageKey, JSON.stringify({ notes: next, conversation: chat })); setSaved(true); setError(''); stored = true }
     catch { setSaved(false); setError('本机保存失败，编辑仍保留在当前页，请先复制备份。'); if (requireSave) return false }
     currentNotes.current = next
@@ -107,6 +217,9 @@ export default function StudioSetting({ preview, hidden, activePage = true, read
     const chat = currentConversation.current, staged = (chat.stagedComments || []).filter(item => ids.includes(item.noteId))
     const next = currentNotes.current.filter(note => !ids.includes(note.id))
     if (!persist(next, { ...chat, contextId: ids.includes(chat.contextId || '') ? null : chat.contextId, stagedComments: chat.stagedComments?.filter(item => !ids.includes(item.noteId)) }, true)) return
+    if (onDeleteNotes) {
+      void onDeleteNotes(ids)
+    }
     setDeleted({ items, staged })
     if (ids.includes(selectedId)) { setSelectedId(next.find(note => note.category === category)?.id || ''); setEditing(false) }
   }
@@ -122,7 +235,21 @@ export default function StudioSetting({ preview, hidden, activePage = true, read
     const current = currentNotes.current
     let name = title || `未命名${categoryNames[category]}`, suffix = 2
     while (current.some(note => note.title === name)) name = `${title || `未命名${categoryNames[category]}`} ${suffix++}`
-    const note: SettingNote = { id: crypto.randomUUID(), category, title: name, body: '' }
+    const tempId = crypto.randomUUID()
+    const note: SettingNote = { id: tempId, category, title: name, body: '' }
+    if (onCreateNote) {
+      void onCreateNote(category, name, tempId).then(createdNote => {
+        if (createdNote) {
+          const updated = currentNotes.current.map(n => n.id === tempId ? { ...n, id: createdNote.id, documentId: createdNote.id, versionId: createdNote.versionId } : n)
+          currentNotes.current = updated
+          setNotes(updated)
+          setSelectedId((prev: string) => prev === tempId ? createdNote.id : prev)
+          if (selectedId === tempId) {
+            rememberView({ id: createdNote.id, category, mode: 'note' })
+          }
+        }
+      })
+    }
     if (!persist([...current, note])) return
     rememberView({ id: note.id, category, mode: 'note' })
     setSelectedId(note.id); setMode('note'); setEditing(true); setDraftTitle(name); setQuery('')
@@ -138,6 +265,9 @@ export default function StudioSetting({ preview, hidden, activePage = true, read
     const nextTitle = draftTitle.trim()
     if (!nextTitle || /[\]\n[]/.test(nextTitle)) { setError('请输入标题，标题不能含方括号或换行。'); return false }
     if (notes.some(note => note.id !== active.id && note.title === nextTitle)) { setError('已有同名条目，请使用不同的标题。'); return false }
+    if (onRenameNote && active.title !== nextTitle) {
+      void onRenameNote(active.id, nextTitle)
+    }
     // Keep existing wiki references valid when the referenced note is renamed.
     return persist(notes.map(note => {
       const body = note.body.replace(/\[\[([^\]\n[]+)\]\]/g, (match, title: string) => title.trim() === active.title.trim() ? `[[${nextTitle}]]` : match)
@@ -254,7 +384,7 @@ export default function StudioSetting({ preview, hidden, activePage = true, read
       </div>
       <SettingNoteList notes={shown} category={category} activeId={mode === 'note' ? active?.id : undefined} disabled={readOnly || !activePage} onOpen={choose} onOrder={orderNotes} onDelete={deleteNotes} />
       {deleted && <div className="setting-delete-undo" role="status"><small>已删除 {deleted.items.length} 项，正文引用保留</small><button type="button" onClick={undoDelete}>撤销删除</button></div>}
-      <small className="setting-local-note">{preview ? saved ? '已保存到本机 · 交互预览' : '示例设定 · 交互预览' : '设定接口尚未接入'}</small>
+      <small className="setting-local-note">{saveStatusText || (collection ? (collection.status === 'archived' ? '已归档 · 只读' : saved ? '已保存' : '设定集') : preview ? saved ? '已保存到本机 · 交互预览' : '示例设定 · 交互预览' : '设定接口尚未接入')}</small>
     </aside>
     </div>
     <div className={`setting-main${mode === 'chat' ? ' is-conversation' : chatVisited ? ' has-conversation-return' : ''}`}>
