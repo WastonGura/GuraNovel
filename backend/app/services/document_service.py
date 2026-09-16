@@ -217,6 +217,7 @@ class DocumentService:
             kwargs.get("version_metadata")
         )
         document = await self._locked_document(kwargs["document_id"])
+        self._ensure_document_is_mutable(document)
         self._ensure_expected_current_version(document, kwargs["expected_current_version_id"])
         content = kwargs["content"]
         version = self._new_version(
@@ -264,6 +265,7 @@ class DocumentService:
     ) -> DocumentVersion:
         version_metadata = self._validated_version_metadata(version_metadata)
         document = await self._locked_document(document_id)
+        self._ensure_document_is_mutable(document)
         self._ensure_expected_current_version(document, expected_current_version_id)
         version = self._new_version(
             document=document,
@@ -300,6 +302,7 @@ class DocumentService:
     ) -> DocumentVersion:
         version_metadata = self._validated_version_metadata(version_metadata)
         document = await self._locked_document(document_id)
+        self._ensure_document_is_mutable(document)
         self._ensure_expected_current_version(document, expected_current_version_id)
         target = await self.session.scalar(
             select(DocumentVersion).where(
@@ -526,7 +529,11 @@ class DocumentService:
     async def _document(self, document_id: UUID) -> Document:
         document = await self.session.scalar(
             select(Document)
-            .options(selectinload(Document.project), selectinload(Document.current_version))
+            .options(
+                selectinload(Document.project),
+                selectinload(Document.setting_collection),
+                selectinload(Document.current_version),
+            )
             .where(Document.id == document_id)
         )
         if document is None:
@@ -536,7 +543,11 @@ class DocumentService:
     async def _locked_document(self, document_id: UUID) -> Document:
         document = await self.session.scalar(
             select(Document)
-            .options(selectinload(Document.project), selectinload(Document.current_version))
+            .options(
+                selectinload(Document.project),
+                selectinload(Document.setting_collection),
+                selectinload(Document.current_version),
+            )
             .where(Document.id == document_id)
             .with_for_update()
         )
@@ -565,6 +576,11 @@ class DocumentService:
     ) -> None:
         if document.current_version_id != expected_current_version_id:
             raise DocumentVersionConflictError("The document has a newer version.")
+
+    @staticmethod
+    def _ensure_document_is_mutable(document: Document) -> None:
+        if bool(document.metadata_.get("legacy_setting_context")):
+            raise ConflictError("Legacy project setting documents are read-only and cannot be modified.")
 
     @staticmethod
     def _ensure_document_path_is_not_reserved(path: str) -> None:
@@ -634,8 +650,11 @@ class DocumentService:
 
     @staticmethod
     def _store_for(document: Document) -> MarkdownStore:
-        assert document.project is not None
-        return MarkdownStore(Path(document.project.workspace_root))
+        if document.project is not None:
+            return MarkdownStore(Path(document.project.workspace_root))
+        if document.setting_collection is not None:
+            return MarkdownStore(Path(document.setting_collection.workspace_root))
+        raise ValueError("Document has neither project nor setting_collection")
 
     @staticmethod
     def _snapshot_path(version: DocumentVersion) -> str:

@@ -8,7 +8,7 @@ from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.errors import AppError, ConflictError, NotFoundError
-from app.models import Project
+from app.models import Project, SettingCollection
 from app.workspace import ProjectWorkspace
 
 
@@ -39,6 +39,7 @@ class ProjectService:
         genre: str | None = None,
         target_platform: str | None = None,
         metadata: dict | None = None,
+        setting_collection_id: UUID | None = None,
     ) -> Project:
         assert self.workspace is not None
         await self._lock_slug(slug)
@@ -46,10 +47,26 @@ class ProjectService:
         if existing is not None:
             raise ConflictError("A project with this slug already exists.")
 
+        if setting_collection_id is not None:
+            setting_collection = await self.session.get(SettingCollection, setting_collection_id)
+            if setting_collection is None:
+                raise NotFoundError("Setting collection not found.")
+        else:
+            setting_collection = None
+
         root = self.workspace.root_for(slug)
         allocated_here = not (root.exists() or root.is_symlink())
         try:
             workspace_root = self.workspace.create(slug)
+            if setting_collection is None:
+                setting_collection = SettingCollection(
+                    slug=f"{slug}-settings",
+                    title=f"{title} 设定集",
+                    workspace_root=str(workspace_root),
+                )
+                self.session.add(setting_collection)
+                await self.session.flush()
+
             project = Project(
                 slug=slug,
                 title=title,
@@ -57,6 +74,7 @@ class ProjectService:
                 target_platform=target_platform,
                 metadata_=metadata or {},
                 workspace_root=str(workspace_root),
+                setting_collection_id=setting_collection.id,
             )
             self.session.add(project)
             await self.session.flush()

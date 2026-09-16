@@ -153,3 +153,30 @@ def test_studio_assistant_migration_downgrades() -> None:
     conv = sql.index("DROP TABLE studio_assistant_conversations")
     assert msg < conv
 
+
+def test_setting_collection_separation_migration_generates_upgrade_sql() -> None:
+    sql = run_alembic(
+        "upgrade", "0010_studio_assistant:0011_setting_collections", "--sql"
+    )
+
+    assert "CREATE TABLE setting_collections" in sql
+    assert "setting_collection_id UUID" in sql
+    assert "idx_setting_collections_owner_id" in sql
+    assert "idx_setting_collections_status" in sql
+    assert "idx_projects_setting_collection_id" in sql
+    assert "uq_documents_setting_collection_path" in sql
+    assert "uq_documents_project_path" in sql
+    assert "ck_documents_owner_xor" in sql
+    assert "ck_documents_chapter_requires_project" in sql
+    assert "INSERT INTO setting_collections" in sql
+
+
+def test_setting_collection_separation_migration_downgrades() -> None:
+    sql = run_alembic(
+        "downgrade", "0011_setting_collections:0010_studio_assistant", "--sql"
+    )
+
+    drop_sc = sql.index("DROP TABLE setting_collections")
+    drop_col = sql.index("DROP COLUMN setting_collection_id")
+    assert drop_col < drop_sc
+

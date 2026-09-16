@@ -7,7 +7,7 @@ from decimal import Decimal
 from typing import TYPE_CHECKING
 from uuid import UUID, uuid4
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, Index, Integer, Numeric, Text, UniqueConstraint, func, text
+from sqlalchemy import Boolean, CheckConstraint, DateTime, ForeignKey, Index, Integer, Numeric, Text, UniqueConstraint, func, text
 from sqlalchemy.dialects.postgresql import JSONB, UUID as PGUUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -39,9 +39,41 @@ class User(TimestampMixin, Base):
     display_name: Mapped[str | None] = mapped_column(Text)
 
     projects: Mapped[list[Project]] = relationship(back_populates="owner")
+    setting_collections: Mapped[list[SettingCollection]] = relationship(back_populates="owner")
     workflow_runs: Mapped[list[WorkflowRun]] = relationship(back_populates="user")
     document_versions: Mapped[list[DocumentVersion]] = relationship(back_populates="actor_user")
     resolved_action_requests: Mapped[list[ActionRequest]] = relationship(back_populates="resolved_by")
+
+
+class SettingCollection(TimestampMixin, Base):
+    __tablename__ = "setting_collections"
+    __table_args__ = (
+        Index("idx_setting_collections_owner_id", "owner_id"),
+        Index("idx_setting_collections_status", "status"),
+        Index("idx_setting_collections_metadata_gin", "metadata", postgresql_using="gin"),
+    )
+
+    id: Mapped[UUID] = mapped_column(
+        PGUUID(as_uuid=True), primary_key=True, default=uuid4, server_default=text("gen_random_uuid()")
+    )
+    owner_id: Mapped[UUID | None] = mapped_column(PGUUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"))
+    slug: Mapped[str] = mapped_column(Text, unique=True, nullable=False)
+    title: Mapped[str] = mapped_column(Text, nullable=False)
+    description: Mapped[str | None] = mapped_column(Text)
+    status: Mapped[str] = mapped_column(Text, nullable=False, default="active", server_default=text("'active'"))
+    workspace_root: Mapped[str] = mapped_column(Text, nullable=False)
+    revision: Mapped[int] = mapped_column(Integer, nullable=False, default=1, server_default=text("1"))
+    metadata_: Mapped[dict] = mapped_column(
+        "metadata", JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb")
+    )
+
+    owner: Mapped[User | None] = relationship(back_populates="setting_collections")
+    projects: Mapped[list[Project]] = relationship(
+        back_populates="setting_collection", passive_deletes="all"
+    )
+    documents: Mapped[list[Document]] = relationship(
+        back_populates="setting_collection", cascade="all, delete-orphan"
+    )
 
 
 class Project(TimestampMixin, Base):
@@ -50,11 +82,30 @@ class Project(TimestampMixin, Base):
         Index("idx_projects_owner_id", "owner_id"),
         Index("idx_projects_status", "status"),
         Index("idx_projects_metadata_gin", "metadata", postgresql_using="gin"),
+        Index("idx_projects_setting_collection_id", "setting_collection_id"),
     )
+
+    def __init__(self, **kwargs: object) -> None:
+        if (
+            "setting_collection_id" not in kwargs
+            and "setting_collection" not in kwargs
+        ):
+            slug = str(kwargs.get("slug") or uuid4())
+            title = str(kwargs.get("title") or "Project")
+            workspace_root = str(kwargs.get("workspace_root") or "")
+            kwargs["setting_collection"] = SettingCollection(
+                slug=f"{slug}-settings",
+                title=f"{title} 设定集",
+                workspace_root=workspace_root,
+            )
+        super().__init__(**kwargs)
 
     id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True, default=uuid4,
                                      server_default=text("gen_random_uuid()"))
     owner_id: Mapped[UUID | None] = mapped_column(PGUUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"))
+    setting_collection_id: Mapped[UUID] = mapped_column(
+        PGUUID(as_uuid=True), ForeignKey("setting_collections.id", ondelete="RESTRICT"), nullable=False
+    )
     slug: Mapped[str] = mapped_column(Text, unique=True, nullable=False)
     title: Mapped[str] = mapped_column(Text, nullable=False)
     genre: Mapped[str | None] = mapped_column(Text)
@@ -66,6 +117,7 @@ class Project(TimestampMixin, Base):
                                             server_default=text("'{}'::jsonb"))
 
     owner: Mapped[User | None] = relationship(back_populates="projects")
+    setting_collection: Mapped[SettingCollection] = relationship(back_populates="projects")
     chapters: Mapped[list[Chapter]] = relationship(back_populates="project", cascade="all, delete-orphan")
     workflow_runs: Mapped[list[WorkflowRun]] = relationship(
         back_populates="project", cascade="all, delete", passive_deletes=True
@@ -205,13 +257,38 @@ class WorkflowEvent(Base):
 class Document(TimestampMixin, Base):
     __tablename__ = "documents"
     __table_args__ = (
-        UniqueConstraint("project_id", "path", name="uq_document_project_path"),
-        Index("idx_documents_project_id", "project_id"), Index("idx_documents_chapter_id", "chapter_id"),
-        Index("idx_documents_type", "type"), Index("idx_documents_path", "path"),
+        Index(
+            "uq_documents_project_path",
+            "project_id",
+            "path",
+            unique=True,
+            postgresql_where=text("project_id IS NOT NULL"),
+        ),
+        Index(
+            "uq_documents_setting_collection_path",
+            "setting_collection_id",
+            "path",
+            unique=True,
+            postgresql_where=text("setting_collection_id IS NOT NULL"),
+        ),
+        Index("idx_documents_project_id", "project_id"),
+        Index("idx_documents_setting_collection_id", "setting_collection_id"),
+        Index("idx_documents_chapter_id", "chapter_id"),
+        Index("idx_documents_type", "type"),
+        Index("idx_documents_path", "path"),
+        CheckConstraint(
+            "((project_id IS NOT NULL AND setting_collection_id IS NULL) OR (project_id IS NULL AND setting_collection_id IS NOT NULL))",
+            name="ck_documents_owner_xor",
+        ),
+        CheckConstraint(
+            "(chapter_id IS NULL OR project_id IS NOT NULL)",
+            name="ck_documents_chapter_requires_project",
+        ),
     )
 
     id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True, default=uuid4, server_default=text("gen_random_uuid()"))
-    project_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), ForeignKey("projects.id", ondelete="CASCADE"), nullable=False)
+    project_id: Mapped[UUID | None] = mapped_column(PGUUID(as_uuid=True), ForeignKey("projects.id", ondelete="CASCADE"), nullable=True)
+    setting_collection_id: Mapped[UUID | None] = mapped_column(PGUUID(as_uuid=True), ForeignKey("setting_collections.id", ondelete="CASCADE"), nullable=True)
     chapter_id: Mapped[UUID | None] = mapped_column(PGUUID(as_uuid=True), ForeignKey("chapters.id", ondelete="CASCADE"))
     type: Mapped[str] = mapped_column(Text, nullable=False)
     title: Mapped[str | None] = mapped_column(Text)
@@ -219,7 +296,8 @@ class Document(TimestampMixin, Base):
     current_version_id: Mapped[UUID | None] = mapped_column(PGUUID(as_uuid=True), ForeignKey("document_versions.id", name="fk_documents_current_version", ondelete="SET NULL", use_alter=True))
     metadata_: Mapped[dict] = mapped_column("metadata", JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb"))
 
-    project: Mapped[Project] = relationship(back_populates="documents")
+    project: Mapped[Project | None] = relationship(back_populates="documents")
+    setting_collection: Mapped[SettingCollection | None] = relationship(back_populates="documents")
     chapter: Mapped[Chapter | None] = relationship(back_populates="documents")
     current_version: Mapped[DocumentVersion | None] = relationship(foreign_keys=[current_version_id], post_update=True)
     versions: Mapped[list[DocumentVersion]] = relationship(back_populates="document", foreign_keys="DocumentVersion.document_id", cascade="all, delete-orphan")
