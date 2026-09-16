@@ -52,7 +52,7 @@ def _canonical_uuid(value: object) -> UUID:
     if isinstance(value, UUID):
         if value.int == 0:
             raise ValueError("UUID must be non-zero")
-        return value
+        return UUID(int=value.int)
     if isinstance(value, str):
         parsed = UUID(value.strip())
         if parsed.int == 0:
@@ -77,12 +77,9 @@ class SettingDocumentSnapshot:
     metadata: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
-        if not _valid_uuid(self.setting_collection_id):
-            raise ValueError("setting_collection_id must be a non-zero UUID")
-        if not _valid_uuid(self.document_id):
-            raise ValueError("document_id must be a non-zero UUID")
-        if not _valid_uuid(self.version_id):
-            raise ValueError("version_id must be a non-zero UUID")
+        object.__setattr__(self, "setting_collection_id", _canonical_uuid(self.setting_collection_id))
+        object.__setattr__(self, "document_id", _canonical_uuid(self.document_id))
+        object.__setattr__(self, "version_id", _canonical_uuid(self.version_id))
         if not isinstance(self.collection_revision, int) or self.collection_revision < 0:
             raise ValueError("collection_revision must be a non-negative integer")
         if not isinstance(self.document_type, str) or not self.document_type.strip():
@@ -138,8 +135,7 @@ class SettingContextBundle:
     documents: tuple[SettingDocumentSnapshot, ...] = ()
 
     def __post_init__(self) -> None:
-        if not _valid_uuid(self.setting_collection_id):
-            raise ValueError("setting_collection_id must be a non-zero UUID")
+        object.__setattr__(self, "setting_collection_id", _canonical_uuid(self.setting_collection_id))
         if not isinstance(self.collection_revision, int) or self.collection_revision < 0:
             raise ValueError("collection_revision must be a non-negative integer")
         seen_doc_ids: set[UUID] = set()
@@ -222,6 +218,7 @@ class SettingContextBundle:
 
     def as_writer_contexts(self, project_id: UUID) -> tuple[WriterContextSnapshot, ...]:
         snapshots: list[WriterContextSnapshot] = []
+        canonical_project_id = _canonical_uuid(project_id)
         for doc in self.documents:
             stripped = doc.content.strip()
             if not stripped:
@@ -235,7 +232,7 @@ class SettingContextBundle:
             content = stripped if len(stripped) <= 32_768 else stripped[:32_768].rsplit(" ", 1)[0]
             snapshots.append(
                 WriterContextSnapshot(
-                    project_id=project_id,
+                    project_id=canonical_project_id,
                     document_id=doc.document_id,
                     version_id=doc.version_id,
                     kind=kind,
@@ -250,6 +247,7 @@ class SettingContextBundle:
         if role in {ReviewerRole.EDITOR, ReviewerRole.CHIEF_EDITOR}:
             return ()
         snapshots: list[ReviewContextSnapshot] = []
+        canonical_project_id = _canonical_uuid(project_id)
         for doc in self.documents:
             stripped = doc.content.strip()
             if not stripped:
@@ -263,7 +261,7 @@ class SettingContextBundle:
             content = stripped if len(stripped) <= 32_768 else stripped[:32_768].rsplit(" ", 1)[0]
             snapshots.append(
                 ReviewContextSnapshot(
-                    project_id=project_id,
+                    project_id=canonical_project_id,
                     document_id=doc.document_id,
                     version_id=doc.version_id,
                     kind=kind,
@@ -290,11 +288,14 @@ class SettingContextResolver:
             raise NotFoundError("Project not found.")
 
         if project.setting_collection_id is not None:
-            return await self.resolve_for_collection(
+            collection_bundle = await self.resolve_for_collection(
                 project.setting_collection_id, allowed_types=allowed_types
             )
+            if collection_bundle.documents:
+                return collection_bundle
 
-        # Legacy fallback when project has no setting_collection_id bound
+        # Legacy fallback when project has no setting_collection_id bound or collection has no documents
+        target_collection_id = project.setting_collection_id or project_id
         types_to_query = (
             [t.value if isinstance(t, DocumentType) else str(t) for t in allowed_types]
             if allowed_types
@@ -334,12 +335,12 @@ class SettingContextResolver:
                 raise WorkflowStateError(f"Content hash mismatch for legacy document {doc.id}.")
             snapshots.append(
                 SettingDocumentSnapshot(
-                    setting_collection_id=project_id,
+                    setting_collection_id=target_collection_id,
                     collection_revision=1,
                     document_id=doc.id,
                     version_id=version.id,
                     document_type=doc.type,
-                    title=doc.title,
+                    title=doc.title or "",
                     path=doc.path,
                     content=content,
                     content_hash=version.content_hash,
@@ -347,7 +348,7 @@ class SettingContextResolver:
                 )
             )
         return SettingContextBundle(
-            setting_collection_id=project_id,
+            setting_collection_id=target_collection_id,
             collection_revision=1,
             documents=tuple(snapshots),
         )
@@ -471,7 +472,10 @@ class SettingContextResolver:
             if doc is None:
                 raise WorkflowStateError(f"Document {doc_snap.document_id} not found in database.")
             if project.setting_collection_id is not None:
-                if doc.setting_collection_id != bundle.setting_collection_id:
+                if (
+                    doc.setting_collection_id != bundle.setting_collection_id
+                    and doc.project_id != project_id
+                ):
                     raise WorkflowStateError(
                         f"Document {doc.id} belongs to collection {doc.setting_collection_id}, "
                         f"not {bundle.setting_collection_id}"
