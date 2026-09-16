@@ -228,6 +228,19 @@ AVAILABLE_ASSISTANT_TOOLS: list[dict[str, Any]] = [
             },
         },
     },
+    {
+        "name": "get_setting_context",
+        "description": "查询当前小说关联设定集的修订号、哈希与全部设定条目（世界观、势力、地理、历史、角色卡等）。",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "document_type": {
+                    "type": "string",
+                    "description": "设定文档类型过滤（可选，例如 world_overview, power_system, factions, geography, history, character_profile, glossary）",
+                }
+            },
+        },
+    },
 ]
 
 
@@ -764,6 +777,36 @@ async def tool_trigger_feedback_revision(
     }
 
 
+async def tool_get_setting_context(
+    session: AsyncSession,
+    project_id: UUID,
+    document_type: str | None = None,
+) -> dict[str, Any]:
+    from app.services.setting_context_resolver import SettingContextResolver
+    resolver = SettingContextResolver(session)
+    allowed = [document_type] if document_type else None
+    bundle = await resolver.resolve_for_project(project_id, allowed_types=allowed)
+    return {
+        "project_id": str(project_id),
+        "setting_collection_id": str(bundle.setting_collection_id),
+        "collection_revision": bundle.collection_revision,
+        "bundle_hash": bundle.bundle_hash,
+        "document_count": len(bundle.documents),
+        "documents": [
+            {
+                "document_id": str(d.document_id),
+                "version_id": str(d.version_id),
+                "type": d.document_type,
+                "title": d.title,
+                "path": d.path,
+                "content_hash": d.content_hash,
+                "content_preview": d.content[:200] + ("..." if len(d.content) > 200 else ""),
+            }
+            for d in bundle.documents
+        ],
+    }
+
+
 async def execute_assistant_tool(
     session: AsyncSession,
     project_id: UUID,
@@ -792,6 +835,9 @@ async def execute_assistant_tool(
     elif tool_name == "get_software_guidance":
         topic = str(arguments.get("topic", "general"))
         return tool_get_software_guidance(topic)
+    elif tool_name == "get_setting_context":
+        document_type = arguments.get("document_type")
+        return await tool_get_setting_context(session, project_id, document_type=document_type)
     elif tool_name == "create_chapter":
         title = arguments.get("title")
         return await tool_create_chapter(session, project_id, title)

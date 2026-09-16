@@ -116,6 +116,14 @@ class ProjectCreationService:
         """Generate and review synchronously; request is transient by construction."""
         if request is None:
             return await self._start_legacy(project_id)
+        if request.setting_context is None:
+            try:
+                from app.services.setting_context_resolver import SettingContextResolver
+                resolver = SettingContextResolver(self.session)
+                bundle = await resolver.resolve_for_project(project_id)
+                request = request.model_copy(update={"setting_context": bundle.to_dict()})
+            except Exception:
+                pass
         request = request.model_copy(update={"project_id": project_id, "workflow_run_id": None})
         # Provider work is deliberately outside a database transaction.  The
         # project existence and active-run checks are repeated under the final

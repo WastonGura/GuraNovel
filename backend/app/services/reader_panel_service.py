@@ -1326,6 +1326,14 @@ class ReaderPanelService:
         }
         if ready_binding is not None:
             request_snapshot["reader_panel_revision_ready_binding"] = dict(ready_binding)
+        if project.setting_collection_id is not None:
+            try:
+                from app.services.setting_context_resolver import SettingContextResolver
+                resolver = SettingContextResolver(self._db)
+                setting_bundle = await resolver.resolve_for_project(project_id)
+                request_snapshot["setting_context"] = setting_bundle.to_evidence()
+            except Exception:
+                pass
 
         # 2. Manual starts retain their existing request/idempotency replay behavior.
         existing_session = None

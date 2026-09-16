@@ -77,6 +77,18 @@ class OpenAICompatibleConceptProvider(ConceptProvider):
             f"Preferred Genres: {', '.join(request.preferred_genres) if request.preferred_genres else 'None specified'}",
             f"Disliked Elements: {', '.join(request.disliked_elements) if request.disliked_elements else 'None specified'}",
             f"Style Preference: {request.style_preference or 'None specified'}",
+        ]
+        if request.setting_context and isinstance(request.setting_context, dict):
+            lines.append("")
+            lines.append("--- Bound Setting Collection Context ---")
+            docs = request.setting_context.get("documents") or []
+            for doc in docs:
+                if isinstance(doc, dict):
+                    t = str(doc.get("document_type") or doc.get("type", "setting"))
+                    title = str(doc.get("title", "Untitled"))
+                    c = str(doc.get("content", ""))[:200]
+                    lines.append(f"[{t.upper()} - {title}]: {c}")
+        lines.extend([
             "",
             "--- Output Requirements ---",
             "Generate between 1 and 5 distinct, high-concept novel options conforming strictly to the declared JSON schema.",
@@ -87,7 +99,7 @@ class OpenAICompatibleConceptProvider(ConceptProvider):
             "- premise: single-line core dramatic premise (no newlines, max 2000 characters)",
             "- genres: list of 1 to 6 genre strings (no commas or newlines, e.g. ['fantasy', 'mystery'])",
             "Ensure all option IDs are unique.",
-        ]
+        ])
         return "\n".join(lines)
 
     async def generate_concepts(
