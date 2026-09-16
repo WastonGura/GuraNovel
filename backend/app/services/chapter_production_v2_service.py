@@ -1608,7 +1608,13 @@ class ChapterProductionV2Service:
         if type(metadata) is dict and "reviewer_claim" not in metadata:
             metadata = {**metadata, "reviewer_claim": None}
             run.metadata_ = metadata
-        if type(metadata) is not dict or set(metadata) - {"review_revision_intent", "studio_feedback_revision"} not in (legacy, expected):
+        if type(metadata) is not dict or set(metadata) - {
+            "review_revision_intent",
+            "studio_feedback_revision",
+            "setting_context_evidence",
+        } not in (legacy, expected):
+            raise _invalid()
+        if "setting_context_evidence" in metadata and type(metadata["setting_context_evidence"]) is not dict:
             raise _invalid()
         revision_intent(run)
         from app.services.studio_feedback_revision import feedback_revision_intent

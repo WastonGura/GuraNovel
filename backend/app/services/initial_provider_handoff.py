@@ -11,57 +11,41 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agents.chapter_writer_agents import WriterAgent
 from app.agents.chapter_writer_contracts import (
-    AllowedChapterSegment,
-    ApprovedOutlineReference,
-    CandidateChapterOutput,
-    InitialDraftRequest,
+    AllowedChapterSegment, ApprovedOutlineReference, CandidateChapterOutput,
+    InitialDraftRequest, WriterContextSnapshot,
 )
+from app.services.setting_context_resolver import SettingContextBundle, SettingContextResolver
 from app.documents.chapter_segments import CURRENT_CHAPTER_SEGMENTER_VERSION
 from app.llm import (
-    ProviderConfigurationError,
-    ProviderInvalidOutputError,
-    ProviderRateLimitedError,
-    ProviderTimeoutError,
-    ProviderUnavailableError,
+    ProviderConfigurationError, ProviderInvalidOutputError, ProviderRateLimitedError,
+    ProviderTimeoutError, ProviderUnavailableError,
 )
 from app.models import DocumentVersion, WorkflowCheckpoint, WorkflowRun
 from app.services.chapter_phase_session_lease import ChapterPhaseSessionLease
 from app.services.chapter_production_repository import (
-    ChapterProductionRepository,
-    _ChapterProductionRepositoryValidationError,
+    ChapterProductionRepository, _ChapterProductionRepositoryValidationError,
 )
 from app.services.chapter_production_v2_contracts import (
-    ChapterProductionV2CommitIndeterminateError,
-    ChapterProductionV2ProviderError,
-    ChapterProductionV2ReconciliationError,
-    ChapterProductionV2ValidationError,
+    ChapterProductionV2CommitIndeterminateError, ChapterProductionV2ProviderError,
+    ChapterProductionV2ReconciliationError, ChapterProductionV2ValidationError,
 )
 from app.services.document_service import DocumentService
 from app.services.initial_bootstrap_evidence import (
-    InitialBootstrapBinding,
-    pristine_checkpoint,
-    pristine_run_metadata,
+    InitialBootstrapBinding, pristine_checkpoint, pristine_run_metadata,
 )
 from app.services.chapter_production_runtime import initial_runtime_marker
 from app.services.initial_generation_snapshot import (
-    InitialGenerationScope,
-    InitialGenerationSnapshot,
+    InitialGenerationScope, InitialGenerationSnapshot,
 )
 from app.services.initial_request_snapshot import validate_initial_request_snapshot
 from app.services.initial_run_bootstrap import InitialRunBootstrap
 from app.services.provider_attempt_contracts import (
-    CONTRACT_VERSION,
-    ProviderAttempt,
-    ProviderAttemptKind,
-    ProviderAttemptStatus,
-    initial_operation_key,
-    new_attempt_id,
+    CONTRACT_VERSION, ProviderAttempt, ProviderAttemptKind, ProviderAttemptStatus,
+    initial_operation_key, new_attempt_id,
 )
 from app.services.provider_attempt_store import ProviderAttemptScope, ProviderAttemptStore
 from app.workflows.chapter_production import (
-    ChapterFailureCode,
-    ChapterProductionState,
-    ChapterProductionStatus,
+    ChapterFailureCode, ChapterProductionState, ChapterProductionStatus,
 )
 
 
@@ -150,6 +134,8 @@ class _Evidence:
     operation_key: str
     segment_map: object = field(repr=False)
     outline_content: str = field(default="", repr=False)
+    contexts: tuple[WriterContextSnapshot, ...] = field(default=(), repr=False)
+    setting_bundle: SettingContextBundle | None = field(default=None, repr=False)
 
 
 class _InitialEvidencePhase:
@@ -200,7 +186,16 @@ class _InitialEvidencePhase:
         attempt = self._attempt(run, pristine_run_metadata(binding), key)
         state = self._history(run, checkpoints, binding)
         self._align(attempt, state, checkpoints[-1].checkpoint_index, key)
-        return _Evidence(run, checkpoints, state, attempt, key, segment_map, outline_content)
+        ev = run.metadata_.get("setting_context_evidence") if isinstance(run.metadata_, dict) else None
+        res = SettingContextResolver(self.session)
+        try:
+            bundle = await (res.load_bundle_from_evidence(project_id, ev) if ev is not None else res.resolve_for_project(project_id))
+            contexts = bundle.as_writer_contexts(project_id)
+        except Exception:
+            if ev is not None:
+                raise _reconcile() from None
+            bundle, contexts = None, ()
+        return _Evidence(run, checkpoints, state, attempt, key, segment_map, outline_content, contexts, bundle)
 
     @staticmethod
     def _attempt(
@@ -215,6 +210,8 @@ class _InitialEvidencePhase:
             expected["chapter_production_runtime"] = runtime
         else:
             expected.pop("chapter_production_runtime", None)
+        if "setting_context_evidence" in run.metadata_:
+            expected["setting_context_evidence"] = run.metadata_["setting_context_evidence"]
         payload = run.metadata_.get("provider_attempt")
         attempt = None if payload is None else ProviderAttempt.from_payload(payload)
         if (
@@ -292,6 +289,7 @@ class _InitialEvidencePhase:
                 segment_id=UUID(str(item.segment_id)), index=item.ordinal,
                 title=item.structural_path, brief=item.content,
             ) for item in segment_map.segments),
+            contexts=evidence.contexts,
         ))
 
     @staticmethod

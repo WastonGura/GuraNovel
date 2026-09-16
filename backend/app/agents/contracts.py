@@ -27,6 +27,7 @@ class ConceptAgentRequest(_StrictConceptModel):
     preferred_genres: list[str] = Field(default_factory=list, max_length=10)
     disliked_elements: list[str] = Field(default_factory=list, max_length=10)
     style_preference: str | None = Field(default=None, min_length=1, max_length=500)
+    setting_context: dict[str, object] | None = Field(default=None)
 
     @field_validator("user_seed")
     @classmethod

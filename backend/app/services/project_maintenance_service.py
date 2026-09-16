@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
 
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -818,10 +818,19 @@ class ProjectMaintenanceService:
         chapter_ids = {
             item.existing_chapter_id for item in items if item.existing_chapter_id is not None
         }
+        project = await self.session.get(Project, project_id)
+        owner_filter = (
+            or_(
+                Document.project_id == project_id,
+                Document.setting_collection_id == project.setting_collection_id,
+            )
+            if project is not None and project.setting_collection_id is not None
+            else (Document.project_id == project_id)
+        )
         owned_documents = set(
             await self.session.scalars(
                 select(Document.id).where(
-                    Document.project_id == project_id,
+                    owner_filter,
                     Document.id.in_(document_ids),
                 )
             )
@@ -1609,11 +1618,20 @@ class ProjectMaintenanceService:
             operation.target.document_id: operation.target.current_version_id
             for operation in plan.operations
         }
+        project = await self.session.get(Project, locked.run.project_id)
+        owner_filter = (
+            or_(
+                Document.project_id == locked.run.project_id,
+                Document.setting_collection_id == project.setting_collection_id,
+            )
+            if project is not None and project.setting_collection_id is not None
+            else (Document.project_id == locked.run.project_id)
+        )
         documents = list(
             await self.session.scalars(
                 select(Document)
                 .where(
-                    Document.project_id == locked.run.project_id,
+                    owner_filter,
                     Document.id.in_(target_versions),
                     Document.type.not_in(
                         [
@@ -2101,12 +2119,21 @@ class ProjectMaintenanceService:
             or locked.state.revision_plan_document_id is not None
         ):
             raise WorkflowStateError("Maintenance revision lineage is invalid.")
+        project = await self.session.get(Project, project_id)
+        owner_filter = (
+            or_(
+                Document.project_id == project_id,
+                Document.setting_collection_id == project.setting_collection_id,
+            )
+            if project is not None and project.setting_collection_id is not None
+            else (Document.project_id == project_id)
+        )
         document_rows = list(
             (
                 await self.session.execute(
                     select(Document.id, Document.current_version_id)
                     .where(
-                        Document.project_id == project_id,
+                        owner_filter,
                         Document.current_version_id.is_not(None),
                         Document.type.not_in(
                             [
@@ -2377,10 +2404,19 @@ class ProjectMaintenanceService:
             for item in affected_items
             if item.existing_document_id is not None
         }
+        project = await self.session.get(Project, project_id)
+        owner_filter = (
+            or_(
+                Document.project_id == project_id,
+                Document.setting_collection_id == project.setting_collection_id,
+            )
+            if project is not None and project.setting_collection_id is not None
+            else (Document.project_id == project_id)
+        )
         owned_affected_document_ids = set(
             await self.session.scalars(
                 select(Document.id).where(
-                    Document.project_id == project_id,
+                    owner_filter,
                     Document.id.in_(affected_document_ids),
                 )
             )
@@ -2526,11 +2562,19 @@ class ProjectMaintenanceService:
             raise NotFoundError("Project not found.")
         if project.current_workflow_id is not None:
             raise ConflictError("The project already has an active workflow.")
+        owner_filter = (
+            or_(
+                Document.project_id == project_id,
+                Document.setting_collection_id == project.setting_collection_id,
+            )
+            if project.setting_collection_id is not None
+            else (Document.project_id == project_id)
+        )
         documents = list(
             await self.session.scalars(
                 select(Document)
                 .where(
-                    Document.project_id == project_id,
+                    owner_filter,
                     Document.current_version_id.is_not(None),
                     Document.type.not_in(
                         [

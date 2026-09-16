@@ -18,6 +18,11 @@ from app.agents import (
     ReviewContextKind,
     ReviewContextSnapshot,
     ReviewSegmentSnapshot,
+    ReviewerRole,
+)
+from app.services.setting_context_resolver import (
+    SettingContextBundle,
+    SettingContextResolver,
 )
 from app.documents.chapter_segments import ChapterSegmentMap
 from app.models import (
@@ -96,6 +101,7 @@ class ReviewClaimContext:
     stage: ChapterReviewStage
     request_hash: str
     operation_key: str
+    setting_bundle: SettingContextBundle | None = None
 
 
 def _review_stage_for_status(status: ChapterProductionStatus) -> ChapterReviewStage | None:
@@ -285,6 +291,37 @@ async def claim_current_review(
         raise _invalid() from None
 
 
+async def _resolve_review_setting_bundle(
+    service: ChapterReviewService,
+    project_id: UUID,
+    run: WorkflowRun,
+    stage: ChapterReviewStage,
+) -> SettingContextBundle | None:
+    if stage != ChapterReviewStage.LORE:
+        return None
+    evidence_data = run.metadata_.get("setting_context_evidence") if isinstance(run.metadata_, dict) else None
+    resolver = SettingContextResolver(service.session)
+    if evidence_data is not None:
+        try:
+            return await resolver.load_bundle_from_evidence(project_id, evidence_data)
+        except Exception:
+            raise ChapterProductionV2ReconciliationError() from None
+    bundle = await resolver.resolve_for_project(
+        project_id,
+        allowed_types=[
+            DocumentType.WORLD_OVERVIEW,
+            DocumentType.POWER_SYSTEM,
+            DocumentType.FACTIONS,
+            DocumentType.GEOGRAPHY,
+            DocumentType.HISTORY,
+            DocumentType.CHARACTER_PROFILE,
+            DocumentType.GLOSSARY,
+        ],
+    )
+    run.metadata_ = {**run.metadata_, "setting_context_evidence": bundle.to_evidence()}
+    return bundle
+
+
 async def build_review_context_locked(
     service: ChapterReviewService,
     *,
@@ -319,7 +356,10 @@ async def build_review_context_locked(
     )
     service._validate_outline_metadata(metadata, outline, outline_version)
     outline_content = service._verified_snapshot_content(outline, outline_version)
-    contexts = await review_context_snapshots(service, project_id=project_id, stage=stage)
+    setting_bundle = await _resolve_review_setting_bundle(service, project_id, run, stage)
+    contexts = await review_context_snapshots(
+        service, project_id=project_id, stage=stage, setting_bundle=setting_bundle
+    )
     request, request_hash, operation_key = _build_review_request(
         project_id=project_id,
         chapter_id=chapter_id,
@@ -346,25 +386,40 @@ async def build_review_context_locked(
         stage,
         request_hash,
         operation_key,
+        setting_bundle,
     )
 
 
 async def review_context_snapshots(
-    service: ChapterReviewService, *, project_id: UUID, stage: ChapterReviewStage
+    service: ChapterReviewService,
+    *,
+    project_id: UUID,
+    stage: ChapterReviewStage,
+    setting_bundle: SettingContextBundle | None = None,
 ) -> tuple[ReviewContextSnapshot, ...]:
+    setting_snapshots: tuple[ReviewContextSnapshot, ...] = ()
     if stage in {ChapterReviewStage.EDITOR, ChapterReviewStage.CHIEF_EDITOR}:
         allowed_types = {
             DocumentType.STYLE_GUIDE.value: ReviewContextKind.STYLE_GUIDE,
             DocumentType.CHAPTER_SUMMARY.value: ReviewContextKind.PREVIOUS_CHAPTER_SUMMARY,
         }
     else:
+        if setting_bundle is None:
+            resolver = SettingContextResolver(service.session)
+            setting_bundle = await resolver.resolve_for_project(
+                project_id,
+                allowed_types=[
+                    DocumentType.WORLD_OVERVIEW,
+                    DocumentType.POWER_SYSTEM,
+                    DocumentType.FACTIONS,
+                    DocumentType.GEOGRAPHY,
+                    DocumentType.HISTORY,
+                    DocumentType.CHARACTER_PROFILE,
+                    DocumentType.GLOSSARY,
+                ],
+            )
+        setting_snapshots = setting_bundle.as_review_contexts(project_id, role=ReviewerRole.LORE)
         allowed_types = {
-            DocumentType.WORLD_OVERVIEW.value: ReviewContextKind.LORE_BOUNDARY,
-            DocumentType.POWER_SYSTEM.value: ReviewContextKind.LORE_BOUNDARY,
-            DocumentType.FACTIONS.value: ReviewContextKind.LORE_BOUNDARY,
-            DocumentType.GEOGRAPHY.value: ReviewContextKind.LORE_BOUNDARY,
-            DocumentType.HISTORY.value: ReviewContextKind.TIMELINE,
-            DocumentType.CHARACTER_PROFILE.value: ReviewContextKind.CHARACTER_STATE,
             DocumentType.MAIN_CAST.value: ReviewContextKind.CHARACTER_STATE,
             DocumentType.FORESHADOWING.value: ReviewContextKind.FORESHADOWING,
             DocumentType.UNRESOLVED_THREADS.value: ReviewContextKind.FORESHADOWING,
@@ -384,7 +439,7 @@ async def review_context_snapshots(
             .with_for_update()
         )
     )
-    snapshots: list[ReviewContextSnapshot] = []
+    snapshots: list[ReviewContextSnapshot] = list(setting_snapshots)
     for document in documents:
         version_id = document.current_version_id
         if version_id is None:
