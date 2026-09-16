@@ -6,7 +6,7 @@ from fastapi import APIRouter, Depends, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_db_session, get_project_workspace
-from app.api.schemas_projects import CreateProjectRequest, ProjectResponse
+from app.api.schemas_projects import CreateProjectRequest, ProjectResponse, UpdateProjectRequest
 from app.models import Project
 from app.services import ProjectService
 from app.workspace import ProjectWorkspace
@@ -33,3 +33,15 @@ async def list_projects(session: AsyncSession = Depends(get_db_session)) -> list
 @router.get("/{project_id}", response_model=ProjectResponse)
 async def get_project(project_id: UUID, session: AsyncSession = Depends(get_db_session)) -> Project:
     return await ProjectService(session).get_project(project_id)
+
+
+@router.patch("/{project_id}", response_model=ProjectResponse)
+async def update_project(
+    project_id: UUID,
+    payload: UpdateProjectRequest,
+    session: AsyncSession = Depends(get_db_session),
+) -> Project:
+    data = payload.model_dump(exclude_unset=True)
+    if "metadata_" in data:
+        data["metadata"] = data.pop("metadata_")
+    return await ProjectService(session).update_project(project_id, **data)
