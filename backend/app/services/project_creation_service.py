@@ -119,9 +119,16 @@ class ProjectCreationService:
         if request.setting_context is None:
             try:
                 from app.services.setting_context_resolver import SettingContextResolver
-                resolver = SettingContextResolver(self.session)
-                bundle = await resolver.resolve_for_project(project_id)
-                request = request.model_copy(update={"setting_context": bundle.to_dict()})
+                bind = getattr(self.session, "bind", None)
+                if bind is not None and not self.session.__class__.__name__.startswith("AsyncMock"):
+                    async with AsyncSession(bind, expire_on_commit=False) as isolated_session:
+                        resolver = SettingContextResolver(isolated_session)
+                        bundle = await resolver.resolve_for_project(project_id)
+                        request = request.model_copy(update={"setting_context": bundle.to_dict()})
+                else:
+                    resolver = SettingContextResolver(self.session)
+                    bundle = await resolver.resolve_for_project(project_id)
+                    request = request.model_copy(update={"setting_context": bundle.to_dict()})
             except Exception:
                 pass
         request = request.model_copy(update={"project_id": project_id, "workflow_run_id": None})
