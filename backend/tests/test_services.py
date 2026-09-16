@@ -44,6 +44,10 @@ EXPECTED_EXPORTS = {
     "ReaderPanelQuorumError": "app.services.reader_panel_service",
     "ReaderPanelStaleVersionError": "app.services.reader_panel_service",
     "ReaderPanelSessionResult": "app.services.reader_panel_service",
+    "SETTING_DOCUMENT_TYPES": "app.services.setting_context_resolver",
+    "SettingDocumentSnapshot": "app.services.setting_context_resolver",
+    "SettingContextBundle": "app.services.setting_context_resolver",
+    "SettingContextResolver": "app.services.setting_context_resolver",
 }
 
 
