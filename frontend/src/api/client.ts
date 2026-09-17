@@ -12,6 +12,7 @@ export interface Project {
   target_platform: string | null
   status: string
   workspace_root: string
+  setting_collection_id?: string | null
   metadata: Metadata
   created_at: string
   updated_at: string
@@ -22,6 +23,15 @@ export interface CreateProjectRequest {
   title: string
   genre?: string | null
   target_platform?: string | null
+  setting_collection_id?: string | null
+  metadata?: Metadata
+}
+
+export interface UpdateProjectRequest {
+  title?: string | null
+  genre?: string | null
+  target_platform?: string | null
+  setting_collection_id?: string | null
   metadata?: Metadata
 }
 
@@ -470,7 +480,9 @@ function decodeProject(value: unknown): Project {
   return {
     id: string(data.id), slug: string(data.slug), title: string(data.title), genre: nullableString(data.genre),
     target_platform: nullableString(data.target_platform), status: string(data.status),
-    workspace_root: string(data.workspace_root), metadata: metadata(data.metadata),
+    workspace_root: string(data.workspace_root),
+    setting_collection_id: data.setting_collection_id ? string(data.setting_collection_id) : null,
+    metadata: metadata(data.metadata),
     created_at: string(data.created_at), updated_at: string(data.updated_at),
   }
 }
@@ -705,6 +717,10 @@ export function getProject(projectId: string): Promise<Project> {
   return request('GET', () => apiPath('projects', projectId), decodeProject)
 }
 
+export function updateProject(projectId: string, payload: UpdateProjectRequest): Promise<Project> {
+  return request('PATCH', () => apiPath('projects', projectId), decodeProject, payload)
+}
+
 export function listChapters(projectId: string): Promise<Chapter[]> {
   return request('GET', () => apiPath('projects', projectId, 'chapters'), (value) => {
     if (!Array.isArray(value)) throw invalidResponse()
@@ -881,6 +897,12 @@ export function patchDocument(documentId: string, payload: UpdateDocumentRequest
 
 export function deleteDocument(documentId: string): Promise<void> {
   return request('DELETE', () => apiPath('documents', documentId), () => undefined)
+}
+
+export function createSettingCollection(
+  payload: CreateSettingCollectionRequest
+): Promise<SettingCollection> {
+  return request('POST', () => apiPath('setting-collections'), decodeSettingCollection, payload)
 }
 
 export function getSettingCollection(collectionId: string): Promise<SettingCollection> {
