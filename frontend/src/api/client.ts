@@ -226,6 +226,27 @@ export interface CreateSettingDocumentRequest {
   metadata?: Metadata
 }
 
+export interface SettingProposalSourceTask {
+  workflow_run_id?: string | null
+  chapter_id?: string | null
+  agent_role?: string | null
+  novel_title?: string | null
+}
+
+export interface SettingChangeProposal {
+  id: string
+  setting_collection_id: string
+  target_document_id?: string | null
+  base_version_id?: string | null
+  title: string
+  category: string
+  proposed_content: string
+  reason: string
+  source_task?: SettingProposalSourceTask
+  status?: 'pending' | 'accepted' | 'rejected'
+  created_at?: string
+}
+
 export interface UpdateDocumentRequest {
   title?: string | null
   metadata?: Metadata
@@ -942,6 +963,18 @@ export function createCollectionDocument(
   collectionId: string, payload: CreateSettingDocumentRequest
 ): Promise<Document> {
   return request('POST', () => apiPath('setting-collections', collectionId, 'documents'), decodeDocument, payload)
+}
+
+export function applySettingProposal(
+  collectionId: string,
+  proposal: SettingChangeProposal
+): Promise<Document> {
+  return request(
+    'POST',
+    () => apiPath('setting-collections', collectionId, 'proposals', 'apply'),
+    decodeDocument,
+    proposal
+  )
 }
 
 

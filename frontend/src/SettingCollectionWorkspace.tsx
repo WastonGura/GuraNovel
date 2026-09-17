@@ -427,6 +427,7 @@ export default function SettingCollectionWorkspace() {
           collection={collection}
           backendNotes={isPreview ? undefined : notes}
           readOnly={isArchived}
+          referencingProjects={projects}
           onSaveNoteContent={isPreview ? undefined : handleSaveNoteContent}
           onRenameNote={isPreview ? undefined : handleRenameNote}
           onCreateNote={isPreview ? undefined : handleCreateNote}

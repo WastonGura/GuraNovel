@@ -153,6 +153,11 @@
 .setting-change-content { height: 0; }
 .setting-change.is-expanded .setting-change-content { height: auto; }
 .setting-change-body { display: flow-root; padding: 12px 0 4px; }
+.setting-change-meta-row { align-items: baseline; display: flex; font-size: 12px; gap: 8px; margin-bottom: 6px; }
+.setting-change-meta-row small { color: #888; flex-shrink: 0; font-size: 11px; }
+.setting-change-meta-row span { color: #333; word-break: break-word; }
+.setting-change-meta-row code { background: #f3f3f3; border-radius: 4px; font-family: monospace; font-size: 11px; padding: 1px 4px; }
+.setting-change-impact-warning { background: #fff8e6; border: 1px solid #ffe199; border-radius: 6px; color: #8a6d10; font-size: 11px; line-height: 1.5; margin-bottom: 8px; padding: 6px 10px; }
 .setting-change-content details { color: #999; font-size: 12px; margin-bottom: 12px; }
 .setting-change-content details p { max-height: 160px; overflow-y: auto; }
 .studio .setting-change-content textarea { field-sizing: content; font-size: 15px; line-height: 1.8; max-height: 260px; min-height: 100px; overflow-y: auto; width: 100%; }

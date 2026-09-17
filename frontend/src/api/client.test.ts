@@ -26,6 +26,7 @@ import {
   deleteDocument,
   updateProject,
   createSettingCollection,
+  applySettingProposal,
 } from './client'
 
 const project = {
@@ -564,4 +565,38 @@ describe('typed API client', () => {
       body: JSON.stringify(payload),
     }))
   })
+
+  it('applies setting proposal with POST', async () => {
+    const doc = {
+      id: 'doc-1',
+      project_id: null,
+      setting_collection_id: 'col-1',
+      chapter_id: null,
+      type: 'character_profile',
+      title: 'Agent Neo',
+      path: 'setting/agent-neo.md',
+      current_version_id: 'ver-2',
+      current_version: null,
+      metadata: {},
+      created_at: '2026-07-19T00:00:00Z',
+      updated_at: '2026-07-19T00:00:00Z',
+    }
+    mockJsonResponse(doc)
+    const proposal = {
+      id: 'prop-1',
+      setting_collection_id: 'col-1',
+      target_document_id: 'doc-1',
+      base_version_id: 'ver-1',
+      title: 'Agent Neo',
+      category: 'setting',
+      proposed_content: 'Updated cyberdeck lore',
+      reason: 'Chapter 2 progress',
+    }
+    await expect(applySettingProposal('col-1', proposal)).resolves.toEqual(doc)
+    expect(fetch).toHaveBeenCalledWith('/api/v1/setting-collections/col-1/proposals/apply', expect.objectContaining({
+      method: 'POST',
+      body: JSON.stringify(proposal),
+    }))
+  })
 })
+

@@ -16,6 +16,7 @@ from app.models import (
     Project,
     SettingCollection,
 )
+from app.agents.setting_proposal_contracts import SettingChangeProposal
 from app.services.document_service import (
     SETTING_COLLECTION_DOCUMENT_TYPES,
     DocumentService,
@@ -292,6 +293,90 @@ class SettingCollectionService:
             metadata=metadata,
         )
         return document
+
+    async def apply_setting_change_proposal(
+        self,
+        collection_id: UUID,
+        proposal: SettingChangeProposal,
+        *,
+        actor_user_id: UUID | None = None,
+    ) -> Document:
+        if proposal.setting_collection_id != collection_id:
+            raise ConflictError("Proposal setting collection does not match target collection.")
+
+        collection = await self.get_setting_collection(
+            collection_id, actor_user_id=actor_user_id
+        )
+        if collection.status == "archived":
+            raise ConflictError("Archived setting collection cannot be modified.")
+
+        doc_service = DocumentService(self.session)
+        source = DocumentSource.USER
+        if proposal.source_task.agent_role:
+            try:
+                source = DocumentSource(proposal.source_task.agent_role)
+            except ValueError:
+                source = DocumentSource.USER
+
+        if proposal.target_document_id is not None:
+            document = await self.session.get(Document, proposal.target_document_id)
+            if document is None or document.setting_collection_id != collection_id:
+                raise NotFoundError("Target setting document not found in collection.")
+
+            await doc_service.write_document(
+                document_id=proposal.target_document_id,
+                content=proposal.proposed_content,
+                source=source,
+                expected_current_version_id=proposal.base_version_id,
+                actor_user_id=actor_user_id,
+                agent_role=proposal.source_task.agent_role,
+                workflow_run_id=proposal.source_task.workflow_run_id,
+                change_summary=proposal.reason,
+            )
+            return await self.session.scalar(
+                select(Document)
+                .options(
+                    selectinload(Document.current_version),
+                    selectinload(Document.project),
+                    selectinload(Document.setting_collection),
+                )
+                .where(Document.id == proposal.target_document_id)
+            )
+        else:
+            import re
+            from uuid import uuid4
+
+            doc_type = (
+                DocumentType.WORLD_OVERVIEW
+                if proposal.category.lower() in ("world", "world_overview")
+                else DocumentType.CHARACTER_PROFILE
+            )
+            clean_title = re.sub(r"[^a-zA-Z0-9_-]", "-", proposal.title.lower()).strip("-")
+            slug = f"{clean_title[:30]}-{uuid4().hex[:6]}" if clean_title else f"note-{uuid4().hex[:8]}"
+            path = f"{proposal.category}/{slug}.md"
+
+            document = await doc_service.create_document(
+                setting_collection_id=collection_id,
+                document_type=doc_type,
+                title=proposal.title,
+                path=path,
+                content=proposal.proposed_content,
+                source=source,
+                actor_user_id=actor_user_id,
+                agent_role=proposal.source_task.agent_role,
+                workflow_run_id=proposal.source_task.workflow_run_id,
+                change_summary=proposal.reason,
+                metadata={"category": proposal.category},
+            )
+            return await self.session.scalar(
+                select(Document)
+                .options(
+                    selectinload(Document.current_version),
+                    selectinload(Document.project),
+                    selectinload(Document.setting_collection),
+                )
+                .where(Document.id == document.id)
+            )
 
     async def _lock_slug(self, slug: str) -> None:
         await self.session.execute(
