@@ -7,6 +7,9 @@ import App from './App'
 vi.mock('./api/client', () => ({
   listProjects: vi.fn(),
   createProject: vi.fn(),
+  updateProject: vi.fn(),
+  listSettingCollections: vi.fn().mockResolvedValue([]),
+  createSettingCollection: vi.fn(),
   getProject: vi.fn(),
   listChapters: vi.fn(),
   createChapter: vi.fn(),
@@ -53,7 +56,7 @@ const mockedApi = vi.mocked(api)
 function project(overrides: Partial<Project> = {}): Project {
   return {
     id: 'project-1', slug: 'archive-of-ash', title: 'Archive of Ash', genre: null,
-    target_platform: null, status: 'draft', workspace_root: '/workspace/archive-of-ash', metadata: {},
+    target_platform: null, setting_collection_id: null, status: 'draft', workspace_root: '/workspace/archive-of-ash', metadata: {},
     created_at: '2026-07-19T00:00:00Z', updated_at: '2026-07-19T00:00:00Z', ...overrides,
   }
 }

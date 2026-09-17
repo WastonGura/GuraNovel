@@ -24,6 +24,8 @@ import {
   createCollectionDocument,
   patchDocument,
   deleteDocument,
+  updateProject,
+  createSettingCollection,
 } from './client'
 
 const project = {
@@ -34,6 +36,7 @@ const project = {
   target_platform: null,
   status: 'draft',
   workspace_root: '/workspace/archive-of-ash',
+  setting_collection_id: null,
   metadata: {},
   created_at: '2026-07-19T00:00:00Z',
   updated_at: '2026-07-19T00:00:00Z',
@@ -509,6 +512,56 @@ describe('typed API client', () => {
     await expect(deleteDocument('doc-1')).resolves.toBeUndefined()
     expect(fetch).toHaveBeenCalledWith('/api/v1/documents/doc-1', expect.objectContaining({
       method: 'DELETE',
+    }))
+  })
+
+  it('creates a setting collection with POST', async () => {
+    const col = {
+      id: 'col-new',
+      owner_id: 'user-1',
+      slug: 'new-col',
+      title: '新设定集',
+      description: '测试描述',
+      status: 'active',
+      workspace_root: '/workspace/col-new',
+      revision: 1,
+      metadata: {},
+      created_at: '2026-07-19T00:00:00Z',
+      updated_at: '2026-07-19T00:00:00Z',
+    }
+    mockJsonResponse(col)
+    const payload = { slug: 'new-col', title: '新设定集', description: '测试描述' }
+    await expect(createSettingCollection(payload)).resolves.toEqual(col)
+    expect(fetch).toHaveBeenCalledWith('/api/v1/setting-collections', expect.objectContaining({
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }))
+  })
+
+  it('updates a project with PATCH', async () => {
+    const proj = {
+      id: 'proj-1',
+      slug: 'novel-one',
+      title: '新小说标题',
+      genre: '玄幻',
+      target_platform: '起点',
+      status: 'active',
+      workspace_root: '/workspace/proj-1',
+      setting_collection_id: 'col-123',
+      metadata: { introduction: '这是简介', labels: ['热血'] },
+      created_at: '2026-07-19T00:00:00Z',
+      updated_at: '2026-07-19T00:00:00Z',
+    }
+    mockJsonResponse(proj)
+    const payload = {
+      title: '新小说标题',
+      setting_collection_id: 'col-123',
+      metadata: { introduction: '这是简介', labels: ['热血'] },
+    }
+    await expect(updateProject('proj-1', payload)).resolves.toEqual(proj)
+    expect(fetch).toHaveBeenCalledWith('/api/v1/projects/proj-1', expect.objectContaining({
+      method: 'PATCH',
+      body: JSON.stringify(payload),
     }))
   })
 })

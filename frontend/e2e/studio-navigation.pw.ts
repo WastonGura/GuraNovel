@@ -17,6 +17,7 @@ test('Studio deep links, history, pending recovery and server chapter identity',
     const request = route.request(), path = request.url().replace(/^https?:\/\/[^/]+/, '').split('?')[0];
     const reply = (body: unknown) => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(body) });
     if (path === '/api/v1/projects') return reply([project]);
+    if (path === '/api/v1/setting-collections') return reply([]);
     if (path === `/api/v1/projects/${project.id}`) return reply(project);
     if (path === `/api/v1/projects/${project.id}/chapters`) {
       if (request.method() === 'POST') { creates++; const created = { ...chapter(createdId, 17), current_draft_document_id: null, title: '新章' }; chapters.push(created); return reply(created); }
