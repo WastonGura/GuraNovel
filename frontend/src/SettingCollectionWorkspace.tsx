@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { Link, useParams } from 'react-router-dom'
+import { Link, useLocation, useParams } from 'react-router-dom'
 import {
   ApiError,
   createCollectionDocument,
@@ -63,6 +63,9 @@ function slugify(text: string): string {
 
 export default function SettingCollectionWorkspace() {
   const { settingCollectionId = '' } = useParams<{ settingCollectionId: string }>()
+  const location = useLocation()
+  const returnTo = (location.state as { returnTo?: string } | null)?.returnTo || new URLSearchParams(location.search).get('returnTo')
+  const isPreview = settingCollectionId === 'preview'
   const [collection, setCollection] = useState<SettingCollection | null>(null)
   const [projects, setProjects] = useState<Project[]>([])
   const [notes, setNotes] = useState<SettingNote[]>([])
@@ -74,6 +77,26 @@ export default function SettingCollectionWorkspace() {
   useEffect(() => {
     let cancelled = false
     async function loadWorkspace() {
+      if (isPreview) {
+        setCollection({
+          id: 'preview',
+          title: '设定集（预览）',
+          slug: 'preview-collection',
+          description: '独立设定集预览',
+          status: 'active',
+          owner_id: 'preview',
+          workspace_root: '',
+          revision: 1,
+          metadata: {},
+          created_at: new Date().toISOString(),
+          updated_at: new Date().toISOString(),
+        })
+        setProjects([])
+        setNotes([])
+        setLoading(false)
+        return
+      }
+
       setLoading(true)
       setLoadError(null)
       try {
@@ -123,7 +146,7 @@ export default function SettingCollectionWorkspace() {
     return () => {
       cancelled = true
     }
-  }, [settingCollectionId])
+  }, [settingCollectionId, isPreview])
 
   const isArchived = collection?.status === 'archived'
 
@@ -133,6 +156,7 @@ export default function SettingCollectionWorkspace() {
     expectedVersionId?: string
   ): Promise<{ versionId: string } | 'conflict' | false> {
     if (isArchived) return false
+    if (isPreview) return { versionId: 'preview-ver' }
     const currentNote = notes.find((n) => n.id === noteId)
     if (!currentNote) return false
     const versionToExpect = expectedVersionId || currentNote.versionId
@@ -327,8 +351,12 @@ export default function SettingCollectionWorkspace() {
   return (
     <div className="setting-workspace-page studio">
       <header className="setting-workspace-header" aria-label="设定集工作区导航">
-        <Link to="/" className="setting-workspace-back" aria-label="返回项目列表">
-          ← 项目
+        <Link
+          to={returnTo || '/'}
+          className="setting-workspace-back"
+          aria-label={returnTo ? '返回创作区' : '返回项目列表'}
+        >
+          {returnTo ? '← 返回创作区' : '← 项目'}
         </Link>
         <div className="setting-workspace-header-title">
           <h1 className="setting-workspace-title">{collection.title}</h1>
@@ -394,15 +422,15 @@ export default function SettingCollectionWorkspace() {
 
       <main className="setting-workspace-body">
         <StudioSetting
-          preview={false}
+          preview={isPreview}
           hidden={false}
           collection={collection}
-          backendNotes={notes}
+          backendNotes={isPreview ? undefined : notes}
           readOnly={isArchived}
-          onSaveNoteContent={handleSaveNoteContent}
-          onRenameNote={handleRenameNote}
-          onCreateNote={handleCreateNote}
-          onDeleteNotes={handleDeleteNotes}
+          onSaveNoteContent={isPreview ? undefined : handleSaveNoteContent}
+          onRenameNote={isPreview ? undefined : handleRenameNote}
+          onCreateNote={isPreview ? undefined : handleCreateNote}
+          onDeleteNotes={isPreview ? undefined : handleDeleteNotes}
           syncUrlParams={true}
           defaultPinned={true}
           saveStatusText={saveStatusMessage}
