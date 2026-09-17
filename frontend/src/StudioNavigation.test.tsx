@@ -9,20 +9,21 @@ import { getChapterProductionRun, getChapterProductionReviewReport, listChapterP
 
 vi.mock('./api/client', async original => ({ ...await original<typeof import('./api/client')>(), writeStudioDraft: vi.fn(), approveStudioOutline: vi.fn(), createChapter: vi.fn(), getProject: vi.fn(), listChapters: vi.fn(), readDocumentContent: vi.fn(), readStudioFeedback: vi.fn(), submitStudioFeedback: vi.fn(), writeDocument: vi.fn(), writeStudioFeedback: vi.fn() }))
 vi.mock('./api/chapterProductionV2Client', async original => ({ ...await original<typeof import('./api/chapterProductionV2Client')>(), getChapterProductionRun: vi.fn(), getChapterProductionReviewReport: vi.fn(), listChapterProductionRuns: vi.fn(), resolveChapterProductionAction: vi.fn(), triggerChapterReview: vi.fn(), resumeChapterProduction: vi.fn(), startChapterProductionV2: vi.fn(), requestStudioFeedbackRevision: vi.fn() }))
-const project = (id: string) => ({ id, title: `Novel ${id}`, metadata: {} }) as Project
+const project = (id: string) => ({ id, title: `Novel ${id}`, setting_collection_id: `sc-${id}`, metadata: {} }) as Project
 const chapter = (id: string, number = 1) => ({ id, title: `Chapter ${id}`, chapter_number: number, metadata: {}, current_draft_document_id: `doc-${id}` }) as Chapter
 function Navigation() {
   const location = useLocation(), navigate = useNavigate()
-  return <><output data-testid="url">{location.pathname}{location.search}</output><button onClick={() => navigate(-1)}>History back</button><button onClick={() => navigate(1)}>History forward</button><Link to="/projects/q/studio/a">Other novel</Link></>
+  return <><output data-testid="url">{location.pathname}{location.search}</output><output data-testid="state">{JSON.stringify(location.state)}</output><button onClick={() => navigate(-1)}>History back</button><button onClick={() => navigate(1)}>History forward</button><Link to="/projects/q/studio/a">Other novel</Link></>
 }
-function open(path: string) { return render(<MemoryRouter initialEntries={[path]}><Navigation /><Routes><Route path="/projects/:projectId/studio" element={<Studio />} /><Route path="/projects/:projectId/studio/:chapterId" element={<Studio />} /></Routes></MemoryRouter>) }
+function open(path: string) { return render(<MemoryRouter initialEntries={[path]}><Navigation /><Routes><Route path="/projects/:projectId/studio" element={<Studio />} /><Route path="/projects/:projectId/studio/:chapterId" element={<Studio />} /><Route path="/setting-collections/:settingCollectionId" element={<div>Setting Collection</div>} /><Route path="/" element={<div>Dashboard</div>} /></Routes></MemoryRouter>) }
 beforeEach(() => {
   vi.resetAllMocks(); localStorage.clear(); sessionStorage.clear(); draftRecoveryCopies.clear()
   vi.mocked(listChapterProductionRuns).mockResolvedValue([])
   vi.mocked(writeStudioDraft).mockImplementation((_project, chapterId, payload) => writeDocument(`doc-${chapterId}`, payload))
   vi.mocked(getProject).mockImplementation(async id => project(id))
   vi.mocked(listChapters).mockResolvedValue([chapter('a'), chapter('b', 2)])
-  vi.mocked(readDocumentContent).mockImplementation(async id => ({ document_id: id, version_id: `${id}-v1`, content: `Text ${id}` }))
+  const docContents = new Map<string, string>()
+  vi.mocked(readDocumentContent).mockImplementation(async id => ({ document_id: id, version_id: versions.get(id) || `${id}-v1`, content: docContents.get(id) || `Text ${id}` }))
   const versions = new Map<string, string>()
   const feedbackData = new Map<string, { requirements: string; comments: StudioFeedback['comments']; revision: number }>()
   vi.mocked(readStudioFeedback).mockImplementation(async (_project, chapter_id, region) => {
@@ -39,7 +40,13 @@ beforeEach(() => {
     const data = feedbackData.get(`${chapter_id}:${region}`) || { requirements: '', comments: [], revision: 0 }
     return { id: payload.request_id, chapter_id, region, document_id: `doc-${chapter_id}`, source_version_id: payload.expected_current_version_id, feedback_revision: data.revision + 1, comments: data.comments, requirements: data.requirements, created_at: '2026-09-13T00:00:00Z' }
   })
-  vi.mocked(writeDocument).mockImplementation(async id => { versions.set(id, 'saved-v2'); return { id: 'saved-v2' } as Awaited<ReturnType<typeof writeDocument>> })
+  vi.mocked(writeDocument).mockImplementation(async (id, payload) => {
+    versions.set(id, 'saved-v2')
+    if (payload && 'content' in payload && typeof payload.content === 'string') {
+      docContents.set(id, payload.content)
+    }
+    return { id: 'saved-v2' } as Awaited<ReturnType<typeof writeDocument>>
+  })
 })
 afterEach(() => { cleanup(); vi.restoreAllMocks() })
 
@@ -213,25 +220,25 @@ it('recovers an existing drafting run after a lost response instead of starting 
   expect(startChapterProductionV2).not.toHaveBeenCalled()
 })
 
-it('deep-links chapters, flushes before selection, and restores chapter/page with browser history', async () => {
+it('deep-links chapters, flushes before selection, and restores chapter/setting navigation with browser history', async () => {
   open('/projects/p/studio/a')
   const input = await screen.findByRole('textbox', { name: '章节正文' })
   expect(input).toHaveValue('Text doc-a')
   fireEvent.change(input, { target: { value: 'Keep chapter A edit' } })
   fireEvent.click(screen.getByRole('button', { name: '展开章节侧边栏' }))
   fireEvent.click(screen.getByRole('button', { name: '第2话 Chapter b' }))
-  await waitFor(() => expect(screen.getByTestId('url')).toHaveTextContent('/projects/p/studio/b?view=Create'))
+  await waitFor(() => expect(screen.getByTestId('url')).toHaveTextContent('/projects/p/studio/b?stage=Draft'))
   expect(writeDocument).toHaveBeenCalledWith('doc-a', { content: 'Keep chapter A edit', expected_current_version_id: 'doc-a-v1' })
   expect(screen.getByRole('textbox', { name: '章节正文' })).toHaveValue('Text doc-b')
   fireEvent.click(screen.getByRole('button', { name: 'History back' }))
   await waitFor(() => expect(screen.getByRole('textbox', { name: '章节正文' })).toHaveValue('Keep chapter A edit'))
-  fireEvent.click(screen.getByRole('button', { name: '上一个页面' }))
-  await waitFor(() => expect(screen.getByTestId('url')).toHaveTextContent('view=Detail'))
-  expect(screen.queryByRole('complementary', { name: '章节侧边栏' })).not.toBeInTheDocument()
+  fireEvent.click(screen.getByRole('button', { name: '设置' }))
+  await waitFor(() => expect(screen.getByTestId('url')).toHaveTextContent('/setting-collections/sc-p'))
+  expect(screen.getByTestId('state')).toHaveTextContent('returnTo')
   fireEvent.click(screen.getByRole('button', { name: 'History back' }))
   expect(await screen.findByRole('textbox', { name: '章节正文' })).toHaveValue('Keep chapter A edit')
   fireEvent.click(screen.getByRole('button', { name: 'History forward' }))
-  expect(await screen.findByRole('region', { name: 'Detail 工作区' })).toBeInTheDocument()
+  await waitFor(() => expect(screen.getByTestId('url')).toHaveTextContent('/setting-collections/sc-p'))
 })
 
 it('does not show the previous project while another project loads or accept its stale response', async () => {
@@ -241,9 +248,9 @@ it('does not show the previous project while another project loads or accept its
   fireEvent.click(screen.getByRole('link', { name: 'Other novel' }))
   expect(await screen.findByRole('textbox', { name: '章节正文' })).toHaveValue('Text doc-a')
   await act(async () => finish(project('p')))
-  fireEvent.click(screen.getByRole('button', { name: '上一个页面' }))
-  const detail = await screen.findByRole('region', { name: 'Detail 工作区' })
-  expect(within(detail).getByRole('heading', { name: 'Novel q' })).toBeInTheDocument()
+  fireEvent.click(screen.getByRole('button', { name: '展开章节侧边栏' }))
+  const directory = screen.getByRole('region', { name: '章节目录' })
+  expect(within(directory).getByRole('heading', { name: 'Novel q' })).toBeInTheDocument()
   expect(screen.queryByRole('heading', { name: 'Novel p' })).not.toBeInTheDocument()
 })
 
@@ -327,10 +334,32 @@ it('creates a server chapter once, uses its assigned identity, and keeps the old
   expect(button).toBeDisabled()
   expect(screen.getByRole('link', { name: '前往现有工作台' })).toHaveAttribute('href', '/projects/p')
   await act(async () => finish({ ...chapter('server-chapter', 42), current_draft_document_id: null }))
-  expect(screen.getByTestId('url')).toHaveTextContent('/projects/p/studio/server-chapter?view=Create')
+  expect(screen.getByTestId('url')).toHaveTextContent('/projects/p/studio/server-chapter?stage=Outline')
   expect(screen.queryByRole('alert')).not.toBeInTheDocument()
   fireEvent.click(screen.getByRole('button', { name: '展开章节侧边栏' }))
   expect(screen.getByRole('button', { name: '第42话 Chapter server-chapter' })).toBeInTheDocument()
+})
+
+it('redirects legacy ?view=Detail to dashboard with project query', async () => {
+  open('/projects/p/studio?view=Detail')
+  await waitFor(() => expect(screen.getByTestId('url')).toHaveTextContent('/?project=p'))
+})
+
+it('redirects legacy ?view=Setting to setting collection workspace', async () => {
+  open('/projects/p/studio?view=Setting')
+  await waitFor(() => expect(screen.getByTestId('url')).toHaveTextContent('/setting-collections/sc-p'))
+})
+
+it('halts navigation and shows toast alert when autosave flush fails', async () => {
+  open('/projects/p/studio/a')
+  const input = await screen.findByRole('textbox', { name: '章节正文' })
+  expect(input).toHaveValue('Text doc-a')
+  fireEvent.change(input, { target: { value: 'Failing change' } })
+  vi.mocked(writeDocument).mockRejectedValueOnce(new Error('Network error'))
+  fireEvent.click(screen.getByRole('button', { name: '设置' }))
+  await waitFor(() => expect(screen.getByText('正文尚未保存，已暂停切换。请先重试自动保存。')).toBeInTheDocument())
+  expect(screen.getByTestId('url')).toHaveTextContent('/projects/p/studio/a')
+  expect(screen.getByRole('textbox', { name: '章节正文' })).toHaveValue('Failing change')
 })
 
 it('reports missing project with an alert when project does not exist', async () => {

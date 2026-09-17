@@ -8,20 +8,16 @@ import { initialPreview, newStudioChapter, outlineOptions, previewIssues, previe
 import StudioReader from './StudioReader'
 import { useDraftAutosave } from './useDraftAutosave'
 import OutlineEditor from './OutlineEditor'
-import StudioSetting from './StudioSetting'
-import StudioLabels from './StudioLabels'
 import { ChapterArchiveRow } from './StudioArchives'
 import { loadDraftArchives, archiveStorageKey, archiveTime, type DraftArchive } from './studioPreview'
 import { useCommentDrag } from './useCommentDrag'
-import { restoreOutlineComments, reanchorComments, reanchorFeedbackComments, type OutlineComment } from './studioPreview'
+import { restoreOutlineComments, reanchorFeedbackComments, type OutlineComment } from './studioPreview'
 import './studio.css'
 import { MotionFrame, TextSweep, StreamText } from './StudioMotion'
 import GlobalAssistant from './GlobalAssistant'
 
 const asset = (name: string) => name === 'setting' ? '/ui/icons/setting.svg' : `/ui/studio/${name}.svg${name === 'notification' ? '?solid=1' : ''}`
 const storageKey = 'guranovel:studio-preview:v1'
-const pages = ['Detail', 'Create', 'Setting'] as const
-type Page = typeof pages[number]
 type Focus = 'off' | 'auto' | 'manual'
 type Notice = { id: string; chapterId: string; message: string; read: boolean }
 
@@ -30,24 +26,6 @@ function IconButton({ icon, label, className = '', ...props }: ButtonHTMLAttribu
   return <button type="button" data-icon={icon} className={`studio-icon ${variants.length > 1 ? 'has-state' : ''} ${['send', 'review', 'restorepoint', 'publish', 'check'].includes(icon) ? 'is-round-asset' : ''} ${className}`} title={label} aria-label={label} {...props}>
     <span className={`studio-icon-glyph${variants.length > 1 && icon === variants[1] ? ' is-slashed' : ''}`} aria-hidden="true">{variants.map((name, index) => <img key={name} className={`${name === icon ? 'is-current' : 'is-outgoing'}${variants.length > 1 ? index === 0 ? ' icon-base' : ' icon-slashed' : ''}`} src={asset(name)} alt="" />)}</span>
   </button>
-}
-
-function PageName({ page, direction }: { page: Page; direction: number }) {
-  const previous = useRef(page)
-  const labels = useRef<HTMLSpanElement>(null)
-  useLayoutEffect(() => {
-    const before = previous.current
-    previous.current = page
-    if (before === page || window.matchMedia?.('(prefers-reduced-motion: reduce)').matches) return
-    labels.current?.querySelectorAll<HTMLElement>('[data-page]').forEach(label => {
-      const interrupted = label.getAnimations?.().some(animation => animation.playState === 'running')
-      const from = interrupted ? getComputedStyle(label).transform : undefined
-      label.getAnimations?.().forEach(animation => animation.cancel())
-      if (label.dataset.page === before) label.animate?.([{ opacity: 1, transform: from || 'translateY(0)' }, { opacity: 1, transform: `translateY(${direction * 100}%)` }], { duration: 440, easing: 'cubic-bezier(.22, 1, .36, 1)' })
-      if (label.dataset.page === page) label.animate?.([{ opacity: 1, transform: from || `translateY(${-direction * 100}%)` }, { opacity: 1, transform: 'translateY(0)' }], { duration: 440, easing: 'cubic-bezier(.22, 1, .36, 1)' })
-    })
-  }, [page, direction])
-  return <strong aria-label={page}><span className="studio-page-name" ref={labels} aria-hidden="true">{pages.map(name => <span key={name} data-page={name} className={name === page ? 'is-current' : ''}>{name}</span>)}</span></strong>
 }
 
 function Pin({ pinned, onChange, label }: { pinned: boolean; onChange: () => void; label: string }) {
@@ -260,13 +238,41 @@ export default function Studio() {
 
 function StudioLoader() {
   const { projectId, chapterId } = useParams()
+  const location = useLocation()
+  const navigate = useNavigate()
+  const requestedView = new URLSearchParams(location.search).get('view')
   const preview = !projectId
   const [loaded, setLoaded] = useState<{ title: string; chapters: StudioChapter[]; project?: Project } | null>(() => preview ? { title: '动量干涉：Momentum Zero', chapters: initialPreview() } : null)
   const [error, setError] = useState('')
+
+  useEffect(() => {
+    if (requestedView === 'Detail') {
+      if (projectId) navigate(`/?project=${encodeURIComponent(projectId)}`, { replace: true })
+      else navigate('/', { replace: true })
+      return
+    }
+    if (requestedView === 'Setting' && preview) {
+      navigate('/setting-collections/preview', { replace: true, state: { returnTo: location.pathname } })
+      return
+    }
+  }, [requestedView, projectId, preview, navigate, location.pathname])
+
   useEffect(() => {
     if (!projectId) return
     let active = true
     Promise.all([getProject(projectId), listChapters(projectId)]).then(async ([project, chapters]) => {
+      if (!active) return
+      if (requestedView === 'Setting') {
+        if (project.setting_collection_id) {
+          navigate(`/setting-collections/${encodeURIComponent(project.setting_collection_id)}`, {
+            replace: true,
+            state: { returnTo: `/projects/${encodeURIComponent(projectId)}/studio${chapterId ? `/${encodeURIComponent(chapterId)}` : ''}` },
+          })
+        } else {
+          navigate(`/?project=${encodeURIComponent(projectId)}`, { replace: true })
+        }
+        return
+      }
       const items = await Promise.all(chapters.map(async chapter => {
         const finalReady = !!chapter.final_document_id && await studioFinalIsComplete(projectId, chapter.id)
         const documentId = finalReady ? chapter.final_document_id : chapter.current_draft_document_id
@@ -293,7 +299,7 @@ function StudioLoader() {
       }
     })
     return () => { active = false }
-  }, [projectId])
+  }, [projectId, requestedView, chapterId, navigate])
   if (error) return <div className="studio-load"><p role="alert">{error}</p><button onClick={() => window.location.reload()}>重新加载</button><Link to="/">返回首页</Link></div>
   if (!loaded) return <div className="studio-load" role="status">正在打开创作区…</div>
   return <StudioWorkspace key={projectId || 'preview'} title={loaded.title} initial={loaded.chapters} initialId={chapterId} project={loaded.project} preview={preview} />
@@ -304,8 +310,6 @@ function StudioWorkspace({ title, initial, initialId, project, preview }: {
 }) {
   const navigate = useNavigate()
   const location = useLocation()
-  const requestedView = new URLSearchParams(location.search).get('view')
-  const routeView: Page = pages.includes(requestedView as Page) ? requestedView as Page : 'Create'
   const [chapters, setChapters] = useState(() => {
     if (!preview) return initial
     // Only restore editable text, never trust cached workflow/approval states.
@@ -342,18 +346,12 @@ function StudioWorkspace({ title, initial, initialId, project, preview }: {
   useEffect(() => () => { productionPending.current?.abort(); productionPending.current = null }, [])
   const archiveSaving = useRef(false)
   const archiveRequest = useRef<{ key: string; id: string } | null>(null)
-  const [page, setPage] = useState<Page>(routeView)
   const [routeSelection, setRouteSelection] = useState({ key: location.key, chapter: initialId })
-  const [pageDirection, setPageDirection] = useState(1)
   if (routeSelection.key !== location.key) {
     setRouteSelection({ key: location.key, chapter: initialId })
-    if (page !== routeView) { setPageDirection(pages.indexOf(routeView) > pages.indexOf(page) ? 1 : -1); setPage(routeView) }
     if (routeSelection.chapter !== initialId) { setSelectedId(initialId || chapters.at(-1)?.id || ''); if (archive?.chapterId !== initialId) setArchive(null) }
   }
   const [pageReady, setPageReady] = useState(true)
-  const pageSurfaces = useRef<HTMLDivElement>(null)
-  const previousPage = useRef<Page>(routeView)
-  const requestedPage = useRef<Page>(routeView)
   const transition = useRef<ViewTransition | null>(null)
   const navigation = useRef(0)
   const [commentRequest, setCommentRequest] = useState<{ id: string } | null>(null)
@@ -377,18 +375,16 @@ function StudioWorkspace({ title, initial, initialId, project, preview }: {
   const [locate, setLocate] = useState('')
   const [refresh, setRefresh] = useState(0)
   const [volumes, setVolumes] = useState([...new Set(chapters.map(chapter => chapter.volume))])
-  const [introduction, setIntroduction] = useState(typeof project?.metadata?.introduction === 'string' ? project.metadata.introduction : '')
   const [started] = useState(Date.now)
   const [seconds, setSeconds] = useState(0)
   const editor = useRef<StudioEditorHandle>(null)
-  const settingEditor = useRef<EditorHandle>(null)
   const modificationPanel = useRef<HTMLDivElement>(null)
   const timers = useRef<number[]>([])
   const currentChapters = useRef(chapters)
   const creatingChapter = useRef(false)
   const [chapterPending, setChapterPending] = useState(false)
   const selected = chapters.find(chapter => chapter.id === selectedId)
-  useLayoutEffect(() => () => { blockedMotion.current.forEach(animation => animation.cancel()); blockedMotion.current = [] }, [selected?.stage, page])
+  useLayoutEffect(() => () => { blockedMotion.current.forEach(animation => animation.cancel()); blockedMotion.current = [] }, [selected?.stage])
   const unread = notifications.filter(notice => !notice.read).length
   const hidden = focus !== 'off'
   const writing = selected && (archive || ['Draft', 'Review', 'Final'].includes(selected.stage))
@@ -413,20 +409,34 @@ function StudioWorkspace({ title, initial, initialId, project, preview }: {
 
   useEffect(() => {
     const move = () => setFocus(value => value === 'auto' ? 'off' : value)
-    const escape = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') { setFocus('off'); setNoticesOpen(false) }
-    }
+    window.addEventListener('pointermove', move)
     window.addEventListener('mousemove', move)
-    window.addEventListener('keydown', escape)
-    return () => { window.removeEventListener('mousemove', move); window.removeEventListener('keydown', escape) }
+    return () => {
+      window.removeEventListener('pointermove', move)
+      window.removeEventListener('mousemove', move)
+    }
   }, [])
+  useEffect(() => {
+    const key = (event: KeyboardEvent) => { if (event.key === 'Escape') setFocus('off') }
+    window.addEventListener('keydown', key)
+    return () => window.removeEventListener('keydown', key)
+  }, [])
+  useEffect(() => { currentChapters.current = chapters }, [chapters])
 
   function update(id: string, patch: Partial<StudioChapter>) {
-    const next = currentChapters.current.map(chapter => chapter.id === id ? { ...chapter, ...(patch.draft !== undefined ? { draftComments: reanchorComments(chapter.draftComments || [], chapter.draft, patch.draft) } : {}), ...patch } : chapter)
-    currentChapters.current = next
-    setChapters(next)
-    if (preview && (patch.draft !== undefined || patch.outline !== undefined || patch.outlineComments !== undefined || patch.draftComments !== undefined)) {
-      try { localStorage.setItem(storageKey, JSON.stringify(Object.fromEntries(next.map(({ id, number, title, volume, outline, draft, outlineComments, draftComments }) => [id, { number, title, volume, outline, draft, outlineComments, draftComments }])))); setStorageError('') }
+    const next = currentChapters.current.map(chapter => chapter.id === id ? { ...chapter, ...patch } : chapter)
+    currentChapters.current = next; setChapters(next)
+    if (preview) {
+      try {
+        const currentData = JSON.parse(localStorage.getItem(storageKey) || '{}')
+        const targetChapter = next.find(item => item.id === id)
+        if (targetChapter) {
+          localStorage.setItem(storageKey, JSON.stringify({
+            ...currentData,
+            [id]: { draft: targetChapter.draft, requirements: targetChapter.requirements, idea: targetChapter.idea, outline: targetChapter.outline, outlineStep: targetChapter.outlineStep, outlineComments: targetChapter.outlineComments, draftComments: targetChapter.draftComments, number: targetChapter.number, title: targetChapter.title, volume: targetChapter.volume },
+          }))
+        }
+      }
       catch { setStorageError('本机自动保存失败，请先复制大纲、评论和正文备份。') }
     }
   }
@@ -436,14 +446,13 @@ function StudioWorkspace({ title, initial, initialId, project, preview }: {
     else editor.current?.changeFeedback(patch)
   }
 
-  async function leave(action: () => void, direction?: number) {
+  async function leave(action: () => void) {
     if (archiveSaving.current) { setToast('正在保存存档，请稍候。'); return }
     const request = ++navigation.current
-    const currentEditor = page === 'Setting' ? settingEditor.current : page === 'Create' ? editor.current : null
-    if (currentEditor && !await currentEditor.flush()) { requestedPage.current = page; setToast(`${page === 'Setting' ? '设定' : '正文'}尚未保存，已暂停切换。请先重试自动保存。`); return }
+    const currentEditor = editor.current
+    if (currentEditor && !await currentEditor.flush()) { setToast('正文尚未保存，已暂停切换。请先重试自动保存。'); return }
     if (request !== navigation.current) return
-    const commit = () => { if (request !== navigation.current) return; setFocus(value => value === 'auto' ? 'off' : value); setLocate(''); setCommentRequest(null); if (direction) setPageDirection(direction); action() }
-    if (direction) { transition.current?.skipTransition(); transition.current = null; flushSync(() => { setPageReady(false); commit() }); return }
+    const commit = () => { if (request !== navigation.current) return; setFocus(value => value === 'auto' ? 'off' : value); setLocate(''); setCommentRequest(null); action() }
     if (!writing && document.startViewTransition && !window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
       transition.current?.skipTransition()
       flushSync(() => setPageReady(false))
@@ -452,12 +461,50 @@ function StudioWorkspace({ title, initial, initialId, project, preview }: {
       void current.finished.catch(() => {}).then(() => { if (transition.current === current) { transition.current = null; setPageReady(true) } })
     } else { transition.current?.skipTransition(); transition.current = null; setPageReady(true); commit() }
   }
-  function navigateStudio(nextPage: Page, chapterId = selectedId) {
+  function navigateStudio(chapterId = selectedId, stage = selected?.stage) {
     const search = new URLSearchParams(location.search)
-    search.set('view', nextPage)
-    const pathname = preview ? '/preview/studio' : `/projects/${encodeURIComponent(project!.id)}/studio${chapterId ? `/${encodeURIComponent(chapterId)}` : ''}`
-    if (pathname !== location.pathname || search.toString() !== location.search.slice(1)) navigate({ pathname, search: search.toString() }, { state: location.state })
+    search.delete('view')
+    if (stage) search.set('stage', stage)
+    const pathname = preview ? `/preview/studio${chapterId ? `/${encodeURIComponent(chapterId)}` : ''}` : `/projects/${encodeURIComponent(project!.id)}/studio${chapterId ? `/${encodeURIComponent(chapterId)}` : ''}`
+    if (pathname !== location.pathname || search.toString() !== location.search.slice(1)) navigate({ pathname, search: search.toString() ? `?${search.toString()}` : '' }, { state: location.state })
   }
+  function openSetting() {
+    void leave(() => {
+      const returnUrl = `${location.pathname}${location.search}`
+      const state = {
+        returnTo: returnUrl,
+        returnChapterId: selected?.id,
+        returnStage: selected?.stage,
+      }
+      if (preview) {
+        navigate('/setting-collections/preview', { state })
+        return
+      }
+      if (project?.setting_collection_id) {
+        navigate(`/setting-collections/${encodeURIComponent(project.setting_collection_id)}`, { state })
+      } else {
+        navigate(`/?project=${encodeURIComponent(project!.id)}`, { state })
+      }
+    })
+  }
+  useEffect(() => {
+    const view = new URLSearchParams(location.search).get('view')
+    if (view === 'Detail') {
+      const timer = window.setTimeout(() => {
+        void leave(() => {
+          if (preview) navigate('/', { replace: true })
+          else navigate(`/?project=${encodeURIComponent(project!.id)}`, { replace: true })
+        })
+      }, 0)
+      return () => window.clearTimeout(timer)
+    } else if (view === 'Setting') {
+      const timer = window.setTimeout(() => {
+        openSetting()
+      }, 0)
+      return () => window.clearTimeout(timer)
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [location.search, preview, project?.id, project?.setting_collection_id])
   function keepLocalArchive(chapter: StudioChapter, summary: string) {
     const entry: DraftArchive = { id: crypto.randomUUID(), createdAt: new Date().toISOString(), summary, draft: chapter.draft, comments: chapter.draftComments || [], requirements: chapter.requirements, feedbackAvailable: true }
     const next = { ...archives, [chapter.id]: [entry, ...(archives[chapter.id] || [])] }
@@ -504,33 +551,14 @@ function StudioWorkspace({ title, initial, initialId, project, preview }: {
       }) : Promise.reject(new Error('missing document'))
       void content.then(loaded => {
         if (request !== navigation.current) return
-        setSelectedId(chapter.id); setArchive({ ...loaded, chapterId: chapter.id }); setPage('Create'); navigateStudio('Create', chapter.id); setPageReady(true); setToast('')
+        setSelectedId(chapter.id); setArchive({ ...loaded, chapterId: chapter.id }); navigateStudio(chapter.id, 'Draft'); setToast('')
       }).catch(() => { if (request === navigation.current) setToast('无法读取存档，当前正文未改变，请重试。') })
     })
   }
-  function goPage(next: Page, direction = pages.indexOf(next) > pages.indexOf(page) ? 1 : -1) {
-    requestedPage.current = next
-    void leave(() => { setPage(next); navigateStudio(next); if (next === page) setPageReady(true) }, direction)
+  function selectChapter(id: string) {
+    const target = currentChapters.current.find(c => c.id === id)
+    void leave(() => { setArchive(null); setSelectedId(id); navigateStudio(id, target?.stage) })
   }
-  useLayoutEffect(() => {
-    const before = previousPage.current
-    previousPage.current = page
-    requestedPage.current = page
-    let incoming: Animation | undefined
-    pageSurfaces.current?.querySelectorAll<HTMLElement>('[data-studio-page]').forEach(surface => {
-      const running = surface.getAnimations?.().some(animation => animation.playState === 'running')
-      const from = running ? getComputedStyle(surface).transform : surface.dataset.studioPage === before ? 'translateX(0)' : `translateX(${pageDirection * 100}vw)`
-      surface.getAnimations?.().forEach(animation => animation.cancel())
-      if (before === page || window.matchMedia?.('(prefers-reduced-motion: reduce)').matches || !surface.animate) return
-      if (surface.dataset.studioPage !== page && surface.dataset.studioPage !== before && !running) return
-      const animation = surface.animate([{ opacity: 1, visibility: 'visible', transform: from }, { opacity: 1, visibility: 'visible', transform: surface.dataset.studioPage === page ? 'translateX(0)' : `translateX(${-pageDirection * 100}vw)` }], { duration: 540, easing: 'cubic-bezier(.22, 1, .36, 1)' })
-      void animation.finished.catch(() => {})
-      if (surface.dataset.studioPage === page) incoming = animation
-    })
-    if (incoming) void incoming.finished.then(() => setPageReady(true)).catch(() => {})
-    else setPageReady(true)
-  }, [page, pageDirection])
-  function selectChapter(id: string) { void leave(() => { setArchive(null); setSelectedId(id); setPage('Create'); navigateStudio('Create', id) }) }
   function rejectStage(stage: Stage) {
     setToast('审阅完成并处理 Block 问题后，才能进入下一阶段。')
     setBlockedAttempt(value => value + 1)
@@ -629,6 +657,7 @@ function StudioWorkspace({ title, initial, initialId, project, preview }: {
       if (revisedIds.includes('motivation')) draft = draft.replace('却让窗边的女孩停住了筷子。', '窗边的女孩认出了碎片上的刻痕，停住了筷子。')
       if (revisedIds.includes('ending')) draft = draft.replace('林远突然觉得，这个再平常不过的傍晚，也许并不只是一个傍晚。', '林远把金属碎片握回掌心，没有再看窗边。')
       update(id, { stage: 'Review', review: 'running', completed: 0, issues: [], selected: [], draft })
+      navigateStudio(id, 'Review')
       ;[1400, 2700, 4000].forEach((delay, index) => timers.current.push(window.setTimeout(() => {
         update(id, { completed: index + 1, ...(index === 2 ? { review: 'done' as const, reviewFinishedAt: Date.now(), issues, selected: issues.filter(issue => issue.level === 'Block').map(issue => issue.id) } : {}) })
         if (index === 2) {
@@ -642,7 +671,14 @@ function StudioWorkspace({ title, initial, initialId, project, preview }: {
     if (archive) setArchive(null)
     if (!selected || selected.published || stage === selected.stage) return
     if (!preview && selected.productionStatus && !['AUTHOR_REVISION', 'CANCELLED'].includes(selected.productionStatus)) {
-      if (stage === 'Review') { void leave(() => { sessionStorage.removeItem(readerStageKey(selected.id, selected.versionId!)); update(selected.id, { stage }) }); return }
+      if (stage === 'Review') {
+        void leave(() => {
+          sessionStorage.removeItem(readerStageKey(selected.id, selected.versionId!))
+          update(selected.id, { stage })
+          navigateStudio(selected.id, stage)
+        })
+        return
+      }
       if (stage === 'Draft') { setToast('正文已进入审阅，请通过修改流程继续写作。'); return }
     }
     if (!preview && (stage === 'Reader' || stage === 'Final')) {
@@ -652,20 +688,32 @@ function StudioWorkspace({ title, initial, initialId, project, preview }: {
         if (stage === 'Reader') sessionStorage.setItem(readerStageKey(selected.id, selected.versionId!), 'open')
         else sessionStorage.removeItem(readerStageKey(selected.id, selected.versionId!))
         update(selected.id, { stage })
-      }); return
+        navigateStudio(selected.id, stage)
+      })
+      return
     }
     if (!preview && selected.versionId) sessionStorage.removeItem(readerStageKey(selected.id, selected.versionId))
     if (!preview && stage === 'Draft' && !selected.documentId) { setToast('请先确认大纲并生成正文。'); return }
     if (stage === 'Review') {
-      if (selected.review === 'idle') startReview(selected.id)
-      else void leave(() => update(selected.id, { stage }))
+      if (selected.review === 'idle') {
+        startReview(selected.id)
+        navigateStudio(selected.id, 'Review')
+      } else {
+        void leave(() => {
+          update(selected.id, { stage })
+          navigateStudio(selected.id, stage)
+        })
+      }
       return
     }
     if (stage === 'Draft' && !selected.outline.trim()) { setToast('请先确认本章大纲。'); return }
     if ((stage === 'Reader' || stage === 'Final') && (selected.review !== 'done' || selected.issues.some(issue => issue.level === 'Block'))) {
       rejectStage(stage); return
     }
-    void leave(() => update(selected.id, { stage }))
+    void leave(() => {
+      update(selected.id, { stage })
+      navigateStudio(selected.id, stage)
+    })
   }
   useEffect(() => {
     const rawStage = new URLSearchParams(location.search).get('stage')
@@ -693,7 +741,7 @@ function StudioWorkspace({ title, initial, initialId, project, preview }: {
         currentChapters.current = next; setChapters(next)
         setVolumes(items => items.includes(chapter.volume) ? items : [...items, chapter.volume])
         if (preview) update(chapter.id, { draft: chapter.draft })
-        if (request === navigation.current) { setArchive(null); setSelectedId(chapter.id); setPage('Create'); navigateStudio('Create', chapter.id) }
+        if (request === navigation.current) { setArchive(null); setSelectedId(chapter.id); navigateStudio(chapter.id, 'Outline') }
       }).catch(() => setToast('新建章节失败，请重试。')).finally(() => { creatingChapter.current = false; setChapterPending(false) })
     })
   }
@@ -715,7 +763,7 @@ function StudioWorkspace({ title, initial, initialId, project, preview }: {
   }
 
   if (initialId && !chapters.some(chapter => chapter.id === initialId)) return <div className="studio-load"><p role="alert">此作品中未找到该章节，可能已被删除或链接有误。</p><Link to={preview ? '/preview/studio' : `/projects/${encodeURIComponent(project!.id)}/studio`}>返回作品</Link></div>
-  return <div className={`studio${hidden ? ' is-focused' : ''}${page === 'Setting' ? ' is-setting' : ''}`} data-focus-mode={focus}
+  return <div className={`studio${hidden ? ' is-focused' : ''}`} data-focus-mode={focus}
     onClickCapture={event => {
       const target = (event.target as HTMLElement).closest<HTMLButtonElement>('.studio-icon')
       if (!target || target.disabled || target.classList.contains('has-state') || target.closest('.studio-page-nav')) return
@@ -724,41 +772,18 @@ function StudioWorkspace({ title, initial, initialId, project, preview }: {
     <header className="studio-header">
       <div className="studio-tools">
         <IconButton icon="home" label="返回主页" className={`studio-chrome${hidden ? ' is-hidden' : ''}`} onClick={() => void leave(() => navigate('/'))} />
-        <IconButton icon="setting" label="设置" className={`studio-chrome${hidden ? ' is-hidden' : ''}`} onClick={() => goPage('Setting')} />
+        <IconButton icon="setting" label="设置" className={`studio-chrome${hidden ? ' is-hidden' : ''}`} onClick={openSetting} />
         <IconButton icon={focus === 'manual' ? 'focus' : 'show'} label={focus === 'manual' ? '退出免打扰' : '手动免打扰'} aria-pressed={focus === 'manual'} onClick={() => { setFocus(value => value === 'manual' ? 'off' : 'manual'); setNoticesOpen(false) }} />
         <div className={`studio-notification-button${unread ? ' has-unread' : ''}`}><IconButton icon="notification" label={`通知${unread ? `，${unread} 条未读` : ''}`} aria-expanded={noticesOpen} onClick={() => { setNoticesOpen(!noticesOpen); if (!noticesOpen) setNotifications(items => items.map(item => ({ ...item, read: true }))) }} /></div>
       </div>
-      <nav ref={workflow} className={`studio-workflow studio-chrome${hidden || page !== 'Create' ? ' is-hidden' : ''}`} style={{ '--workflow-progress': selected ? stages.indexOf(selected.stage) / (stages.length - 1) : 0 } as CSSProperties} aria-label="创作阶段">
+      <nav ref={workflow} className={`studio-workflow studio-chrome${hidden ? ' is-hidden' : ''}`} style={{ '--workflow-progress': selected ? stages.indexOf(selected.stage) / (stages.length - 1) : 0 } as CSSProperties} aria-label="创作阶段">
         <span className="studio-workflow-progress" aria-hidden="true" />
         {stages.map(stage => <button key={stage} aria-current={selected?.stage === stage ? 'step' : undefined} onClick={() => changeStage(stage)} disabled={!selected || selected.published} title={selected?.published ? preview ? '已发布章节不可修改' : '已定稿章节不可修改' : stage}>{stage}<i /></button>)}
-      </nav>
-      <nav className={`studio-page-nav studio-chrome${hidden ? ' is-hidden' : ''}`} aria-label="小说页面">
-        <IconButton icon="page-arrow" className="is-previous" label="上一个页面" onClick={() => goPage(pages[(pages.indexOf(requestedPage.current) - 1 + pages.length) % pages.length], -1)} />
-        <PageName page={page} direction={pageDirection} />
-        <IconButton icon="page-arrow" label="下一个页面" onClick={() => goPage(pages[(pages.indexOf(requestedPage.current) + 1) % pages.length], 1)} />
       </nav>
     </header>
     {noticesOpen && <section className="studio-notifications" aria-label="通知列表"><h2>通知</h2>{!notifications.length && <p className="studio-muted">暂无通知</p>}{notifications.slice().reverse().map(notice => <button key={notice.id} onClick={() => { selectChapter(notice.chapterId); setNoticesOpen(false) }}>{notice.message}<small>查看本章报告</small></button>)}</section>}
     <div className="studio-announcer" role="status" aria-live="polite">{notifications.at(-1)?.message}</div>
-    <div className="studio-page-viewport" ref={pageSurfaces}>
-      <div className={`studio-page-surface is-setting${page === 'Setting' ? ' is-current' : ''}`} data-studio-page="Setting" inert={page !== 'Setting'} aria-hidden={page !== 'Setting'}><section className="studio-body" aria-label="Setting 工作区"><StudioSetting ref={settingEditor} preview={preview} hidden={hidden} activePage={page === 'Setting'} ready={pageReady} onTyping={() => setFocus(value => value === 'off' ? 'auto' : value)} /></section></div>
-      <div className={`studio-page-surface${page === 'Detail' ? ' is-current' : ''}`} data-studio-page="Detail" inert={page !== 'Detail'} aria-hidden={page !== 'Detail'}><section className="studio-body" aria-label="Detail 工作区"><div className="studio-detail">
-        <div className="studio-detail-art">
-          <img className="studio-detail-banner" src="/ui/studio/detail-banner.png" alt="小说横版封面" />
-          <img className="studio-detail-cover" src="/ui/studio/detail-cover.png" alt="小说封面" />
-        </div>
-        <div className="studio-detail-information">
-          <div className="studio-detail-title"><h1>{title}</h1><span className="studio-project-status"><i />{project?.status || 'Ongoing'}</span></div>
-          <dl className="studio-detail-metadata">
-            <div><dt><img src={asset('size')} alt="" />size</dt><dd>{chapters.reduce((total, chapter) => total + chapter.draft.replace(/\s/g, '').length, 0).toLocaleString()}</dd></div>
-            <div><dt><img src={asset('chapter')} alt="" />chapter</dt><dd>{chapters.length}</dd></div>
-            <div><dt><img src={asset('label')} alt="" />label</dt></div>
-          </dl>
-          <StudioLabels projectKey={project?.id || 'preview'} initial={project?.genre ? [project.genre] : preview ? ['都市', '科幻'] : []} />
-          <textarea aria-label="小说简介" value={introduction} readOnly={!preview} onChange={event => setIntroduction(event.target.value)} placeholder="introduction…" />
-        </div>
-      </div></section></div>
-      <div className={`studio-page-surface${page === 'Create' ? ' is-current' : ''}`} data-studio-page="Create" inert={page !== 'Create'} aria-hidden={page !== 'Create'}><section className={`studio-body${writing ? ' has-prose' : ''}`} aria-label="Create 工作区">{!selected ? <div className="studio-empty"><h1>开始新的一章</h1><button disabled={chapterPending} onClick={() => addChapter(volumes.at(-1) || '第一卷')}>新建章节</button>{!preview && <Link to={`/projects/${project?.id}`}>前往现有工作台</Link>}</div> : <>
+    <section className={`studio-body${writing ? ' has-prose' : ''}`} aria-label="Create 工作区">{!selected ? <div className="studio-empty"><h1>开始新的一章</h1><button disabled={chapterPending} onClick={() => addChapter(volumes.at(-1) || '第一卷')}>新建章节</button>{!preview && <Link to={`/projects/${project?.id}`}>前往现有工作台</Link>}</div> : <>
         {!archive && selected.stage === 'Outline' && <section className={`studio-outline is-${selected.outlineStep}`} key={selected.id} aria-label="本章大纲">
           <MotionFrame className="studio-outline-flow" textKey={`${selected.outlineStep}-${refresh}`}>
           {selected.outlineStep !== 'edit' && <OutlineGeneration chapter={selected} preview={preview} refresh={refresh} onIdea={idea => update(selected.id, { idea })} onGenerate={() => update(selected.id, { outlineStep: 'choose' })} onChoose={text => update(selected.id, { outline: `${selected.idea}\n\n${text}`, outlineStep: 'edit' })} onRefresh={() => setRefresh(value => value + 1)} />}
@@ -840,7 +865,7 @@ function StudioWorkspace({ title, initial, initialId, project, preview }: {
             </MotionFrame>
           </div>
           <MotionFrame className="studio-prose-transition" textKey={archive?.id || 'current'}>
-          <ProseEditor key={`${selected.id}-${selected.documentId}-${archiveRevision}`} ref={editor} chapter={selected} projectId={project?.id} preview={preview} archive={archive || undefined} busy={archiveBusy || productionBusyId === selected.id} locate={locate} ready={pageReady} visible={page === 'Create'} onFeedbackChange={(draftComments, requirements, feedbackReadOnly) => update(selected.id, { draftComments, requirements, feedbackReadOnly })} onSubmittedSelect={id => {
+          <ProseEditor key={`${selected.id}-${selected.documentId}-${archiveRevision}`} ref={editor} chapter={selected} projectId={project?.id} preview={preview} archive={archive || undefined} busy={archiveBusy || productionBusyId === selected.id} locate={locate} ready={pageReady} visible={true} onFeedbackChange={(draftComments, requirements, feedbackReadOnly) => update(selected.id, { draftComments, requirements, feedbackReadOnly })} onSubmittedSelect={id => {
             setContextOutline(false); setCommentRequest({ id })
             modificationPanel.current?.scrollIntoView?.({ block: 'start', behavior: 'smooth' })
           }} onSaved={(versionId, draft) => update(selected.id, { versionId, draft })} onTyping={() => setFocus(value => value === 'manual' ? value : 'auto')} onChange={(draft, draftComments) => update(selected.id, { draft, draftComments, review: 'idle', issues: [], selected: [] })}
@@ -867,14 +892,14 @@ function StudioWorkspace({ title, initial, initialId, project, preview }: {
           {!selected.discussion ? <><h2>邀请读者</h2><div className="studio-reader-list">{readerPersonas.map(([id, name, description]) => <div className="studio-reader-person" key={id}><span className="studio-avatar" aria-hidden="true" /><div><strong>{name}</strong><small>{description}</small></div><button className={selected.readers.includes(id) ? 'is-invited' : ''} aria-pressed={selected.readers.includes(id)} aria-label={`${selected.readers.includes(id) ? '取消邀请' : '邀请'}${name}`} onClick={() => update(selected.id, { readers: selected.readers.includes(id) ? selected.readers.filter(value => value !== id) : [...selected.readers, id] })}>{selected.readers.includes(id) ? '取消' : '邀请'}</button></div>)}</div><div className="studio-reader-footer"><button onClick={() => changeStage('Final')}>跳过读者环节</button><button className="studio-primary" disabled={!selected.readers.length} onClick={() => update(selected.id, { discussion: true })}>开始阅读</button></div></> : <><div className="studio-reader-transcript"><div className="studio-message"><span className="studio-avatar" /><div><p>主持人 <time>刚刚 · 预览</time></p><button className="studio-file" onClick={() => changeStage('Final')}><img src={asset('chapter')} alt="" />第{selected.number}话 {selected.title}</button></div></div><div className="studio-message"><span className="studio-avatar" /><div><p>主持人 <time>刚刚 · 预览</time></p><span className="studio-accent">@全体成员</span><p>阅读这篇文章并给出意见。</p></div></div>{readerPersonas.filter(([id]) => selected.readers.includes(id)).map(([id, name, description]) => <div className="studio-message" key={id}><span className="studio-avatar" /><div><p>{name} <time>示例发言</time></p><p>我会{description.replace('关注', '重点看')}。这段食堂的日常很有画面感，期待接下来人物之间的关系。</p></div></div>)}</div><div className="studio-reader-footer"><span className="studio-muted">作者旁观 · 无需参与讨论</span><button onClick={() => changeStage('Final')}>结束旁观，进入终稿</button></div></>}
         </section>}
       </>}
-    </section></div></div>
-    {page === 'Create' && <aside className={`studio-sidebar${sidebarOpen ? ' is-open' : ''}`} aria-label="章节侧边栏" onPointerEnter={() => { if (!hidden) setSidebarOpen(true) }} onPointerLeave={() => setSidebarOpen(false)} onFocus={() => { if (!hidden) setSidebarOpen(true) }} onBlur={event => { if (!event.currentTarget.contains(event.relatedTarget)) setSidebarOpen(false) }}>
+    </section>
+    <aside className={`studio-sidebar${sidebarOpen ? ' is-open' : ''}`} aria-label="章节侧边栏" onPointerEnter={() => { if (!hidden) setSidebarOpen(true) }} onPointerLeave={() => setSidebarOpen(false)} onFocus={() => { if (!hidden) setSidebarOpen(true) }} onBlur={event => { if (!event.currentTarget.contains(event.relatedTarget)) setSidebarOpen(false) }}>
       <button className="studio-sidebar-trigger" aria-label="展开章节侧边栏" disabled={hidden} onClick={() => setSidebarOpen(true)}><span /></button>
       <section className={`studio-stats studio-floating${pins.stats ? ' is-pinned' : ''}${hidden && !pins.stats ? ' is-hidden' : ''}`} inert={(hidden || !sidebarOpen) && !pins.stats} aria-label="创作统计"><div><img src={asset('time')} alt="时间" />{Math.floor(seconds / 3600)}h {Math.floor(seconds / 60) % 60}m {seconds % 60}s</div><div><img src={asset('font')} alt="字数" />{(selected?.draft.replace(/\s/g, '').length || 0).toLocaleString()} 字</div><Pin label="统计面板" pinned={pins.stats} onChange={() => setPins(value => ({ ...value, stats: !value.stats }))} /></section>
       <section className={`studio-directory studio-floating${pins.directory ? ' is-pinned' : ''}${hidden && !pins.directory ? ' is-hidden' : ''}`} inert={(hidden || !sidebarOpen) && !pins.directory} aria-label="章节目录"><div className="studio-directory-tools"><Pin label="章节目录" pinned={pins.directory} onChange={() => setPins(value => ({ ...value, directory: !value.directory }))} /></div><div className="studio-directory-title"><h2>{title}</h2><IconButton icon="add" label="新建卷" disabled={!preview} onClick={() => setVolumes(items => [...items, `第${items.length + 1}卷`])} /></div><div className="studio-directory-scroll">{volumes.slice().reverse().map(volume => <details key={volume} open><summary><span>{volume}</span><IconButton icon="add" label={`在${volume}新建章节`} disabled={chapterPending} onClick={event => { event.preventDefault(); addChapter(volume) }} /></summary>{chapters.filter(chapter => chapter.volume === volume).slice().sort((a, b) => b.number - a.number).map(chapter => <ChapterArchiveRow projectId={project?.id} key={chapter.id} chapter={chapter} current={selectedId === chapter.id} activeArchive={archive?.chapterId === chapter.id ? archive.id : undefined} preview={preview} local={archives[chapter.id] || []} revision={archiveRevision} onChapter={() => selectChapter(chapter.id)} onArchive={entry => viewArchive(chapter, entry)} />)}</details>)}</div></section>
-    </aside>}
+    </aside>
     <footer className={`studio-bottom studio-chrome${hidden ? ' is-hidden' : ''}`}><button onClick={() => void leave(() => navigate('/'))}>返回书架</button><span>{preview ? '交互预览 · Agent 流程为示例' : '真实章节 · 流程已接通'}</span>{!preview && selected && <button onClick={() => void leave(() => navigate(`/projects/${project?.id}/chapters/${selected.id}`))}>现有工作台</button>}</footer>
-    <GlobalAssistant hidden={hidden} project={project} chapter={selected} currentView={selected?.stage || page} preview={preview} />
+    <GlobalAssistant hidden={hidden} project={project} chapter={selected} currentView={selected?.stage || 'Create'} preview={preview} />
     {(toast || storageError) && <div className="studio-toast" role={storageError ? 'alert' : 'status'}>{storageError || toast}<button aria-label="关闭提示" onClick={() => { setToast(''); setStorageError('') }}>×</button></div>}
     {publishing && <PublishDialog preview={preview} busy={Boolean(productionBusyId)} error={selected?.productionError} onClose={() => setPublishing(false)} onConfirm={() => void publish()} />}
   </div>

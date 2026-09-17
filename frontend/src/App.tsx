@@ -468,8 +468,8 @@ function NotFound() {
 export default function App() {
   const pathname = useLocation().pathname
   const dashboard = pathname === '/'
-  const studio = pathname === '/preview/studio' || /^\/projects\/[^/]+\/studio(?:\/[^/]+)?$/.test(pathname)
-  if (studio) return <div className="app-shell studio-app-shell"><div className="workspace"><main><Routes><Route path="/preview/studio" element={<Studio />} /><Route path="/projects/:projectId/studio" element={<Studio />} /><Route path="/projects/:projectId/studio/:chapterId" element={<Studio />} /></Routes></main></div></div>
+  const studio = /^\/preview\/studio(?:\/[^/]+)?$/.test(pathname) || /^\/projects\/[^/]+\/studio(?:\/[^/]+)?$/.test(pathname)
+  if (studio) return <div className="app-shell studio-app-shell"><div className="workspace"><main><Routes><Route path="/preview/studio" element={<Studio />} /><Route path="/preview/studio/:chapterId" element={<Studio />} /><Route path="/projects/:projectId/studio" element={<Studio />} /><Route path="/projects/:projectId/studio/:chapterId" element={<Studio />} /></Routes></main></div></div>
 
   const isSettingWorkspace = /^\/setting-collections\/[^/]+$/.test(pathname)
   if (isSettingWorkspace) {

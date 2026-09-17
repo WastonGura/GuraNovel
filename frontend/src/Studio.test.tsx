@@ -17,7 +17,7 @@ vi.mock('./api/client', async importOriginal => ({
 }))
 
 beforeEach(() => {
-  vi.clearAllMocks()
+  vi.resetAllMocks()
   vi.mocked(listChapterProductionRuns).mockResolvedValue([])
   vi.useFakeTimers()
   localStorage.clear()
@@ -59,20 +59,22 @@ describe('creation studio', () => {
     expect(screen.getByRole('button', { name: 'Review' })).toHaveAttribute('aria-current', 'step')
   })
 
-  it('preloads page surfaces, preserves setting editing and counts rapid navigation clicks', async () => {
-    openPreview()
-    const setting = document.querySelector('[data-studio-page="Setting"]')!
-    expect(document.querySelectorAll('[data-studio-page]')).toHaveLength(3)
-    await stage('下一个页面')
-    await stage('编辑')
-    fireEvent.change(screen.getByRole('textbox', { name: '设定正文' }), { target: { value: '页面切换后仍然保留这段文字' } })
-    const next = screen.getByRole('button', { name: '下一个页面' })
-    await act(async () => { fireEvent.click(next); fireEvent.click(next); fireEvent.click(next) })
-    expect(screen.getByRole('region', { name: 'Setting 工作区' })).toBeInTheDocument()
-    expect(document.querySelector('[data-studio-page="Setting"]')).toBe(setting)
-    expect(screen.getByRole('textbox', { name: '设定正文' })).toHaveValue('页面切换后仍然保留这段文字')
-    await stage('下一个页面'); await stage('下一个页面'); await stage('下一个页面')
-    expect(screen.getByRole('textbox', { name: '设定正文' })).toHaveValue('页面切换后仍然保留这段文字')
+  it('navigates to setting collection via header setting button and preserves returnTo state', async () => {
+    render(
+      <MemoryRouter initialEntries={['/preview/studio']}>
+        <Routes>
+          <Route path="/preview/studio" element={<Studio />} />
+          <Route path="/setting-collections/preview" element={<div data-testid="setting-workspace">Setting Workspace</div>} />
+        </Routes>
+      </MemoryRouter>
+    )
+    expect(screen.getByRole('region', { name: 'Create 工作区' })).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: '上一个页面' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: '下一个页面' })).not.toBeInTheDocument()
+    const settingBtn = screen.getByRole('button', { name: '设置' })
+    expect(settingBtn).toBeInTheDocument()
+    await stage('设置')
+    expect(screen.getByTestId('setting-workspace')).toBeInTheDocument()
   })
   it('keeps the scrollbar at the window edge when the manuscript moves without resizing', async () => {
     let left = 456, moving = true
@@ -333,26 +335,19 @@ describe('creation studio', () => {
     expect(screen.queryByRole('group', { name: '正文评论' })).not.toBeInTheDocument()
   })
 
-  it('tracks the current workflow path and cycles pages in both directions', async () => {
+  it('tracks the current workflow path across the 5 creation stages and retains the workspace', async () => {
     openPreview()
     const workflow = screen.getByRole('navigation', { name: '创作阶段' })
     expect(workflow).toHaveStyle({ '--workflow-progress': '0' })
     await stage('Draft')
     expect(workflow).toHaveStyle({ '--workflow-progress': '0.25' })
-    await stage('Outline')
-    expect(workflow).toHaveStyle({ '--workflow-progress': '0' })
-    await stage('上一个页面')
-    expect(screen.getByRole('region', { name: 'Detail 工作区' })).toBeInTheDocument()
-    expect(screen.queryByRole('complementary', { name: '章节侧边栏' })).not.toBeInTheDocument()
-    await stage('上一个页面')
-    expect(screen.getByRole('region', { name: 'Setting 工作区' })).toBeInTheDocument()
-    await stage('下一个页面')
-    expect(screen.getByRole('region', { name: 'Detail 工作区' })).toBeInTheDocument()
-    await stage('下一个页面')
     expect(screen.getByRole('region', { name: 'Create 工作区' })).toBeInTheDocument()
     expect(screen.getByRole('complementary', { name: '章节侧边栏' })).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: '上一个页面' })).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: '下一个页面' })).toBeInTheDocument()
+    await stage('Outline')
+    expect(workflow).toHaveStyle({ '--workflow-progress': '0' })
+    expect(screen.getByRole('region', { name: 'Create 工作区' })).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: '上一个页面' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: '下一个页面' })).not.toBeInTheDocument()
   })
 
   it('returns home from the new icon without adding a blue click effect', async () => {
@@ -547,7 +542,7 @@ describe('creation studio', () => {
     expect(reanchorComments(saved.comments!, '原文', '添加原文')[0]).toMatchObject({ start: 0, end: 0, quote: '原文', text: '保留评论', orphaned: true })
   })
 
-  it('keeps pinned panels visible in focus, and opens the Setting library via page arrows', async () => {
+  it('keeps pinned panels visible in focus, and exits focus mode via Escape', async () => {
     const view = openPreview()
     fireEvent.click(screen.getByRole('button', { name: '展开章节侧边栏' }))
     fireEvent.click(screen.getByRole('button', { name: '固定章节目录' }))
@@ -556,10 +551,10 @@ describe('creation studio', () => {
     expect(view.container.querySelector('.studio-directory')).not.toHaveClass('is-hidden')
     expect(view.container.querySelector('.studio-stats')).toHaveClass('is-hidden')
     fireEvent.keyDown(window, { key: 'Escape' })
-    await stage('下一个页面')
-    expect(screen.getByLabelText('作品设定')).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: '关系图谱' })).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: '下一个页面' })).toBeInTheDocument()
+    expect(view.container.querySelector('.studio')).toHaveAttribute('data-focus-mode', 'off')
+    expect(screen.getByRole('button', { name: '设置' })).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: '下一个页面' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: '上一个页面' })).not.toBeInTheDocument()
   })
 
   it('recovers new preview chapters but never restores cached publication flags', () => {
@@ -631,19 +626,23 @@ describe('creation studio', () => {
     expect(readDocumentContent).not.toHaveBeenCalled()
   })
 
-  it('saves real drafts before page navigation and reuses the returned version after remount', async () => {
-    vi.mocked(getProject).mockResolvedValue({ id: 'p', title: 'Real novel' } as Awaited<ReturnType<typeof getProject>>)
+  it('saves real drafts before setting navigation and reuses the returned version after remount', async () => {
+    vi.mocked(getProject).mockResolvedValue({ id: 'p', title: 'Real novel', setting_collection_id: 'sc-1' } as Awaited<ReturnType<typeof getProject>>)
     vi.mocked(listChapters).mockResolvedValue([{ id: 'c', chapter_number: 1, title: 'Chapter', metadata: {}, current_draft_document_id: 'doc' }] as Awaited<ReturnType<typeof listChapters>>)
     vi.mocked(readDocumentContent).mockResolvedValue({ document_id: 'doc', version_id: 'v1', content: 'server text' })
-    vi.mocked(writeDocument).mockResolvedValueOnce({ id: 'v2' } as Awaited<ReturnType<typeof writeDocument>>).mockResolvedValueOnce({ id: 'v3' } as Awaited<ReturnType<typeof writeDocument>>)
-    await act(async () => render(<MemoryRouter initialEntries={['/projects/p/studio']}><Routes><Route path="/projects/:projectId/studio/:chapterId?" element={<Studio />} /></Routes></MemoryRouter>))
+    vi.mocked(writeDocument).mockResolvedValueOnce({ id: 'v2' } as Awaited<ReturnType<typeof writeDocument>>)
+    await act(async () => render(
+      <MemoryRouter initialEntries={['/projects/p/studio']}>
+        <Routes>
+          <Route path="/projects/:projectId/studio/:chapterId?" element={<Studio />} />
+          <Route path="/setting-collections/:settingCollectionId" element={<div data-testid="setting-screen">Setting Screen</div>} />
+        </Routes>
+      </MemoryRouter>
+    ))
     fireEvent.change(screen.getByRole('textbox', { name: '章节正文' }), { target: { value: 'first change' } })
-    await stage('下一个页面')
+    await stage('设置')
     expect(writeDocument).toHaveBeenCalledWith('doc', { content: 'first change', expected_current_version_id: 'v1' })
-    await stage('上一个页面')
-    fireEvent.change(screen.getByRole('textbox', { name: '章节正文' }), { target: { value: 'second change' } })
-    await act(async () => vi.advanceTimersByTime(700))
-    expect(writeDocument).toHaveBeenLastCalledWith('doc', { content: 'second change', expected_current_version_id: 'v2' })
+    expect(screen.getByTestId('setting-screen')).toBeInTheDocument()
   })
 
   it('flushes real draft edits before viewing archives and uses the restored server version for further saves', async () => {

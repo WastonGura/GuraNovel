@@ -97,7 +97,7 @@ function ProjectForm({
 
       const project = await createProject(payload)
       onCreated?.(project)
-      navigate(`/projects/${encodeURIComponent(project.id)}/studio?view=Detail`)
+      navigate(`/projects/${encodeURIComponent(project.id)}/studio`)
     } catch {
       setError('Project could not be created. Try again.')
     } finally {
@@ -496,7 +496,7 @@ function NovelDetails({
               {expanded && chapters?.length === 0 && <p className="detail-status">暂无章节</p>}
               {expanded && chapters && chapters.length > 0 && <ul className="detail-chapter-list">
                 {chapters.map((chapter) => <li key={chapter.id}>
-                  <button data-glow type="button" onClick={() => navigate(`/projects/${encodeURIComponent(currentProject.id)}/studio/${encodeURIComponent(chapter.id)}?view=Create`)}>
+                  <button data-glow type="button" onClick={() => navigate(`/projects/${encodeURIComponent(currentProject.id)}/studio/${encodeURIComponent(chapter.id)}`)}>
                     <span>第{chapter.chapter_number}话</span><span>{chapter.title || '未命名章节'}</span>
                     <img src={icon('rename')} alt="重命名章节" />
                   </button>
@@ -504,7 +504,7 @@ function NovelDetails({
               </ul>}
             </div>
             <span className="novel-detail-rule" aria-hidden="true" />
-            <button className="novel-create-button" data-glow type="button" onClick={() => navigate(`/projects/${encodeURIComponent(currentProject.id)}/studio?view=Create`)}>create</button>
+            <button className="novel-create-button" data-glow type="button" onClick={() => navigate(`/projects/${encodeURIComponent(currentProject.id)}/studio`)}>create</button>
           </div>
         </div>
       </section>
