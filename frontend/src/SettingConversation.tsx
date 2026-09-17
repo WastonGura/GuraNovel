@@ -2,11 +2,23 @@ import { useLayoutEffect, useRef, useState } from 'react'
 import { MotionFrame, StreamText } from './StudioMotion'
 import { categoryNames, stagedSettingComments, type SettingChange, type SettingConversation as Conversation, type SettingNote } from './settingNotes'
 
-function ChangeCard({ change, disabled, onEdit, onAccept, onDismiss, onOpen }: {
-  change: SettingChange; disabled: boolean; onEdit: (body: string) => void; onAccept: () => void; onDismiss: () => void; onOpen: () => void
+function ChangeCard({ change, disabled, referencingProjects, onEdit, onAccept, onDismiss, onOpen }: {
+  change: SettingChange
+  disabled: boolean
+  referencingProjects?: { id: string; title: string }[]
+  onEdit: (body: string) => void
+  onAccept: () => void
+  onDismiss: () => void
+  onOpen: () => void
 }) {
   const [expanded, setExpanded] = useState(false)
   const pending = change.status === 'pending'
+  const sourceItems = [
+    change.sourceTask?.novelTitle,
+    change.sourceTask?.agentRole,
+    change.sourceTask?.chapterId ? `章节: ${change.sourceTask.chapterId}` : '',
+  ].filter(Boolean)
+
   return <MotionFrame className={`setting-change is-${change.status}${expanded ? ' is-expanded' : ''}`} chrome={<div className="setting-change-actions">{pending ? <><button disabled={disabled} onClick={onDismiss}>暂不采用</button><button disabled={disabled || !change.body.trim()} onClick={onAccept}>接受此条</button></> : change.status === 'accepted' ? <button onClick={onOpen}>查看条目</button> : null}</div>}>
     <div className="setting-change-heading">
       <button className="setting-change-toggle" aria-expanded={expanded} aria-label={`查看提案：${change.title}`} onClick={() => setExpanded(!expanded)}>
@@ -15,18 +27,44 @@ function ChangeCard({ change, disabled, onEdit, onAccept, onDismiss, onOpen }: {
       <small>{pending ? categoryNames[change.category] : change.status === 'accepted' ? '已接受' : '未采用'}</small>
     </div>
     <div className="setting-change-content" aria-hidden={!expanded} inert={!expanded}><div className="setting-change-body">
+      {change.reason && <div className="setting-change-meta-row setting-change-reason"><small>调整理由：</small><span>{change.reason}</span></div>}
+      {sourceItems.length > 0 && <div className="setting-change-meta-row setting-change-source"><small>来源任务：</small><span>{sourceItems.join(' · ')}</span></div>}
+      {change.baseVersionId && <div className="setting-change-meta-row setting-change-base"><small>基准版本：</small><code>{change.baseVersionId.slice(0, 8)}</code></div>}
+      {referencingProjects && referencingProjects.length > 0 && <div className="setting-change-impact-warning" role="note">共享设定变更将影响关联小说后续任务：{referencingProjects.map(p => p.title).join('、')}</div>}
       {change.before && <details><summary>修改前的内容</summary><p>{change.before.body || '暂无正文'}</p></details>}
       {pending ? <textarea aria-label={`提案正文：${change.title}`} value={change.body} maxLength={30000} onChange={event => onEdit(event.target.value)} disabled={disabled} /> : <p>{change.body}</p>}
     </div></div>
   </MotionFrame>
 }
 
-export default function SettingConversation({ conversation, notes, visible, disabled, onPatch, onSend, onCommentChange, onExample, onAccept, onChange, onOpen, onScroll }: {
-  conversation: Conversation; notes: SettingNote[]; visible: boolean; disabled: boolean
-  onPatch: (patch: Partial<Conversation>) => void; onSend: () => void; onExample: () => void
+export default function SettingConversation({
+  conversation,
+  notes,
+  visible,
+  disabled,
+  referencingProjects,
+  onPatch,
+  onSend,
+  onCommentChange,
+  onExample,
+  onAccept,
+  onChange,
+  onOpen,
+  onScroll,
+}: {
+  conversation: Conversation
+  notes: SettingNote[]
+  visible: boolean
+  disabled: boolean
+  referencingProjects?: { id: string; title: string }[]
+  onPatch: (patch: Partial<Conversation>) => void
+  onSend: () => void
+  onExample: () => void
   onCommentChange: (noteId: string, commentId: string, text: string) => void
-  onAccept: (ids: string[]) => void; onChange: (id: string, patch: Partial<SettingChange>) => void
-  onOpen: (note: SettingNote) => void; onScroll: (top: number) => void
+  onAccept: (ids: string[]) => void
+  onChange: (id: string, patch: Partial<SettingChange>) => void
+  onOpen: (note: SettingNote) => void
+  onScroll: (top: number) => void
 }) {
   const history = useRef<HTMLDivElement>(null), input = useRef<HTMLTextAreaElement>(null)
   const staging = useRef<HTMLDetailsElement>(null)
@@ -53,7 +91,7 @@ export default function SettingConversation({ conversation, notes, visible, disa
         {message.role === 'assistant' ? <StreamText text={message.text} startedAt={message.createdAt} delay={0} /> : <p>{message.text}</p>}
         {!!message.changes.length && <div className="setting-change-batch">
           <div className="setting-batch-heading"><small>{message.changes.filter(change => change.status === 'pending').length} 条待确认变更</small>{message.changes.some(change => change.status === 'pending') && <button disabled={disabled} onClick={() => onAccept(message.changes.filter(change => change.status === 'pending').map(change => change.id))}>接受本批</button>}</div>
-          {message.changes.map(change => <ChangeCard key={change.id} change={change} disabled={disabled} onEdit={body => onChange(change.id, { body })} onAccept={() => onAccept([change.id])} onDismiss={() => onChange(change.id, { status: 'dismissed' })} onOpen={() => { const note = notes.find(note => note.id === change.noteId); if (note) onOpen(note) }} />)}
+          {message.changes.map(change => <ChangeCard key={change.id} change={change} disabled={disabled} referencingProjects={referencingProjects} onEdit={body => onChange(change.id, { body })} onAccept={() => onAccept([change.id])} onDismiss={() => onChange(change.id, { status: 'dismissed' })} onOpen={() => { const note = notes.find(note => note.id === change.noteId); if (note) onOpen(note) }} />)}
         </div>}
       </article>)}
     </div>

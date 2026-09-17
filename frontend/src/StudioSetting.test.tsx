@@ -446,4 +446,209 @@ describe('setting notes and graph', () => {
     await act(async () => { result = await ref.current!.flush() })
     expect(result).toBe(false)
   })
+
+  it('renders proposal metadata, reason, sourceTask, and cross-novel impact warning', () => {
+    const chatWithProposal = {
+      ...emptySettingConversation(),
+      messages: [
+        {
+          id: 'msg-1',
+          role: 'assistant' as const,
+          text: '设定 Agent 发现需要补充设定：',
+          createdAt: Date.now(),
+          changes: [
+            {
+              id: 'prop-1',
+              noteId: 'a',
+              title: '甲',
+              body: '甲获得了新的法宝。',
+              category: 'setting' as const,
+              before: seed[0],
+              status: 'pending' as const,
+              baseVersionId: 'ver-base-001',
+              reason: '第2章剧情需要法宝线索',
+              sourceTask: {
+                novelTitle: '天穹之剑',
+                agentRole: 'lore_agent',
+                chapterId: 'chap-101',
+              },
+            },
+          ],
+        },
+      ],
+    }
+    localStorage.setItem(settingStorageKey, JSON.stringify({ notes: seed, conversation: chatWithProposal }))
+
+    render(
+      <StudioSetting
+        preview
+        hidden={false}
+        onTyping={() => {}}
+        referencingProjects={[
+          { id: 'p1', title: '天穹之剑' },
+          { id: 'p2', title: '星穹旅人' },
+        ]}
+      />
+    )
+    fireEvent.click(screen.getByRole('button', { name: '返回设定对话' }))
+
+    // Expand proposal
+    fireEvent.click(screen.getByRole('button', { name: '查看提案：甲' }))
+
+    // Verify metadata displayed
+    expect(screen.getByText('第2章剧情需要法宝线索')).toBeInTheDocument()
+    expect(screen.getByText(/天穹之剑 · lore_agent/)).toBeInTheDocument()
+    expect(screen.getByText('ver-base')).toBeInTheDocument()
+    expect(screen.getByText('共享设定变更将影响关联小说后续任务：天穹之剑、星穹旅人')).toBeInTheDocument()
+  })
+
+  it('handles OCC 409 conflict when accepting proposal with stale baseVersionId', async () => {
+    const onSaveNoteContent = vi.fn().mockResolvedValue('conflict')
+    const chatWithProposal = {
+      ...emptySettingConversation(),
+      messages: [
+        {
+          id: 'msg-1',
+          role: 'assistant' as const,
+          text: '提案',
+          createdAt: Date.now(),
+          changes: [
+            {
+              id: 'prop-1',
+              noteId: 'a',
+              title: '甲',
+              body: '新正文',
+              category: 'setting' as const,
+              before: seed[0],
+              status: 'pending' as const,
+              baseVersionId: 'ver-stale-001',
+            },
+          ],
+        },
+      ],
+    }
+    localStorage.setItem(settingStorageKey, JSON.stringify({ notes: seed, conversation: chatWithProposal }))
+
+    render(
+      <StudioSetting
+        preview={false}
+        hidden={false}
+        backendNotes={seed}
+        initialConversation={chatWithProposal}
+        initialView={{ mode: 'chat' }}
+        onTyping={() => {}}
+        onSaveNoteContent={onSaveNoteContent}
+      />
+    )
+
+    // Accept proposal
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: '接受此条' }))
+    })
+
+    // Expect onSaveNoteContent called with baseVersionId
+    expect(onSaveNoteContent).toHaveBeenCalledWith('a', '新正文', 'ver-stale-001')
+
+    // Conflict error message displayed
+    expect(screen.getByRole('alert')).toHaveTextContent('「甲」已发生变化，请重新生成或人工合并。')
+    // Proposal remains pending (not accepted)
+    expect(screen.getByRole('button', { name: '接受此条' })).toBeInTheDocument()
+  })
+
+  it('successfully updates note and accepts proposal with matching baseVersionId', async () => {
+    const onSaveNoteContent = vi.fn().mockResolvedValue({ versionId: 'ver-new-002' })
+    const chatWithProposal = {
+      ...emptySettingConversation(),
+      messages: [
+        {
+          id: 'msg-1',
+          role: 'assistant' as const,
+          text: '提案',
+          createdAt: Date.now(),
+          changes: [
+            {
+              id: 'prop-1',
+              noteId: 'a',
+              title: '甲',
+              body: '更新后的甲设定',
+              category: 'setting' as const,
+              before: seed[0],
+              status: 'pending' as const,
+              baseVersionId: 'ver-base-001',
+            },
+          ],
+        },
+      ],
+    }
+    localStorage.setItem(settingStorageKey, JSON.stringify({ notes: seed, conversation: chatWithProposal }))
+
+    render(
+      <StudioSetting
+        preview={false}
+        hidden={false}
+        backendNotes={seed}
+        initialConversation={chatWithProposal}
+        initialView={{ mode: 'chat' }}
+        onTyping={() => {}}
+        onSaveNoteContent={onSaveNoteContent}
+      />
+    )
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: '接受此条' }))
+    })
+
+    expect(onSaveNoteContent).toHaveBeenCalledWith('a', '更新后的甲设定', 'ver-base-001')
+    expect(screen.getByRole('button', { name: '查看条目' })).toBeInTheDocument()
+    expect(screen.getByText('已接受')).toBeInTheDocument()
+  })
+
+  it('dismisses a proposal without mutating notes or calling onSaveNoteContent', async () => {
+    const onSaveNoteContent = vi.fn()
+    const chatWithProposal = {
+      ...emptySettingConversation(),
+      messages: [
+        {
+          id: 'msg-1',
+          role: 'assistant' as const,
+          text: '提案',
+          createdAt: Date.now(),
+          changes: [
+            {
+              id: 'prop-1',
+              noteId: 'a',
+              title: '甲',
+              body: '不合适的新正文',
+              category: 'setting' as const,
+              before: seed[0],
+              status: 'pending' as const,
+              baseVersionId: 'ver-base-001',
+            },
+          ],
+        },
+      ],
+    }
+    localStorage.setItem(settingStorageKey, JSON.stringify({ notes: seed, conversation: chatWithProposal }))
+
+    render(
+      <StudioSetting
+        preview={false}
+        hidden={false}
+        backendNotes={seed}
+        initialConversation={chatWithProposal}
+        initialView={{ mode: 'chat' }}
+        onTyping={() => {}}
+        onSaveNoteContent={onSaveNoteContent}
+      />
+    )
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: '暂不采用' }))
+    })
+
+    expect(onSaveNoteContent).not.toHaveBeenCalled()
+    expect(screen.getByText('未采用')).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: '接受此条' })).not.toBeInTheDocument()
+  })
 })
+

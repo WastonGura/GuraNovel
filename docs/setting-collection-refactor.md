@@ -334,3 +334,28 @@ PATCH /projects/{id}
 - 删除历史项目设定文档。
 
 这些能力只有在真实的系列共创或多人协作需求出现后再扩展。
+
+## 11. 重构交付与验收完成记录
+
+### 11.1 Issue #287 设定反哺与生命周期安全
+
+- **提案数据契约 (`SettingChangeProposal`)**：定义并严格校验 `id`、`setting_collection_id`、`target_document_id`、`base_version_id`、`title`、`category`、`proposed_content`、`reason`、`source_task`（包含 `novel_id`/`novel_title`/`agent_role`/`chapter_id`/`run_id`）与状态流转；
+- **乐观并发控制 (OCC) 与冲突防御**：
+  - 后端服务与路由 (`POST /api/v1/setting-collections/{id}/proposals/apply`) 强制要求 `expected_current_version_id == base_version_id`；
+  - 发生并发修改时返回 `409 Conflict`，绝不静默覆盖最新设定文档；
+  - 前端对话交互提示「「{标题}」已发生变化，请重新生成或人工合并。」并保留提案为待处理状态；
+- **跨小说影响明确告知**：
+  - 当设定集关联多部小说时，提案卡片与工作区明确展示黄色风险提示条：`共享设定变更将影响关联小说后续任务：{关联小说列表}`；
+- **零自动静默写入**：
+  - 各类 Agent 生成、章节初稿定稿、评审、读者反馈或项目维护阶段，禁止自动将设定建议直接提交或应用到设定集，必须且仅能由作者在工作区中显式点击确认。
+
+### 11.2 自动化回归与工程门禁汇总
+
+- **后端单元测试**：`tests/test_setting_change_proposals.py` 与 `tests/test_setting_context_resolver.py` 等 34 项单测全部通过；
+- **后端集成测试**：基于容器化 PostgreSQL 运行 `tests/integration/test_setting_proposal_integration.py`、`test_setting_collection_database_migration.py`、`test_setting_collection_document_mutations.py`、`test_setting_collection_routes.py`、`test_setting_context_snapshots.py` 等 22 项测试全部通过；
+- **后端代码规范**：`uv run ruff check .` 0 警告 0 报错；
+- **前端单元测试**：Vitest 覆盖 29 个测试套件，共 526 项测试全部通过（包含 `StudioSetting.test.tsx` 25 项、`SettingCollectionWorkspace.test.tsx` 7 项、`client.test.ts` 35 项等）；
+- **前端代码规范与构建**：`npm run lint` 检查通过，`npm run build` 打包构建成功；
+- **Playwright 端到端测试**：13 项 E2E 真实浏览器测试全部通过，严格维持视口 100dvh 无整页滚动与核心交互链路正常；
+- **设定集重构系列 Issue 全部闭环**：#281、#282、#283、#284、#285、#286、#287 顺序落地并完整验证。
+

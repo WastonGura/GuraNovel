@@ -16,6 +16,7 @@ from app.api.schemas_setting_collections import (
     SettingCollectionResponse,
     UpdateSettingCollectionRequest,
 )
+from app.agents.setting_proposal_contracts import SettingChangeProposal
 from app.models import Document, Project, SettingCollection
 from app.services import SettingCollectionService
 from app.workspace import ProjectWorkspace
@@ -144,5 +145,23 @@ async def create_collection_document(
             selectinload(Document.setting_collection),
         )
         .where(Document.id == document.id)
+    )
+
+
+@router.post(
+    "/{collection_id}/proposals/apply",
+    response_model=DocumentResponse,
+    status_code=status.HTTP_200_OK,
+)
+async def apply_setting_proposal(
+    collection_id: UUID,
+    proposal: SettingChangeProposal,
+    actor_user_id: UUID | None = Depends(get_actor_user_id),
+    session: AsyncSession = Depends(get_db_session),
+) -> Document:
+    return await SettingCollectionService(session).apply_setting_change_proposal(
+        collection_id=collection_id,
+        proposal=proposal,
+        actor_user_id=actor_user_id,
     )
 

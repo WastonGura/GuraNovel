@@ -24,12 +24,14 @@ export interface StudioSettingProps {
   collection?: SettingCollection | null
   backendNotes?: SettingNote[]
   readOnly?: boolean
+  referencingProjects?: { id: string; title: string }[]
   onSaveNoteContent?: (noteId: string, content: string, expectedVersionId?: string) => Promise<{ versionId: string } | 'conflict' | false>
   onRenameNote?: (noteId: string, newTitle: string) => Promise<boolean>
   onCreateNote?: (category: SettingCategory, title: string, tempId: string) => Promise<SettingNote | null>
   onDeleteNotes?: (noteIds: string[]) => Promise<boolean>
   onViewChange?: (view: SettingView) => void
   initialView?: Partial<SettingView>
+  initialConversation?: Conversation
   syncUrlParams?: boolean
   saveStatusText?: string
   defaultPinned?: boolean
@@ -66,12 +68,14 @@ export default function StudioSetting({
   collection,
   backendNotes,
   readOnly: explicitReadOnly,
+  referencingProjects,
   onSaveNoteContent,
   onRenameNote,
   onCreateNote,
   onDeleteNotes,
   onViewChange,
   initialView,
+  initialConversation,
   syncUrlParams = false,
   saveStatusText,
   defaultPinned,
@@ -83,10 +87,13 @@ export default function StudioSetting({
   const initialModeParam = searchParams.get('mode') as SettingView['mode'] | null
 
   const [initial] = useState(() => {
-    if (backendNotes) return { notes: backendNotes, conversation: emptySettingConversation(), error: '' }
-    if (!preview) return { notes: [] as SettingNote[], conversation: emptySettingConversation(), error: '' }
-    try { return { ...readSettingWorkspace(), error: '' } }
-    catch { return { notes: [] as SettingNote[], conversation: emptySettingConversation(), error: '本机设定未能读取，原始数据已保留。请先备份后重试。' } }
+    if (backendNotes) return { notes: backendNotes, conversation: initialConversation || emptySettingConversation(), error: '' }
+    if (!preview) return { notes: [] as SettingNote[], conversation: initialConversation || emptySettingConversation(), error: '' }
+    try {
+      const stored = readSettingWorkspace()
+      return { notes: stored.notes, conversation: initialConversation || stored.conversation, error: '' }
+    }
+    catch { return { notes: [] as SettingNote[], conversation: initialConversation || emptySettingConversation(), error: '本机设定未能读取，原始数据已保留。请先备份后重试。' } }
   })
   const [notes, setNotes] = useState(initial.notes)
   const currentNotes = useRef(initial.notes)
@@ -139,7 +146,7 @@ export default function StudioSetting({
   }, [notes])
 
   const active = notes.find(note => note.id === selectedId)
-  const readOnly = explicitReadOnly !== undefined ? explicitReadOnly : (!preview || Boolean(initial.error))
+  const readOnly = explicitReadOnly !== undefined ? explicitReadOnly : ((!preview && !onSaveNoteContent) || Boolean(initial.error))
   const shown = notes.filter(note => note.category === category)
   const results = notes.filter(note => `${note.title}\n${note.body}`.toLocaleLowerCase().includes(query.trim().toLocaleLowerCase()))
   const sidebarVisible = pinned || (sidebarOpen && !hidden)
@@ -317,14 +324,67 @@ export default function StudioSetting({
   function changeProposal(id: string, patch: Partial<SettingChange>) {
     patchConversation({ messages: currentConversation.current.messages.map(message => ({ ...message, changes: message.changes.map(change => change.id === id && change.status === 'pending' ? { ...change, ...patch } : change) })) })
   }
-  function acceptProposals(ids: string[]) {
+  async function acceptProposals(ids: string[]) {
     if (readOnly) return
-    const chat = currentConversation.current, changes = chat.messages.flatMap(message => message.changes).filter(change => ids.includes(change.id) && change.status === 'pending')
+    const chat = currentConversation.current
+    const changes = chat.messages.flatMap(message => message.changes).filter(change => ids.includes(change.id) && change.status === 'pending')
     if (!changes.length) return
-    try {
-      const next = applySettingChanges(currentNotes.current, changes)
-      persist(next, { ...chat, messages: chat.messages.map(message => ({ ...message, changes: message.changes.map(change => ids.includes(change.id) && change.status === 'pending' ? { ...change, status: 'accepted' } : change) })) })
-    } catch (cause) { setError(cause instanceof Error ? cause.message : '提案未能应用，请重试。') }
+
+    if (!onSaveNoteContent) {
+      try {
+        const next = applySettingChanges(currentNotes.current, changes)
+        persist(next, { ...chat, messages: chat.messages.map(message => ({ ...message, changes: message.changes.map(change => ids.includes(change.id) && change.status === 'pending' ? { ...change, status: 'accepted' } : change) })) })
+      } catch (cause) { setError(cause instanceof Error ? cause.message : '提案未能应用，请重试。') }
+      return
+    }
+
+    let workingNotes = [...currentNotes.current]
+    const acceptedIds: string[] = []
+
+    for (const change of changes) {
+      const existing = workingNotes.find(n => n.id === change.noteId)
+      if (existing || change.before) {
+        const targetId = existing?.id || change.before?.id || change.noteId
+        const expectedVersion = change.baseVersionId || change.before?.versionId || existing?.versionId
+        const res = await onSaveNoteContent(targetId, change.body, expectedVersion)
+        if (res === 'conflict') {
+          setError(`「${change.title}」已发生变化，请重新生成或人工合并。`)
+          continue
+        } else if (res && typeof res === 'object' && res.versionId) {
+          workingNotes = workingNotes.map(n => n.id === targetId ? { ...n, body: change.body, versionId: res.versionId } : n)
+          acceptedIds.push(change.id)
+        } else {
+          setError(`「${change.title}」保存失败，请稍后重试。`)
+        }
+      } else {
+        if (onCreateNote) {
+          const created = await onCreateNote(change.category, change.title, change.noteId)
+          if (created) {
+            let finalVersionId = created.versionId
+            if (change.body.trim()) {
+              const saveRes = await onSaveNoteContent(created.id, change.body, created.versionId)
+              if (saveRes && typeof saveRes === 'object' && saveRes.versionId) {
+                finalVersionId = saveRes.versionId
+              }
+            }
+            workingNotes = workingNotes.map(n => n.id === created.id ? { ...n, body: change.body, versionId: finalVersionId } : n)
+            acceptedIds.push(change.id)
+          } else {
+            setError(`创建「${change.title}」失败，请稍后重试。`)
+          }
+        }
+      }
+    }
+
+    if (acceptedIds.length > 0) {
+      persist(workingNotes, {
+        ...chat,
+        messages: chat.messages.map(message => ({
+          ...message,
+          changes: message.changes.map(change => acceptedIds.includes(change.id) ? { ...change, status: 'accepted' } : change),
+        })),
+      })
+    }
   }
   function discussNote() {
     if (!active || (editing && !titleCommit())) return
@@ -389,7 +449,7 @@ export default function StudioSetting({
     </div>
     <div className={`setting-main${mode === 'chat' ? ' is-conversation' : chatVisited ? ' has-conversation-return' : ''}`}>
       {chatVisited && mode !== 'chat' && <button className="setting-return-chat" onClick={() => showMode('chat')}>返回设定对话</button>}
-      <SettingConversation conversation={conversation} notes={notes} visible={mode === 'chat' && activePage} disabled={readOnly} onPatch={patchConversation} onSend={sendMessage} onCommentChange={(noteId, commentId, text) => {
+      <SettingConversation conversation={conversation} notes={notes} visible={mode === 'chat' && activePage} disabled={readOnly} referencingProjects={referencingProjects} onPatch={patchConversation} onSend={sendMessage} onCommentChange={(noteId, commentId, text) => {
         if (!readOnly) persist(currentNotes.current.map(note => note.id === noteId ? { ...note, comments: note.comments?.map(comment => comment.id === commentId ? { ...comment, text } : comment) } : note))
       }} onExample={() => patchConversation({ messages: [...currentConversation.current.messages, settingExampleReply(currentNotes.current, currentConversation.current)] })} onAccept={acceptProposals} onChange={changeProposal} onOpen={choose} onScroll={scrollTop => { currentConversation.current = { ...currentConversation.current, scrollTop } }} />
       {mode === 'chat' ? null : mode === 'graph' ? <SettingGraph notes={notes} onOpen={openTitle} /> : mode === 'search' ? <section className="setting-search-page" aria-label="搜索设定">

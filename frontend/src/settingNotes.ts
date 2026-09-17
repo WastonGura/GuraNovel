@@ -2,7 +2,24 @@ import { reanchorComments, restoreOutlineComments, type OutlineComment } from '.
 
 export type SettingCategory = 'setting' | 'world'
 export type SettingNote = { id: string; category: SettingCategory; title: string; body: string; comments?: OutlineComment[]; documentId?: string; versionId?: string }
-export type SettingChange = { id: string; noteId: string; title: string; body: string; category: SettingCategory; before: SettingNote | null; status: 'pending' | 'accepted' | 'dismissed' }
+export type SettingChangeSourceTask = {
+  workflowRunId?: string
+  chapterId?: string
+  agentRole?: string
+  novelTitle?: string
+}
+export type SettingChange = {
+  id: string
+  noteId: string
+  title: string
+  body: string
+  category: SettingCategory
+  before: SettingNote | null
+  status: 'pending' | 'accepted' | 'dismissed'
+  baseVersionId?: string
+  reason?: string
+  sourceTask?: SettingChangeSourceTask
+}
 export type SettingMessage = { id: string; role: 'user' | 'assistant'; text: string; changes: SettingChange[]; createdAt?: number }
 export type SettingConversation = { messages: SettingMessage[]; draft: string; contextId: string | null; scrollTop: number; stagedComments?: { noteId: string; commentId: string }[] }
 export type SettingWorkspace = { notes: SettingNote[]; conversation: SettingConversation }
