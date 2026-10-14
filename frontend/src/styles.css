@@ -1345,9 +1345,19 @@ textarea:focus-visible { outline: 3px solid #1d4ed8; outline-offset: 2px; }
 }
 
 .novel-create-dialog {
+  border: 0;
+  inset: 0;
+  margin: auto;
   max-height: calc(100vh - 36px);
   overflow-y: auto;
+  position: fixed;
 }
+
+.novel-create-dialog::backdrop { background: rgb(0 0 0 / 35%); }
+.novel-create-dialog textarea { min-height: 72px; height: 80px; }
+.novel-create-advanced { margin-bottom: 12px; }
+.novel-create-advanced summary { cursor: pointer; }
+.novel-create-dialog .workspace-form > button { position: sticky; bottom: 0; }
 
 .form-field-full {
   grid-column: 1 / -1;

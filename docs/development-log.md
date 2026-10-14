@@ -8,6 +8,14 @@ Dates use Asia/Tokyo. Target: v0.12.0 desktop personal trial.
 - Removed the Qodana workflow at the maintainer's explicit request. GitHub Actions ci.yml remains the canonical quality gate; no token or license update is needed.
 - Validation: diff review and Actions run 38515444409 passed, with unrelated product jobs skipped by path filtering. This configuration change does not claim behavioral TDD evidence.
 
+## 2026-10-14 — #306 author creation form
+
+- Status: implemented and focused verification; PR/latest-head Actions/review pending. No version bump.
+- Red: the title did not receive focus, cancelling did not return focus, and Chromium Shift+Tab did not cycle inside the modal.
+- Green: a native modal makes the background inert; explicit Tab boundary handling cycles within visible controls, Escape restores trigger focus, and pending submissions keep the modal open. Chinese titles generate a stable Slug; manual overrides live under advanced options.
+- Thirteen Dashboard component tests pass, including retained inputs, conflict-message focus, double-submit suppression and stable retry Slug. One focused Chromium keyboard/small-desktop case passes at 1062×660. Intro height is bounded and the submit action stays reachable.
+- Creation uses the existing project endpoint and transaction; uncertain response copy directs authors to inspect the bookshelf before another create attempt. No new server idempotency guarantee is claimed.
+
 ## 2026-10-14 — #299 three outline candidates and author editing
 
 - Status: implementation and focused verification; latest-head Actions/review/merge pending.
