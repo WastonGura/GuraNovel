@@ -7,6 +7,7 @@ import { advanceStudioReview, finalizeStudioChapter, loadStudioReview, loadLegac
 import { initialPreview, newStudioChapter, outlineOptions, previewIssues, previewProse, readerPersonas, readerStageKey, reviewers, stages, type Stage, type StudioChapter } from './studioPreview'
 import StudioReader from './StudioReader'
 import { useDraftAutosave } from './useDraftAutosave'
+import { useChapterIdea } from './useChapterIdea'
 import OutlineEditor from './OutlineEditor'
 import { ChapterArchiveRow } from './StudioArchives'
 import { loadDraftArchives, archiveStorageKey, archiveTime, type DraftArchive } from './studioPreview'
@@ -32,8 +33,8 @@ function Pin({ pinned, onChange, label }: { pinned: boolean; onChange: () => voi
   return <IconButton icon={pinned ? 'pin' : 'unpin'} label={`${pinned ? '取消固定' : '固定'}${label}`} aria-pressed={pinned} onClick={onChange} />
 }
 
-function OutlineGeneration({ chapter, preview, refresh, onIdea, onGenerate, onChoose, onRefresh }: {
-  chapter: StudioChapter; preview: boolean; refresh: number; onIdea: (idea: string) => void; onGenerate: () => void; onChoose: (text: string) => void; onRefresh: () => void
+function OutlineGeneration({ chapter, preview, refresh, onIdea, onGenerate, onChoose, onRefresh, readOnly = false }: {
+  chapter: StudioChapter; preview: boolean; refresh: number; onIdea: (idea: string) => void; onGenerate: () => void; onChoose: (text: string) => void; onRefresh: () => void; readOnly?: boolean
 }) {
   const split = chapter.outlineStep === 'choose'
   return <div className={`studio-outline-generation${split ? ' is-split' : ''}`}>
@@ -41,7 +42,7 @@ function OutlineGeneration({ chapter, preview, refresh, onIdea, onGenerate, onCh
     <div className="studio-outline-frame">
       <div className="studio-split-panels" aria-hidden="true"><i /><i /><i /></div>
       <div className="studio-outline-generator-content">
-        <div className="studio-idea-card" data-text-inactive={split} aria-hidden={split} inert={split}><div className="studio-idea-copy" aria-hidden="true"><TextSweep text={chapter.idea || '你的大纲思路…'} changeKey="idea" /></div><textarea aria-label="大纲思路" placeholder="你的大纲思路…" value={chapter.idea} onChange={event => onIdea(event.target.value)} /><IconButton icon="send" label="生成大纲方案" disabled={!chapter.idea.trim() || !preview} onClick={onGenerate} /></div>
+        <div className="studio-idea-card" data-text-inactive={split} aria-hidden={split} inert={split}><div className="studio-idea-copy" aria-hidden="true"><TextSweep text={chapter.idea || '你的大纲思路…'} changeKey="idea" /></div><textarea readOnly={readOnly} maxLength={8000} aria-label="大纲思路" placeholder="你的大纲思路…" value={chapter.idea} onChange={event => onIdea(event.target.value)} /><IconButton icon="send" label="生成大纲方案" disabled={!chapter.idea.trim() || !preview} onClick={onGenerate} /></div>
           {split && <div className="studio-outline-options">{outlineOptions.map((_, index) => {
             const option = outlineOptions[(index + refresh) % 3]
             return <button key={index} aria-label={`方案 0${index + 1}：${option.title}`} onClick={() => onChoose(option.text)}><small data-sweep-text>方案 0{index + 1}</small><h2><TextSweep text={option.title} /></h2><p><StreamText text={option.text} /></p><span data-sweep-text className="studio-option-action">选择这个方向</span></button>
@@ -50,6 +51,19 @@ function OutlineGeneration({ chapter, preview, refresh, onIdea, onGenerate, onCh
     </div>
     <div className="studio-outline-refresh-slot">{split && <button className="studio-refresh" onClick={onRefresh} title="切换预览方案排列"><img src={asset('refresh')} alt="" />换一组</button>}</div>
   </div>
+}
+
+function PersistedIdea({ chapter, projectId, ref }: { chapter: StudioChapter; projectId: string; ref: Ref<StudioEditorHandle> }) {
+  const save = useChapterIdea(projectId, chapter.id)
+  useImperativeHandle(ref, () => ({ flush: save.flush, changeFeedback: () => {}, submitFeedback: async () => false }))
+  return <>
+    <OutlineGeneration chapter={{ ...chapter, idea: save.text }} preview={false} refresh={0}
+      onIdea={save.change} onGenerate={() => {}} onChoose={() => {}} onRefresh={() => {}} readOnly={!save.ready || save.readOnly} />
+    <p className="studio-save-status" role="status">{save.status}
+      {save.status.includes('保存失败') && <button onClick={() => void save.flush()}>重试保存思路</button>}
+      {(save.status.includes('冲突') || save.status.includes('加载失败')) && <button onClick={() => void save.reloadServer()}>使用服务器思路</button>}
+    </p>
+  </>
 }
 
 function ChapterScroll({ children }: { children: ReactNode }) {
@@ -806,7 +820,8 @@ function StudioWorkspace({ title, initial, initialId, project, preview }: {
     <section className={`studio-body${writing ? ' has-prose' : ''}`} aria-label="Create 工作区">{!selected ? <div className="studio-empty"><h1>开始新的一章</h1><button disabled={chapterPending} onClick={() => addChapter(volumes.at(-1) || '第一卷')}>新建章节</button></div> : <>
         {!archive && selected.stage === 'Outline' && <section className={`studio-outline is-${selected.outlineStep}`} key={selected.id} aria-label="本章大纲">
           <MotionFrame className="studio-outline-flow" textKey={`${selected.outlineStep}-${refresh}`}>
-          {selected.outlineStep !== 'edit' && <OutlineGeneration chapter={selected} preview={preview} refresh={refresh} onIdea={idea => update(selected.id, { idea })} onGenerate={() => update(selected.id, { outlineStep: 'choose' })} onChoose={text => update(selected.id, { outline: `${selected.idea}\n\n${text}`, outlineStep: 'edit' })} onRefresh={() => setRefresh(value => value + 1)} />}
+          {selected.outlineStep !== 'edit' && !preview && <PersistedIdea chapter={selected} projectId={project!.id} ref={editor} />}
+          {selected.outlineStep !== 'edit' && preview && <OutlineGeneration chapter={selected} preview={preview} refresh={refresh} onIdea={idea => update(selected.id, { idea })} onGenerate={() => update(selected.id, { outlineStep: 'choose' })} onChoose={text => update(selected.id, { outline: `${selected.idea}\n\n${text}`, outlineStep: 'edit' })} onRefresh={() => setRefresh(value => value + 1)} />}
           {selected.outlineStep === 'edit' && (preview ? <OutlineEditor outline={selected.outline} comments={selected.outlineComments || []} readOnly={false}
             onChange={(outline, outlineComments) => update(selected.id, { outline, outlineComments, review: 'idle', issues: [], selected: [] })}
             onCommentsChange={outlineComments => update(selected.id, { outlineComments })}

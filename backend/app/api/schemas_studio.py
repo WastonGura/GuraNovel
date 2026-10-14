@@ -75,6 +75,29 @@ class RestorePointResponse(BaseModel):
 
 
 FeedbackRegion = Literal["outline", "draft"]
+
+
+class ChapterIdeaWrite(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    text: str = Field(max_length=8000)
+    expected_revision: int = Field(ge=0, strict=True)
+    request_id: UUID
+
+    @model_validator(mode="after")
+    def valid_idea(self):
+        if not self.request_id.int or "\x00" in self.text:
+            raise ValueError("Invalid idea request")
+        self.text.encode("utf-8")
+        return self
+
+
+class ChapterIdeaResponse(BaseModel):
+    project_id: UUID
+    chapter_id: UUID
+    text: str
+    revision: int
+    read_only: bool
+
 COMMENT_COLORS = (
     "#8d9bff", "#ff858d", "#ffbe69", "#8fcba9", "#be94df", "#70bdcf",
     "#447ac2", "#b96972", "#af8c31", "#458466", "#8256a9", "#377b86",

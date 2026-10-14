@@ -8,6 +8,13 @@ Dates use Asia/Tokyo. Target: v0.12.0 desktop personal trial.
 - Removed the Qodana workflow at the maintainer's explicit request. GitHub Actions ci.yml remains the canonical quality gate; no token or license update is needed.
 - Validation: diff review and Actions run 38515444409 passed, with unrelated product jobs skipped by path filtering. This configuration change does not claim behavioral TDD evidence.
 
+## 2026-10-14 — #303 persisted chapter ideas
+
+- Status: local implementation; PR/Actions pending. Ideas are stored per authoritative project/chapter with expected revisions and request identities; drafted/final chapters are read-only.
+- Red: the idea endpoint returned 404 and Studio ignored saved ideas. A stale local idea had no explicit server-version resolution action.
+- Green: targeted PostgreSQL persistence/idempotency/stale-write/wrong-project/read-only scenario passes; all 30 Studio navigation cases pass, including save-before-settings, explicit conflict resolution and lost-response retries with the same request ID.
+- UI debounces writes, retains scoped recovery snapshots and blocks navigation on failed saves. Strict-effect stale reads cannot overwrite a later load. Full gates run only in Actions; uv is used locally. Version unchanged.
+
 ## 2026-10-14 — #302 version-bound setting comments
 
 - Status: implemented locally; dependent PR and Actions pending.
