@@ -73,6 +73,17 @@ def _review(module: object) -> object:
     )
 
 
+def test_long_feedback_attempt_roundtrips_all_locator_ids_and_rejects_overflow() -> None:
+    module = _module()
+    payload = _feedback(module).to_payload()
+    payload["target_segment_ids"] = [str(uuid4()) for _ in range(104)]
+    restored = module.ProviderAttempt.from_payload(payload)
+    assert restored is not None
+    assert restored.to_payload() == payload
+    payload["target_segment_ids"] = [str(uuid4()) for _ in range(1025)]
+    assert module.ProviderAttempt.from_payload(payload) is None
+
+
 @pytest.mark.parametrize("factory", [_initial, _feedback, _review])
 def test_public_construction_failures_are_fixed_and_content_free(factory: object) -> None:
     module = _module()

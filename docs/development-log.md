@@ -9,6 +9,7 @@ Dates use Asia/Tokyo. Target: v0.12.0 desktop personal trial.
 - Green: revision and review share the document layer's existing 1024-locator bound; the independent request/output byte budgets remain enforced. Initial outline sections remain limited to 64. No locator regrouping or silent truncation occurs.
 - The same test exposed stale ORM author-action state across fresh phase sessions. Expiring the request's committed reads before the handoff allows persistence to observe the committed action resolution.
 - Validation: 78 focused PostgreSQL cases pass, including a 104-paragraph revision, exact replay, immutable source binding and subsequent review/local finalization; 108 writer/reviewer/segment/handoff/primitives cases pass. The deterministic provider adds one paragraph per revised paragraph (208 reviewed locators); this proves transport and persistence behavior, not model quality. Real-model revalidation remains pending.
+- Live revalidation exposed a second 64-ID bound in typed provider-attempt recovery evidence. Its new 104-ID roundtrip test failed before the change; 64 attempt-contract/store cases now pass, including rejection above 1024. The interrupted disposable QA run requires explicit no-write reconciliation before retry; no model call was observed for that attempt.
 
 ## 2026-10-14 — #330 server reasoning budget
 
