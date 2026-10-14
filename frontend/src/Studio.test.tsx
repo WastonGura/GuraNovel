@@ -571,7 +571,7 @@ describe('creation studio', () => {
     await stage('Draft'); await stage('提交审阅')
     act(() => vi.advanceTimersByTime(1450))
     expect(screen.queryByLabelText('审阅报告')).not.toBeInTheDocument()
-    expect(screen.getByText('Editor Reviewer 完成审阅')).toBeInTheDocument()
+    expect(screen.getByText('编辑审阅 完成审阅')).toBeInTheDocument()
     fireEvent.click(screen.getByRole('button', { name: '展开章节侧边栏' }))
     await stage(/第9话.*重逢/)
     expect(screen.getByRole('textbox', { name: '章节正文' })).toHaveAttribute('readonly')
