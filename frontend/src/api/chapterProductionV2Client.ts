@@ -57,11 +57,18 @@ export interface ChapterProductionState {
   failure_code: ChapterFailureCode | null
 }
 
+export type LegacyChapterProductionStatus = 'awaiting_approval' | 'completed' | 'rejected'
+const LEGACY_PRODUCTION_STATUSES = new Set<string>(['awaiting_approval', 'completed', 'rejected'])
+
+export function isLegacyChapterProductionRun(run: ChapterProductionRunSummary): boolean {
+  return LEGACY_PRODUCTION_STATUSES.has(run.status)
+}
+
 export interface ChapterProductionRunSummary {
   workflow_run_id: string
   project_id: string
   chapter_id: string
-  status: ChapterProductionStatus
+  status: ChapterProductionStatus | LegacyChapterProductionStatus
   current_node: string | null
   started_at: string
   updated_at: string
@@ -392,7 +399,8 @@ export function decodeChapterProductionRunSummary(value: unknown): ChapterProduc
     workflow_run_id: validateUuid(value.workflow_run_id),
     project_id: validateUuid(value.project_id),
     chapter_id: validateUuid(value.chapter_id),
-    status: decodeChapterProductionStatus(value.status),
+    status: typeof value.status === 'string' && LEGACY_PRODUCTION_STATUSES.has(value.status)
+      ? value.status as LegacyChapterProductionStatus : decodeChapterProductionStatus(value.status),
     current_node: validateNullableString(value.current_node),
     started_at: validateIsoTimestamp(value.started_at),
     updated_at: validateIsoTimestamp(value.updated_at),

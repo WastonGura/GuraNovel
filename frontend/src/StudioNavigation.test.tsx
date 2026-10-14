@@ -50,6 +50,23 @@ beforeEach(() => {
 })
 afterEach(() => { cleanup(); vi.restoreAllMocks() })
 
+it('keeps legacy chapter content visible while disabling writes and V2 task actions', async () => {
+  vi.mocked(listChapters).mockResolvedValue([chapter('a')])
+  vi.mocked(listChapterProductionRuns).mockResolvedValue([{ workflow_run_id: 'legacy-run', status: 'awaiting_approval' }] as Awaited<ReturnType<typeof listChapterProductionRuns>>)
+  open('/projects/p/studio/a')
+  const prose = await screen.findByRole('textbox', { name: '章节正文' })
+  expect(prose).toHaveValue('Text doc-a')
+  expect(prose).toHaveAttribute('readonly')
+  expect(screen.getByRole('alert')).toHaveTextContent('任务操作尚未迁移到新版')
+  expect(screen.getByRole('button', { name: '提交审阅' })).toBeDisabled()
+  expect(screen.getByRole('button', { name: '创建还原点' })).toBeDisabled()
+  expect(screen.queryByRole('button', { name: '重试审阅' })).not.toBeInTheDocument()
+  expect(getChapterProductionRun).not.toHaveBeenCalled()
+  expect(readStudioFeedback).not.toHaveBeenCalled()
+  expect(writeDocument).not.toHaveBeenCalled()
+  expect(resolveChapterProductionAction).not.toHaveBeenCalled()
+})
+
 it('restores actual review reports without treating missing reviewers as PASS', async () => {
   vi.mocked(listChapters).mockResolvedValue([chapter('a')])
   vi.mocked(listChapterProductionRuns).mockResolvedValue([{ workflow_run_id: 'run-a' }] as Awaited<ReturnType<typeof listChapterProductionRuns>>)
@@ -201,11 +218,22 @@ it('confirms the exact outline version and opens only the server author-gate dra
 })
 
 it('does not start a workflow when discovery fails', async () => {
-  vi.mocked(listChapterProductionRuns).mockRejectedValue(new Error('offline'))
+  vi.mocked(listChapterProductionRuns).mockResolvedValueOnce([]).mockRejectedValue(new Error('offline'))
   fireEvent.click(await openOutline())
   await screen.findByText(/正文生成未完成/)
   expect(approveStudioOutline).not.toHaveBeenCalled()
   expect(startChapterProductionV2).not.toHaveBeenCalled()
+})
+
+it('recognizes legacy outline-only chapters before enabling feedback or production', async () => {
+  vi.mocked(listChapters).mockResolvedValue([{ ...chapter('a'), current_draft_document_id: null, current_outline_document_id: 'outline-a' }])
+  vi.mocked(listChapterProductionRuns).mockResolvedValue([{ workflow_run_id: 'legacy-run', status: 'completed' }] as Awaited<ReturnType<typeof listChapterProductionRuns>>)
+  open('/projects/p/studio/a')
+  const confirm = await screen.findByRole('button', { name: '确认大纲并生成正文' })
+  expect(confirm).toBeDisabled()
+  expect(screen.getByRole('alert')).toHaveTextContent('任务操作尚未迁移到新版')
+  expect(approveStudioOutline).not.toHaveBeenCalled()
+  expect(getChapterProductionRun).not.toHaveBeenCalled()
 })
 
 it('recovers an existing drafting run after a lost response instead of starting again', async () => {
@@ -270,6 +298,15 @@ it('keeps edits made just before browser Back pending until the server saves the
   expect(sessionStorage.getItem('guranovel:draft-recovery:doc-b')).toBeNull()
 })
 
+it('rejects migrated reader links for an older source rather than showing current feedback', async () => {
+  open('/projects/p/studio/a?stage=Reader&readerDocument=doc-a&readerVersion=older-version&readerSession=old-session')
+  expect(await screen.findByRole('alert')).toHaveTextContent('此读者链接对应的正文版本已变化')
+  expect(screen.getByRole('link', { name: '打开当前章节' })).toHaveAttribute('href', '/projects/p/studio/a')
+  expect(screen.queryByRole('textbox', { name: '章节正文' })).not.toBeInTheDocument()
+  fireEvent.click(screen.getByRole('link', { name: '打开当前章节' }))
+  expect(await screen.findByRole('textbox', { name: '章节正文' })).toHaveValue('Text doc-a')
+})
+
 it('reports invalid chapter links without falling back to a different chapter', async () => {
   open('/projects/p/studio/unknown')
   expect(await screen.findByRole('alert')).toHaveTextContent('此作品中未找到该章节')
@@ -322,7 +359,7 @@ it('keeps browser-history edits pending when session storage cannot write a reco
   await waitFor(() => expect(writeDocument).toHaveBeenCalledWith('doc-b', { content: 'Keep this without session storage', expected_current_version_id: 'doc-b-v1' }))
 })
 
-it('creates a server chapter once, uses its assigned identity, and keeps the old workbench accessible', async () => {
+it('creates a server chapter once and keeps navigation inside Studio', async () => {
   vi.mocked(listChapters).mockResolvedValue([])
   let finish!: (value: Chapter) => void
   vi.mocked(createChapter).mockImplementation(() => new Promise(resolve => { finish = resolve }))
@@ -332,7 +369,7 @@ it('creates a server chapter once, uses its assigned identity, and keeps the old
   await waitFor(() => expect(createChapter).toHaveBeenCalledTimes(1))
   expect(createChapter).toHaveBeenCalledWith('p', { title: '未命名章节', metadata: { volume: '第一卷' } })
   expect(button).toBeDisabled()
-  expect(screen.getByRole('link', { name: '前往现有工作台' })).toHaveAttribute('href', '/projects/p')
+  expect(screen.queryByText(/现有工作台/)).not.toBeInTheDocument()
   await act(async () => finish({ ...chapter('server-chapter', 42), current_draft_document_id: null }))
   expect(screen.getByTestId('url')).toHaveTextContent('/projects/p/studio/server-chapter?stage=Outline')
   expect(screen.queryByRole('alert')).not.toBeInTheDocument()

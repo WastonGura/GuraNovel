@@ -28,6 +28,23 @@ beforeEach(() => {
 })
 afterEach(cleanup)
 
+it('loads the exact reader session from a migrated deep link', async () => {
+  render(<StudioReader projectId="project" chapter={chapter} sessionId="panel" onChange={vi.fn()} onFinal={vi.fn()} />)
+  await screen.findByText('第1话 第一章')
+  expect(getReaderPanel).toHaveBeenCalledWith('project', 'chapter', 'panel', expect.any(Object), expect.any(AbortSignal))
+  expect(listReaderPanels).not.toHaveBeenCalled()
+  expect(startReaderPanel).not.toHaveBeenCalled()
+})
+
+it('rejects migrated sessions bound to a different document version', async () => {
+  vi.mocked(getReaderPanel).mockResolvedValue({ ...panel, document_version_id: 'old-version' })
+  render(<StudioReader projectId="project" chapter={chapter} sessionId="panel" onChange={vi.fn()} onFinal={vi.fn()} />)
+  expect(await screen.findByRole('alert')).toHaveTextContent('读者会话加载失败')
+  expect(listReaderPanels).not.toHaveBeenCalled()
+  expect(startReaderPanel).not.toHaveBeenCalled()
+  expect(resumeReaderPanel).not.toHaveBeenCalled()
+})
+
 it('recovers the identical invitation after a lost response and reload, then shows actual named reports', async () => {
   vi.mocked(startReaderPanel).mockRejectedValueOnce(new Error('response lost')).mockResolvedValue(panel)
   open()

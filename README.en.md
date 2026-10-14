@@ -93,6 +93,8 @@ Before deploying or running GuraNovel, please ensure your environment meets the 
 
 ## Quickstart & Deployment
 
+The frontend uses one interface: the bookshelf, Studio, and standalone setting collections. Retired workbench links redirect to these pages. Ideation and maintenance controls are not yet available in the new interface; existing backend tasks and data remain intact. See [frontend routes and compatibility notes](docs/frontend-interface.md).
+
 GuraNovel offers three deployment pathways. We recommend **One-Click Full-Stack Docker Compose** or the **Local Startup Script**.
 
 ### Option 1: One-Click Full-Stack Docker Compose (Recommended)

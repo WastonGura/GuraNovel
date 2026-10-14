@@ -285,6 +285,15 @@ describe('Chapter Production V2 Decoders', () => {
   })
 
   describe('decodeChapterProductionRunSummary', () => {
+    it.each(['awaiting_approval', 'completed', 'rejected'])('preserves known legacy summary status %s without accepting it as V2 state', status => {
+      expect(decodeChapterProductionRunSummary({ ...sampleValidSummary(), status }).status).toBe(status)
+      expect(() => decodeChapterProductionState({ ...sampleValidState(), status })).toThrow()
+    })
+
+    it('rejects arbitrary statuses and invalid legacy identity', () => {
+      expect(() => decodeChapterProductionRunSummary({ ...sampleValidSummary(), status: 'future_status' })).toThrow()
+      expect(() => decodeChapterProductionRunSummary({ ...sampleValidSummary(), status: 'awaiting_approval', chapter_id: 'bad' })).toThrow()
+    })
     it('decodes a valid run summary', () => {
       const input = sampleValidSummary()
       const decoded = decodeChapterProductionRunSummary(input)
