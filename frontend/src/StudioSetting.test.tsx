@@ -650,5 +650,164 @@ describe('setting notes and graph', () => {
     expect(screen.getByText('未采用')).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: '接受此条' })).not.toBeInTheDocument()
   })
+
+  it('recovers note body draft from sessionStorage for backendNotes', () => {
+    sessionStorage.setItem('guranovel:setting-draft-recovery:a', '从sessionStorage恢复的本地草稿')
+    render(
+      <StudioSetting
+        preview={false}
+        hidden={false}
+        backendNotes={seed}
+        onTyping={() => {}}
+      />
+    )
+    expect(screen.getByText('从sessionStorage恢复的本地草稿')).toBeInTheDocument()
+    sessionStorage.removeItem('guranovel:setting-draft-recovery:a')
+  })
+
+  it('debounces note body edits and saves draft to sessionStorage', async () => {
+    const onSaveNoteContent = vi.fn().mockResolvedValue({ versionId: 'ver-next-1' })
+    sessionStorage.clear()
+
+    render(
+      <StudioSetting
+        preview={false}
+        hidden={false}
+        backendNotes={seed}
+        onTyping={() => {}}
+        onSaveNoteContent={onSaveNoteContent}
+      />
+    )
+
+    fireEvent.click(screen.getByRole('button', { name: '编辑' }))
+    const textarea = screen.getByLabelText('设定正文')
+
+    await act(async () => {
+      fireEvent.change(textarea, { target: { value: '连续编辑草稿内容' } })
+    })
+
+    // Immediately in sessionStorage
+    expect(sessionStorage.getItem('guranovel:setting-draft-recovery:a')).toBe('连续编辑草稿内容')
+  })
+
+  it('accepts proposal via onApplyProposal when available and updates note', async () => {
+    const onApplyProposal = vi.fn().mockResolvedValue({ versionId: 'ver-applied-99', documentId: 'a' })
+    const chatWithProposal = {
+      ...emptySettingConversation(),
+      messages: [
+        {
+          id: 'msg-1',
+          role: 'assistant' as const,
+          text: '提案',
+          createdAt: Date.now(),
+          changes: [
+            {
+              id: 'prop-1',
+              noteId: 'a',
+              title: '甲',
+              body: '应用此提案的正文',
+              category: 'setting' as const,
+              before: seed[0],
+              status: 'pending' as const,
+              baseVersionId: 'ver-base-001',
+            },
+          ],
+        },
+      ],
+    }
+
+    localStorage.setItem(settingStorageKey, JSON.stringify({ notes: seed, conversation: chatWithProposal }))
+
+    render(
+      <StudioSetting
+        preview={false}
+        hidden={false}
+        readOnly={false}
+        collection={{
+          id: 'col-1',
+          owner_id: 'user-1',
+          slug: 'col-slug',
+          title: '设定集',
+          description: null,
+          status: 'active',
+          workspace_root: '',
+          revision: 1,
+          metadata: {},
+          created_at: '',
+          updated_at: '',
+        }}
+        backendNotes={seed}
+        initialConversation={chatWithProposal}
+        initialView={{ mode: 'chat' }}
+        onTyping={() => {}}
+        onApplyProposal={onApplyProposal}
+      />
+    )
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: '接受此条' }))
+    })
+
+    expect(onApplyProposal).toHaveBeenCalledWith(
+      expect.objectContaining({
+        setting_collection_id: 'col-1',
+        title: '甲',
+        proposed_content: '应用此提案的正文',
+        status: 'pending',
+      })
+    )
+    expect(screen.getByText('已接受')).toBeInTheDocument()
+  })
+
+  it('does not mark proposal accepted if creating note body save fails in fallback mode', async () => {
+    const onCreateNote = vi.fn().mockResolvedValue({ id: 'new-note-1', title: '新设定', category: 'setting', body: '', versionId: 'ver-1' })
+    const onSaveNoteContent = vi.fn().mockResolvedValue(false)
+    const chatWithNewNoteProposal = {
+      ...emptySettingConversation(),
+      messages: [
+        {
+          id: 'msg-1',
+          role: 'assistant' as const,
+          text: '新建条目提案',
+          createdAt: Date.now(),
+          changes: [
+            {
+              id: 'prop-new',
+              noteId: 'temp-id',
+              title: '新设定',
+              body: '新设定正文',
+              category: 'setting' as const,
+              before: null,
+              status: 'pending' as const,
+            },
+          ],
+        },
+      ],
+    }
+    localStorage.setItem(settingStorageKey, JSON.stringify({ notes: seed, conversation: chatWithNewNoteProposal }))
+
+    render(
+      <StudioSetting
+        preview={false}
+        hidden={false}
+        readOnly={false}
+        backendNotes={seed}
+        initialConversation={chatWithNewNoteProposal}
+        initialView={{ mode: 'chat' }}
+        onTyping={() => {}}
+        onCreateNote={onCreateNote}
+        onSaveNoteContent={onSaveNoteContent}
+      />
+    )
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: '接受此条' }))
+    })
+
+    expect(onCreateNote).toHaveBeenCalled()
+    expect(onSaveNoteContent).toHaveBeenCalledWith('new-note-1', '新设定正文', 'ver-1')
+    expect(screen.queryByText('已接受')).not.toBeInTheDocument()
+    expect(screen.getByRole('alert')).toHaveTextContent('正文保存失败')
+  })
 })
 

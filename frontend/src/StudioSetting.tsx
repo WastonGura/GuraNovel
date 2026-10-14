@@ -9,7 +9,7 @@ import SettingGraph from './SettingGraph'
 import SettingConversation from './SettingConversation'
 import SettingNoteList from './SettingNoteList'
 import { applySettingChanges, categoryNames, emptySettingConversation, noteLinks, readSettingWorkspace, resolveNote, settingExampleReply, settingStorageKey, stagedSettingComments, type SettingCategory, type SettingChange, type SettingConversation as Conversation, type SettingNote } from './settingNotes'
-import type { SettingCollection } from './api/client'
+import type { SettingCollection, SettingChangeProposal } from './api/client'
 import './studioSetting.css'
 
 export type SettingView = { id: string; category: SettingCategory; mode: 'note' | 'graph' | 'search' | 'chat' }
@@ -26,6 +26,7 @@ export interface StudioSettingProps {
   readOnly?: boolean
   referencingProjects?: { id: string; title: string }[]
   onSaveNoteContent?: (noteId: string, content: string, expectedVersionId?: string) => Promise<{ versionId: string } | 'conflict' | false>
+  onApplyProposal?: (proposal: SettingChangeProposal) => Promise<{ versionId: string; documentId: string } | 'conflict' | false>
   onRenameNote?: (noteId: string, newTitle: string) => Promise<boolean>
   onCreateNote?: (category: SettingCategory, title: string, tempId: string) => Promise<SettingNote | null>
   onDeleteNotes?: (noteIds: string[]) => Promise<boolean>
@@ -70,6 +71,7 @@ export default function StudioSetting({
   readOnly: explicitReadOnly,
   referencingProjects,
   onSaveNoteContent,
+  onApplyProposal,
   onRenameNote,
   onCreateNote,
   onDeleteNotes,
@@ -87,7 +89,20 @@ export default function StudioSetting({
   const initialModeParam = searchParams.get('mode') as SettingView['mode'] | null
 
   const [initial] = useState(() => {
-    if (backendNotes) return { notes: backendNotes, conversation: initialConversation || emptySettingConversation(), error: '' }
+    if (backendNotes) {
+      const restored = backendNotes.map(n => {
+        try {
+          const draft = sessionStorage.getItem(`guranovel:setting-draft-recovery:${n.id}`)
+          if (draft !== null && draft !== n.body) {
+            return { ...n, body: draft }
+          }
+        } catch (_err: unknown) {
+          void _err
+        }
+        return n
+      })
+      return { notes: restored, conversation: initialConversation || emptySettingConversation(), error: '' }
+    }
     if (!preview) return { notes: [] as SettingNote[], conversation: initialConversation || emptySettingConversation(), error: '' }
     try {
       const stored = readSettingWorkspace()
@@ -126,15 +141,26 @@ export default function StudioSetting({
   const [prevBackendNotes, setPrevBackendNotes] = useState(backendNotes)
   if (backendNotes && backendNotes !== prevBackendNotes) {
     setPrevBackendNotes(backendNotes)
-    setNotes(backendNotes)
-    if (backendNotes.length > 0) {
-      if (!selectedId || !backendNotes.some(n => n.id === selectedId)) {
-        const initialTarget = initialNoteParam && backendNotes.find(n => n.id === initialNoteParam)
+    const restored = backendNotes.map(n => {
+      try {
+        const draft = sessionStorage.getItem(`guranovel:setting-draft-recovery:${n.id}`)
+        if (draft !== null && draft !== n.body) {
+          return { ...n, body: draft }
+        }
+      } catch (_err: unknown) {
+        void _err
+      }
+      return n
+    })
+    setNotes(restored)
+    if (restored.length > 0) {
+      if (!selectedId || !restored.some(n => n.id === selectedId)) {
+        const initialTarget = initialNoteParam && restored.find(n => n.id === initialNoteParam)
         if (initialTarget) {
           setSelectedId(initialTarget.id)
         } else {
           const cat = initialCategoryParam || category
-          const found = backendNotes.find(n => n.category === cat) || backendNotes[0]
+          const found = restored.find(n => n.category === cat) || restored[0]
           setSelectedId(found.id)
         }
       }
@@ -146,7 +172,7 @@ export default function StudioSetting({
   }, [notes])
 
   const active = notes.find(note => note.id === selectedId)
-  const readOnly = explicitReadOnly !== undefined ? explicitReadOnly : ((!preview && !onSaveNoteContent) || Boolean(initial.error))
+  const readOnly = explicitReadOnly !== undefined ? explicitReadOnly : ((!preview && !onSaveNoteContent && !onApplyProposal) || Boolean(initial.error))
   const shown = notes.filter(note => note.category === category)
   const results = notes.filter(note => `${note.title}\n${note.body}`.toLocaleLowerCase().includes(query.trim().toLocaleLowerCase()))
   const sidebarVisible = pinned || (sidebarOpen && !hidden)
@@ -172,6 +198,118 @@ export default function StudioSetting({
     }
     if (onViewChange) onViewChange(next)
   }
+  interface NoteSaveQueue {
+    timer: ReturnType<typeof setTimeout> | null
+    inFlight: boolean
+    lastSavedBody: string | null
+    waiters: Array<(success: boolean) => void>
+  }
+  const saveQueues = useRef<Map<string, NoteSaveQueue>>(new Map())
+
+  useEffect(() => {
+    const queues = saveQueues.current
+    return () => {
+      queues.forEach(q => {
+        if (q.timer) clearTimeout(q.timer)
+      })
+    }
+  }, [])
+
+  async function runSave(id: string): Promise<boolean> {
+    if (!onSaveNoteContent) return true
+    let q = saveQueues.current.get(id)
+    if (!q) {
+      q = { timer: null, inFlight: false, lastSavedBody: null, waiters: [] }
+      saveQueues.current.set(id, q)
+    }
+    if (q.timer) {
+      clearTimeout(q.timer)
+      q.timer = null
+    }
+    if (q.inFlight) {
+      return new Promise<boolean>(resolve => q!.waiters.push(resolve))
+    }
+    const note = currentNotes.current.find(n => n.id === id)
+    if (!note) return true
+    if (q.lastSavedBody === note.body) {
+      try {
+        sessionStorage.removeItem(`guranovel:setting-draft-recovery:${id}`)
+      } catch (_err: unknown) {
+        void _err
+      }
+      return true
+    }
+
+    q.inFlight = true
+    const bodyToSave = note.body
+    const expectedVersion = note.versionId
+
+    try {
+      const res = await onSaveNoteContent(id, bodyToSave, expectedVersion)
+      if (res === 'conflict') {
+        setSaved(false)
+        q.inFlight = false
+        const w = q.waiters
+        q.waiters = []
+        w.forEach(resolve => resolve(false))
+        return false
+      } else if (res && typeof res === 'object' && res.versionId) {
+        q.lastSavedBody = bodyToSave
+        const updated = currentNotes.current.map(n => n.id === id ? { ...n, versionId: res.versionId } : n)
+        currentNotes.current = updated
+        setNotes(updated)
+        q.inFlight = false
+
+        const latestNote = currentNotes.current.find(n => n.id === id)
+        if (latestNote && latestNote.body !== bodyToSave) {
+          return runSave(id)
+        } else {
+          try {
+            sessionStorage.removeItem(`guranovel:setting-draft-recovery:${id}`)
+          } catch (_err: unknown) {
+            void _err
+          }
+          setSaved(true)
+          setError('')
+          const w = q.waiters
+          q.waiters = []
+          w.forEach(resolve => resolve(true))
+          return true
+        }
+      } else {
+        setSaved(false)
+        q.inFlight = false
+        const w = q.waiters
+        q.waiters = []
+        w.forEach(resolve => resolve(false))
+        return false
+      }
+    } catch {
+      setSaved(false)
+      q.inFlight = false
+      const w = q.waiters
+      q.waiters = []
+      w.forEach(resolve => resolve(false))
+      return false
+    }
+  }
+
+  function enqueueSave(id: string, debounceMs = 400) {
+    let q = saveQueues.current.get(id)
+    if (!q) {
+      q = { timer: null, inFlight: false, lastSavedBody: null, waiters: [] }
+      saveQueues.current.set(id, q)
+    }
+    if (q.timer) {
+      clearTimeout(q.timer)
+      q.timer = null
+    }
+    q.timer = setTimeout(() => {
+      q!.timer = null
+      void runSave(id)
+    }, debounceMs)
+  }
+
   function persist(next: SettingNote[], chat = currentConversation.current, requireSave = false) {
     if (readOnly) return false
     let stored = false
@@ -182,19 +320,12 @@ export default function StudioSetting({
       setConversation(chat)
       const activeChanged = next.find(n => n.id === active?.id)
       if (activeChanged && active && (activeChanged.body !== active.body || activeChanged.comments !== active.comments)) {
-        void onSaveNoteContent(activeChanged.id, activeChanged.body, activeChanged.versionId).then(res => {
-          if (res === 'conflict') {
-            setSaved(false)
-          } else if (res) {
-            setSaved(true)
-            setError('')
-            const updated = currentNotes.current.map(n => n.id === activeChanged.id ? { ...n, versionId: res.versionId } : n)
-            currentNotes.current = updated
-            setNotes(updated)
-          } else {
-            setSaved(false)
-          }
-        })
+        try {
+          sessionStorage.setItem(`guranovel:setting-draft-recovery:${activeChanged.id}`, activeChanged.body)
+        } catch (_err: unknown) {
+          void _err
+        }
+        enqueueSave(activeChanged.id, 400)
       }
       return true
     }
@@ -330,6 +461,70 @@ export default function StudioSetting({
     const changes = chat.messages.flatMap(message => message.changes).filter(change => ids.includes(change.id) && change.status === 'pending')
     if (!changes.length) return
 
+    if (onApplyProposal && collection) {
+      let workingNotes = [...currentNotes.current]
+      const acceptedIds: string[] = []
+      const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
+
+      for (const change of changes) {
+        const proposalId = uuidRegex.test(change.id) ? change.id : crypto.randomUUID()
+        const targetDocId = (change.noteId && uuidRegex.test(change.noteId)) ? change.noteId : null
+        const baseVerId = (change.baseVersionId && uuidRegex.test(change.baseVersionId)) ? change.baseVersionId : null
+        const proposal: SettingChangeProposal = {
+          id: proposalId,
+          setting_collection_id: collection.id,
+          target_document_id: targetDocId,
+          base_version_id: baseVerId,
+          title: change.title,
+          category: change.category,
+          proposed_content: change.body,
+          reason: change.reason?.trim() || '设定变更提案',
+          source_task: change.sourceTask ? {
+            workflow_run_id: change.sourceTask.workflowRunId,
+            chapter_id: change.sourceTask.chapterId,
+            agent_role: change.sourceTask.agentRole,
+            novel_title: change.sourceTask.novelTitle,
+          } : undefined,
+          status: 'pending',
+        }
+        const res = await onApplyProposal(proposal)
+        if (res === 'conflict') {
+          setError(`「${change.title}」已发生冲突，请重新获取最新版本或人工合并。`)
+          continue
+        } else if (res && typeof res === 'object' && res.versionId) {
+          const docId = res.documentId || change.noteId
+          const existing = workingNotes.find(n => n.id === docId || n.id === change.noteId)
+          if (existing) {
+            workingNotes = workingNotes.map(n => (n.id === existing.id) ? { ...n, id: docId, documentId: docId, body: change.body, versionId: res.versionId } : n)
+          } else {
+            workingNotes.push({
+              id: docId,
+              documentId: docId,
+              title: change.title,
+              body: change.body,
+              category: change.category,
+              versionId: res.versionId,
+              comments: [],
+            })
+          }
+          acceptedIds.push(change.id)
+        } else {
+          setError(`「${change.title}」应用提案失败，请稍后重试。`)
+        }
+      }
+
+      if (acceptedIds.length > 0) {
+        persist(workingNotes, {
+          ...chat,
+          messages: chat.messages.map(message => ({
+            ...message,
+            changes: message.changes.map(change => acceptedIds.includes(change.id) ? { ...change, status: 'accepted' } : change),
+          })),
+        })
+      }
+      return
+    }
+
     if (!onSaveNoteContent) {
       try {
         const next = applySettingChanges(currentNotes.current, changes)
@@ -361,14 +556,24 @@ export default function StudioSetting({
           const created = await onCreateNote(change.category, change.title, change.noteId)
           if (created) {
             let finalVersionId = created.versionId
+            let saveFailed = false
             if (change.body.trim()) {
               const saveRes = await onSaveNoteContent(created.id, change.body, created.versionId)
               if (saveRes && typeof saveRes === 'object' && saveRes.versionId) {
                 finalVersionId = saveRes.versionId
+              } else {
+                saveFailed = true
+                if (saveRes === 'conflict') {
+                  setError(`「${change.title}」保存正文时发生版本冲突。`)
+                } else {
+                  setError(`「${change.title}」正文保存失败。`)
+                }
               }
             }
-            workingNotes = workingNotes.map(n => n.id === created.id ? { ...n, body: change.body, versionId: finalVersionId } : n)
-            acceptedIds.push(change.id)
+            if (!saveFailed) {
+              workingNotes = workingNotes.map(n => n.id === created.id ? { ...n, body: change.body, versionId: finalVersionId } : n)
+              acceptedIds.push(change.id)
+            }
           } else {
             setError(`创建「${change.title}」失败，请稍后重试。`)
           }
@@ -424,6 +629,20 @@ export default function StudioSetting({
   useImperativeHandle(ref, () => ({ flush: async () => {
     if (editing) return titleCommit()
     if (readOnly) return true
+    if (onSaveNoteContent) {
+      const ids = Array.from(saveQueues.current.keys())
+      const results = await Promise.all(
+        ids.map(async (id) => {
+          const q = saveQueues.current.get(id)
+          if (q?.timer) {
+            clearTimeout(q.timer)
+            q.timer = null
+          }
+          return runSave(id)
+        })
+      )
+      return results.every(Boolean)
+    }
     return persist(currentNotes.current)
   } }))
 
@@ -449,7 +668,7 @@ export default function StudioSetting({
     </div>
     <div className={`setting-main${mode === 'chat' ? ' is-conversation' : chatVisited ? ' has-conversation-return' : ''}`}>
       {chatVisited && mode !== 'chat' && <button className="setting-return-chat" onClick={() => showMode('chat')}>返回设定对话</button>}
-      <SettingConversation conversation={conversation} notes={notes} visible={mode === 'chat' && activePage} disabled={readOnly} referencingProjects={referencingProjects} onPatch={patchConversation} onSend={sendMessage} onCommentChange={(noteId, commentId, text) => {
+      <SettingConversation conversation={conversation} notes={notes} visible={mode === 'chat' && activePage} disabled={readOnly} referencingProjects={referencingProjects} preview={preview} onPatch={patchConversation} onSend={sendMessage} onCommentChange={(noteId, commentId, text) => {
         if (!readOnly) persist(currentNotes.current.map(note => note.id === noteId ? { ...note, comments: note.comments?.map(comment => comment.id === commentId ? { ...comment, text } : comment) } : note))
       }} onExample={() => patchConversation({ messages: [...currentConversation.current.messages, settingExampleReply(currentNotes.current, currentConversation.current)] })} onAccept={acceptProposals} onChange={changeProposal} onOpen={choose} onScroll={scrollTop => { currentConversation.current = { ...currentConversation.current, scrollTop } }} />
       {mode === 'chat' ? null : mode === 'graph' ? <SettingGraph notes={notes} onOpen={openTitle} /> : mode === 'search' ? <section className="setting-search-page" aria-label="搜索设定">

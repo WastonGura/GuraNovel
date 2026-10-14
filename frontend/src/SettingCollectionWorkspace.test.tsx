@@ -17,6 +17,7 @@ vi.mock('./api/client', async (importOriginal) => {
     createCollectionDocument: vi.fn(),
     deleteDocument: vi.fn(),
     getDocument: vi.fn(),
+    applySettingProposal: vi.fn(),
   }
 })
 
@@ -27,6 +28,7 @@ const mockedReadDocumentContent = vi.mocked(client.readDocumentContent)
 const mockedWriteDocument = vi.mocked(client.writeDocument)
 const mockedCreateCollectionDocument = vi.mocked(client.createCollectionDocument)
 const mockedGetDocument = vi.mocked(client.getDocument)
+const mockedApplySettingProposal = vi.mocked(client.applySettingProposal)
 
 const mockCollection: client.SettingCollection = {
   id: 'col-123',
@@ -311,5 +313,89 @@ describe('SettingCollectionWorkspace', () => {
     // When category=world and note=doc-world-1, the world category and note should be selected
     const list = screen.getByLabelText('世界观条目', { exact: true })
     expect(within(list).getByRole('button', { name: '天穹神域' })).toBeInTheDocument()
+  })
+
+  it('recovers draft from sessionStorage on initial load', async () => {
+    sessionStorage.setItem('guranovel:setting-draft-recovery:doc-char-1', '本地暂存的未提交草稿。')
+    renderWorkspace()
+
+    await waitFor(() => {
+      expect(screen.getByText('天穹纪元设定集')).toBeInTheDocument()
+    })
+
+    expect(screen.getByText('本地暂存的未提交草稿。')).toBeInTheDocument()
+    sessionStorage.removeItem('guranovel:setting-draft-recovery:doc-char-1')
+  })
+
+  it('renders error page when reading document content fails and allows retry', async () => {
+    mockedReadDocumentContent.mockRejectedValueOnce(new Error('Network error'))
+
+    renderWorkspace()
+
+    await waitFor(() => {
+      expect(screen.getByRole('alert')).toBeInTheDocument()
+    })
+
+    expect(screen.getByText('设定集加载失败，请刷新后重试。')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '重试加载' })).toBeInTheDocument()
+
+    // Retry loading
+    mockedReadDocumentContent.mockResolvedValueOnce({
+      document_id: 'doc-char-1',
+      version_id: 'ver-101',
+      content: '重试成功加载的内容。',
+    })
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: '重试加载' }))
+    })
+
+    await waitFor(() => {
+      expect(screen.queryByText('设定集加载失败，请刷新后重试。')).not.toBeInTheDocument()
+    })
+    expect(screen.getByText('天穹纪元设定集')).toBeInTheDocument()
+  })
+
+  it('handles applying proposals through applySettingProposal', async () => {
+    mockedApplySettingProposal.mockResolvedValueOnce({
+      id: 'doc-char-1',
+      project_id: null,
+      setting_collection_id: 'col-123',
+      chapter_id: null,
+      type: 'character_profile',
+      title: '陆云舟',
+      path: 'setting/luyunzhou.md',
+      current_version_id: 'ver-applied-1',
+      current_version: null,
+      metadata: { category: 'setting' },
+      created_at: '2026-07-19T00:00:00Z',
+      updated_at: '2026-07-19T00:00:00Z',
+    })
+
+    renderWorkspace('/setting-collections/col-123?mode=chat')
+
+    await waitFor(() => {
+      expect(screen.getByText('天穹纪元设定集')).toBeInTheDocument()
+    })
+
+    // Click example reply
+    const exampleBtn = screen.getByRole('button', { name: '示例回复' })
+    await act(async () => {
+      fireEvent.click(exampleBtn)
+    })
+
+    // Accept change proposal
+    const acceptBtn = screen.getAllByRole('button', { name: '接受此条' })[0]
+    await act(async () => {
+      fireEvent.click(acceptBtn)
+    })
+
+    expect(mockedApplySettingProposal).toHaveBeenCalledWith(
+      'col-123',
+      expect.objectContaining({
+        setting_collection_id: 'col-123',
+        status: 'pending',
+      })
+    )
   })
 })

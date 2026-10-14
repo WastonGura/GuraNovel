@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { Link, useLocation, useParams } from 'react-router-dom'
 import {
   ApiError,
+  applySettingProposal,
   createCollectionDocument,
   deleteDocument,
   getDocument,
@@ -13,6 +14,7 @@ import {
   writeDocument,
   type Document,
   type Project,
+  type SettingChangeProposal,
   type SettingCollection,
 } from './api/client'
 import StudioSetting from './StudioSetting'
@@ -73,6 +75,7 @@ export default function SettingCollectionWorkspace() {
   const [loadError, setLoadError] = useState<string | null>(null)
   const [saveStatus, setSaveStatus] = useState<'saved' | 'saving' | 'conflict' | 'error'>('saved')
   const [conflict, setConflict] = useState<ConflictState | null>(null)
+  const [reloadTick, setReloadTick] = useState(0)
 
   useEffect(() => {
     let cancelled = false
@@ -107,15 +110,11 @@ export default function SettingCollectionWorkspace() {
         ])
         if (cancelled) return
 
-        // Fetch contents for all documents in parallel
+        // Fetch contents for all documents in parallel - failure must not be masked by empty strings!
         const contentEntries = await Promise.all(
           loadedDocs.map(async (doc) => {
-            try {
-              const res = await readDocumentContent(doc.id)
-              return [doc.id, res.content] as const
-            } catch {
-              return [doc.id, ''] as const
-            }
+            const res = await readDocumentContent(doc.id)
+            return [doc.id, res.content] as const
           })
         )
         if (cancelled) return
@@ -130,6 +129,7 @@ export default function SettingCollectionWorkspace() {
         setNotes(loadedNotes)
         setLoading(false)
       } catch (err: unknown) {
+        console.error('loadWorkspace error:', err)
         if (cancelled) return
         if (err instanceof ApiError && err.status === 404) {
           setLoadError('未找到该设定集，或无权访问。')
@@ -146,7 +146,7 @@ export default function SettingCollectionWorkspace() {
     return () => {
       cancelled = true
     }
-  }, [settingCollectionId, isPreview])
+  }, [settingCollectionId, isPreview, reloadTick])
 
   const isArchived = collection?.status === 'archived'
 
@@ -254,6 +254,44 @@ export default function SettingCollectionWorkspace() {
     }
   }
 
+  async function handleApplyProposal(
+    proposal: SettingChangeProposal
+  ): Promise<{ versionId: string; documentId: string } | 'conflict' | false> {
+    if (isArchived || isPreview || !settingCollectionId) return false
+    try {
+      const doc = await applySettingProposal(settingCollectionId, proposal)
+      setCollection((prev) => (prev ? { ...prev, revision: prev.revision + 1 } : prev))
+      setNotes((prev) => {
+        const existingIndex = prev.findIndex((n) => n.id === doc.id)
+        const updatedNote = documentToSettingNote(doc, proposal.proposed_content)
+        if (existingIndex >= 0) {
+          const next = [...prev]
+          next[existingIndex] = updatedNote
+          return next
+        }
+        return [...prev, updatedNote]
+      })
+      setSaveStatus('saved')
+      setConflict(null)
+      return {
+        versionId: doc.current_version_id || '',
+        documentId: doc.id,
+      }
+    } catch (err: unknown) {
+      if (err instanceof ApiError && err.status === 409) {
+        setSaveStatus('conflict')
+        setConflict({
+          noteId: proposal.target_document_id || proposal.id,
+          noteTitle: proposal.title,
+          localDraft: proposal.proposed_content,
+        })
+        return 'conflict'
+      }
+      setSaveStatus('error')
+      return false
+    }
+  }
+
   // Conflict banner actions:
   async function handleReloadConflict() {
     if (!conflict) return
@@ -331,7 +369,16 @@ export default function SettingCollectionWorkspace() {
         </header>
         <div className="setting-workspace-error-body">
           <p>{loadError || '未找到该设定集'}</p>
-          <Link to="/">返回主页</Link>
+          <div className="setting-workspace-error-actions" style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+            <button
+              type="button"
+              className="btn-conflict-reload"
+              onClick={() => setReloadTick((t) => t + 1)}
+            >
+              重试加载
+            </button>
+            <Link to="/">返回主页</Link>
+          </div>
         </div>
       </div>
     )
@@ -420,7 +467,7 @@ export default function SettingCollectionWorkspace() {
         </div>
       )}
 
-      <main className="setting-workspace-body">
+      <section className="setting-workspace-body" aria-label="设定集正文">
         <StudioSetting
           preview={isPreview}
           hidden={false}
@@ -429,6 +476,7 @@ export default function SettingCollectionWorkspace() {
           readOnly={isArchived}
           referencingProjects={projects}
           onSaveNoteContent={isPreview ? undefined : handleSaveNoteContent}
+          onApplyProposal={isPreview ? undefined : handleApplyProposal}
           onRenameNote={isPreview ? undefined : handleRenameNote}
           onCreateNote={isPreview ? undefined : handleCreateNote}
           onDeleteNotes={isPreview ? undefined : handleDeleteNotes}
@@ -437,7 +485,7 @@ export default function SettingCollectionWorkspace() {
           saveStatusText={saveStatusMessage}
           onTyping={() => {}}
         />
-      </main>
+      </section>
     </div>
   )
 }

@@ -475,7 +475,7 @@ export default function App() {
   if (isSettingWorkspace) {
     return (
       <div className="app-shell studio-app-shell setting-workspace-shell">
-        <main>
+        <main className="setting-app-main">
           <Routes>
             <Route path="/setting-collections/:settingCollectionId" element={<SettingCollectionWorkspace />} />
           </Routes>

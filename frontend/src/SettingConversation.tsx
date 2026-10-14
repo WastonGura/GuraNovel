@@ -43,6 +43,7 @@ export default function SettingConversation({
   visible,
   disabled,
   referencingProjects,
+  preview = false,
   onPatch,
   onSend,
   onCommentChange,
@@ -57,6 +58,7 @@ export default function SettingConversation({
   visible: boolean
   disabled: boolean
   referencingProjects?: { id: string; title: string }[]
+  preview?: boolean
   onPatch: (patch: Partial<Conversation>) => void
   onSend: () => void
   onExample: () => void
@@ -87,7 +89,7 @@ export default function SettingConversation({
     }}>
       {!conversation.messages.length && <div className="setting-conversation-empty"><img src="/ui/studio/shark.svg" alt="" /><h2>从哪里开始？</h2><p>聊角色、地点和规则。确认后的条目会出现在左侧。</p><button disabled={disabled} onClick={onExample}>体验连续创建</button></div>}
       {conversation.messages.map(message => <article className={`setting-conversation-message is-${message.role}`} key={message.id}>
-        <small>{message.role === 'user' ? '你 · 暂存本机，尚未发送' : '设定 Agent · 示例回复'}</small>
+        <small>{message.role === 'user' ? (preview ? '你 · 暂存本机，尚未发送' : '你') : (preview ? '设定 Agent · 示例回复' : '设定 Agent · 变更提案待确认')}</small>
         {message.role === 'assistant' ? <StreamText text={message.text} startedAt={message.createdAt} delay={0} /> : <p>{message.text}</p>}
         {!!message.changes.length && <div className="setting-change-batch">
           <div className="setting-batch-heading"><small>{message.changes.filter(change => change.status === 'pending').length} 条待确认变更</small>{message.changes.some(change => change.status === 'pending') && <button disabled={disabled} onClick={() => onAccept(message.changes.filter(change => change.status === 'pending').map(change => change.id))}>接受本批</button>}</div>
@@ -108,7 +110,7 @@ export default function SettingConversation({
       <textarea ref={input} rows={1} aria-label="给设定 Agent 的消息" aria-describedby="setting-chat-status" placeholder={context ? `想怎样完善「${context.title}」？` : '说说你的想法，或接着上次的话题…'} maxLength={6000} value={conversation.draft} disabled={disabled} onChange={event => onPatch({ draft: event.target.value })} onKeyDown={event => {
         if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing && event.nativeEvent.keyCode !== 229) { event.preventDefault(); onSend() }
       }} />
-      <div className="setting-composer-footer"><small id="setting-chat-status">交互预览 · Agent 尚未接入 · 消息与提案保存在本机</small><button type="submit" className="setting-chat-send" aria-label="发送设定消息（仅预览）" disabled={disabled || !canSend}><img src="/ui/studio/send.svg" alt="" /></button></div>
+      <div className="setting-composer-footer"><small id="setting-chat-status">{preview ? '交互预览 · Agent 尚未接入 · 消息与提案保存在本机' : '设定对话 · 提案需作者确认后方可应用到设定集'}</small><button type="submit" className="setting-chat-send" aria-label={preview ? '发送设定消息（仅预览）' : '发送设定消息'} disabled={disabled || !canSend}><img src="/ui/studio/send.svg" alt="" /></button></div>
     </form>
   </section>
 }
