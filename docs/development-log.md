@@ -32,6 +32,13 @@ Dates use Asia/Tokyo. Target: v0.12.0 desktop personal trial.
 - Branch pushes no longer duplicate their PR checks: pull requests and main pushes remain gated, with manual dispatch available. This reduces queue pressure during stacked PR delivery without skipping any PR's latest-head validation.
 - Local clean-checkout Docker build at 7e31742 passed; services became healthy. Actual API acceptance exposed a previously uncovered 422 when reviewing a blank project's first chapter. This is a product gap to fix separately, not a reason to weaken the smoke gate. Deterministic Provider evidence is separate from real-model quality.
 
+## 2026-10-14 — #328 bounded model transport negotiation
+
+- Status: implemented; PR/latest-head Actions/review pending. No version bump.
+- Red: a compression-capable mock service returned valid gzip after the client's default compression negotiation, which the bounded raw transport correctly rejected.
+- Green: explicitly request identity encoding, matching the transport's accepted representation. Unexpected compression and oversized responses remain rejected; existing transport cases are retained.
+- Live read-only provider diagnostics confirmed identity negotiation is honored. Live model quality is a separate stage-acceptance item.
+
 ## 2026-10-14 — #326 first-chapter review
 
 - Status: implementation and focused verification; PR/latest-head Actions/review pending.
