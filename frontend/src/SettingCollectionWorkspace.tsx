@@ -303,6 +303,44 @@ export default function SettingCollectionWorkspace() {
     }
   }
 
+  async function handleApplyProposal(
+    proposal: SettingChangeProposal
+  ): Promise<{ versionId: string; documentId: string } | 'conflict' | false> {
+    if (isArchived || isPreview || !settingCollectionId) return false
+    try {
+      const doc = await applySettingProposal(settingCollectionId, proposal)
+      setCollection((prev) => (prev ? { ...prev, revision: prev.revision + 1 } : prev))
+      setNotes((prev) => {
+        const existingIndex = prev.findIndex((n) => n.id === doc.id)
+        const updatedNote = documentToSettingNote(doc, proposal.proposed_content)
+        if (existingIndex >= 0) {
+          const next = [...prev]
+          next[existingIndex] = updatedNote
+          return next
+        }
+        return [...prev, updatedNote]
+      })
+      setSaveStatus('saved')
+      setConflict(null)
+      return {
+        versionId: doc.current_version_id || '',
+        documentId: doc.id,
+      }
+    } catch (err: unknown) {
+      if (err instanceof ApiError && err.status === 409) {
+        setSaveStatus('conflict')
+        setConflict({
+          noteId: proposal.target_document_id || proposal.id,
+          noteTitle: proposal.title,
+          localDraft: proposal.proposed_content,
+        })
+        return 'conflict'
+      }
+      setSaveStatus('error')
+      return false
+    }
+  }
+
   // Conflict banner actions:
   async function handleReloadConflict() {
     if (!conflict) return
