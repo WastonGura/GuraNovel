@@ -21,6 +21,7 @@ test('Studio deep links, history, pending recovery and server chapter identity',
     if (path === '/api/v1/setting-collections') return reply([]);
     const idea = path.match(/\/chapters\/([^/]+)\/outline\/idea$/);
     if (idea) return reply({ project_id: project.id, chapter_id: idea[1], text: '', revision: 0, read_only: false });
+    if (path.endsWith('/outline/generations') && request.method() === 'GET') return reply([]);
     if (path === `/api/v1/projects/${project.id}`) return reply(project);
     if (path === `/api/v1/projects/${project.id}/chapters`) {
       if (request.method() === 'POST') { creates++; const created = { ...chapter(createdId, 17), current_draft_document_id: null, title: '新章' }; chapters.push(created); return reply(created); }

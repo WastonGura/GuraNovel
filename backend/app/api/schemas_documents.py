@@ -107,3 +107,9 @@ class RestoreDocumentRequest(BaseModel):
 class UpdateDocumentRequest(BaseModel):
     title: str | None = None
     metadata_: dict | None = Field(default=None, validation_alias="metadata")
+
+    @model_validator(mode="after")
+    def preserve_server_metadata(self):
+        if self.metadata_ and any(key.startswith("studio_") or key in {"comments", "comments_source_version_id", "generation_id", "candidate_id"} for key in self.metadata_):
+            raise ValueError("Use the versioned editor for server-owned feedback and outline metadata")
+        return self

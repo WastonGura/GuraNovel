@@ -8,6 +8,7 @@ import { initialPreview, newStudioChapter, outlineOptions, previewIssues, previe
 import StudioReader from './StudioReader'
 import { useDraftAutosave } from './useDraftAutosave'
 import { useChapterIdea } from './useChapterIdea'
+import StudioOutlineOptions from './StudioOutlineOptions'
 import OutlineEditor from './OutlineEditor'
 import { ChapterArchiveRow } from './StudioArchives'
 import { loadDraftArchives, archiveStorageKey, archiveTime, type DraftArchive } from './studioPreview'
@@ -53,16 +54,27 @@ function OutlineGeneration({ chapter, preview, refresh, onIdea, onGenerate, onCh
   </div>
 }
 
-function PersistedIdea({ chapter, projectId, ref }: { chapter: StudioChapter; projectId: string; ref: Ref<StudioEditorHandle> }) {
+function PersistedChapterOutline(props: { chapter: StudioChapter; projectId: string; ref: Ref<StudioEditorHandle>; onChange: (patch: Partial<StudioChapter>) => void; onSend: () => void }) {
+  return props.chapter.legacyProduction ? <PersistedOutline {...props} /> : <PersistedIdea {...props} />
+}
+
+function PersistedIdea({ chapter, projectId, ref, onChange, onSend }: { chapter: StudioChapter; projectId: string; ref: Ref<StudioEditorHandle>; onChange: (patch: Partial<StudioChapter>) => void; onSend: () => void }) {
   const save = useChapterIdea(projectId, chapter.id)
-  useImperativeHandle(ref, () => ({ flush: save.flush, changeFeedback: () => {}, submitFeedback: async () => false }))
+  const outlineEditor = useRef<StudioEditorHandle>(null)
+  const [showAlternatives, setShowAlternatives] = useState(!chapter.outlineDocumentId)
+  const flush = async () => await save.flush() && (!outlineEditor.current || await outlineEditor.current.flush())
+  useImperativeHandle(ref, () => ({ flush, changeFeedback: patch => outlineEditor.current?.changeFeedback(patch),
+    submitFeedback: async ids => outlineEditor.current ? outlineEditor.current.submitFeedback(ids) : false }))
   return <>
-    <OutlineGeneration chapter={{ ...chapter, idea: save.text }} preview={false} refresh={0}
-      onIdea={save.change} onGenerate={() => {}} onChoose={() => {}} onRefresh={() => {}} readOnly={!save.ready || save.readOnly} />
-    <p className="studio-save-status" role="status">{save.status}
-      {save.status.includes('保存失败') && <button onClick={() => void save.flush()}>重试保存思路</button>}
-      {(save.status.includes('冲突') || save.status.includes('加载失败')) && <button onClick={() => void save.reloadServer()}>使用服务器思路</button>}
-    </p>
+    {chapter.outlineDocumentId && <PersistedOutline key={chapter.outlineDocumentId} ref={outlineEditor} chapter={chapter} projectId={projectId} onChange={onChange} onSend={onSend} />}
+    {chapter.outlineDocumentId && !chapter.documentId && <button onClick={() => setShowAlternatives(value => !value)}>{showAlternatives ? '收起大纲方案' : '比较大纲方案'}</button>}
+    {showAlternatives && <StudioOutlineOptions projectId={projectId} chapterId={chapter.id} idea={save}
+      beforeSelect={async () => !await flush() ? undefined : outlineEditor.current?.savedVersion?.() ?? chapter.outlineVersionId ?? null}
+      onSelected={(selection, content) => {
+        onChange({ outline: content, outlineDocumentId: selection.document_id, outlineVersionId: selection.version_id,
+          outlineStep: 'edit', outlineComments: [], stage: 'Outline' })
+        setShowAlternatives(false)
+      }} />}
   </>
 }
 
@@ -112,6 +124,7 @@ type EditorHandle = { flush: () => Promise<boolean> }
 type StudioEditorHandle = EditorHandle & {
   changeFeedback: (patch: { comments?: OutlineComment[]; requirements?: string }) => void
   submitFeedback: (ids: string[]) => Promise<boolean>
+  savedVersion?: () => string | undefined
 }
 function SubmittedComments({ comments, readOnly, onOrder, activeId, onSelect, archive = false }: { comments: OutlineComment[]; readOnly: boolean; onOrder: (ids: string[]) => void; activeId?: string; onSelect: (id: string) => void; archive?: boolean }) {
   const dots = useCommentDrag(!readOnly, onOrder)
@@ -188,11 +201,12 @@ function PersistedOutline({ chapter, projectId, onChange, onSend, ref }: {
   const startPending = useRef(false)
   const mounted = useRef(false)
   useEffect(() => { mounted.current = true; return () => { mounted.current = false } }, [])
-  const save = useDraftAutosave(chapter.outlineDocumentId, chapter.outlineVersionId, chapter.outline, undefined, {
-    readOnly: chapter.published || chapter.legacyProduction,
+  const save = useDraftAutosave(chapter.outlineDocumentId, chapter.outlineVersionId, chapter.outline,
+    (versionId, outline) => onChange({ outlineVersionId: versionId, outline }), {
+    readOnly: chapter.published || chapter.legacyProduction || Boolean(chapter.documentId),
     feedback: chapter.legacyProduction ? undefined : { projectId, chapterId: chapter.id, region: 'outline', onChange: value => onChange({ outlineComments: value.comments }) },
   })
-  useImperativeHandle(ref, () => ({ flush: save.flush, changeFeedback: save.changeFeedback, submitFeedback: ids => save.submit(ids) }))
+  useImperativeHandle(ref, () => ({ flush: save.flush, changeFeedback: save.changeFeedback, submitFeedback: ids => save.submit(ids), savedVersion: save.savedVersion }))
   async function confirmAndDraft() {
     if (startPending.current || chapter.legacyProduction || !chapter.outlineDocumentId || !chapter.outlineVersionId) return
     startPending.current = true; setStarting(true); setStartMessage('正在保存并确认大纲…')
@@ -215,7 +229,9 @@ function PersistedOutline({ chapter, projectId, onChange, onSend, ref }: {
           await resumeChapterProduction(projectId, chapter.id, runId)
         }
       } else {
-        await approveStudioOutline(projectId, chapter.id, chapter.outlineDocumentId, chapter.outlineVersionId)
+        const version = save.savedVersion()
+        if (!version) throw new Error('The saved outline version is missing.')
+        await approveStudioOutline(projectId, chapter.id, chapter.outlineDocumentId, version)
         if (!mounted.current) return
         setStartMessage('大纲已确认，正在生成正文…')
         runId = (await startChapterProductionV2(projectId, chapter.id)).workflow_run_id
@@ -237,10 +253,10 @@ function PersistedOutline({ chapter, projectId, onChange, onSend, ref }: {
     }
   }
   return <>
-    <OutlineEditor outline={save.text} comments={save.feedback?.comments || []} readOnly={starting || !save.feedback || save.feedback.read_only || chapter.published || Boolean(chapter.legacyProduction)} textReadOnly
-      onChange={() => {}} onCommentsChange={comments => save.changeFeedback({ comments })} onSend={onSend}
+    <OutlineEditor outline={save.text} comments={save.feedback?.comments || []} readOnly={starting || !save.feedback || save.feedback.read_only || chapter.published || Boolean(chapter.legacyProduction) || Boolean(chapter.documentId)}
+      onChange={(text, comments) => { save.change(text); save.changeFeedback({ comments }) }} onCommentsChange={comments => save.changeFeedback({ comments })} onSend={onSend}
       prepareSend={() => save.submit((save.feedback?.comments || []).map(comment => comment.id))}
-      confirm={<IconButton icon="check" label="确认大纲并生成正文" disabled={starting || !save.feedback || chapter.published || chapter.legacyProduction || !save.text.trim()} onClick={() => void confirmAndDraft()} />} />
+      confirm={<IconButton icon="check" label="确认大纲并生成正文" disabled={starting || !save.feedback || chapter.published || chapter.legacyProduction || Boolean(chapter.documentId) || !save.text.trim()} onClick={() => void confirmAndDraft()} />} />
     {chapter.legacyProduction && <p role="alert">{chapter.productionError}</p>}
     {startMessage && <p className="studio-integration-note" role="status">{startMessage}</p>}
     <div className="studio-save-status" role="status">{save.status}
@@ -818,18 +834,18 @@ function StudioWorkspace({ title, initial, initialId, project, preview }: {
     {noticesOpen && <section className="studio-notifications" aria-label="通知列表"><h2>通知</h2>{!notifications.length && <p className="studio-muted">暂无通知</p>}{notifications.slice().reverse().map(notice => <button key={notice.id} onClick={() => { selectChapter(notice.chapterId); setNoticesOpen(false) }}>{notice.message}<small>查看本章报告</small></button>)}</section>}
     <div className="studio-announcer" role="status" aria-live="polite">{notifications.at(-1)?.message}</div>
     <section className={`studio-body${writing ? ' has-prose' : ''}`} aria-label="Create 工作区">{!selected ? <div className="studio-empty"><h1>开始新的一章</h1><button disabled={chapterPending} onClick={() => addChapter(volumes.at(-1) || '第一卷')}>新建章节</button></div> : <>
-        {!archive && selected.stage === 'Outline' && <section className={`studio-outline is-${selected.outlineStep}`} key={selected.id} aria-label="本章大纲">
+        {!archive && selected.stage === 'Outline' && <section className={`studio-outline is-${selected.outlineStep}${preview ? '' : ' is-persisted'}`} key={selected.id} aria-label="本章大纲">
           <MotionFrame className="studio-outline-flow" textKey={`${selected.outlineStep}-${refresh}`}>
-          {selected.outlineStep !== 'edit' && !preview && <PersistedIdea chapter={selected} projectId={project!.id} ref={editor} />}
+          {!preview && <PersistedChapterOutline chapter={selected} projectId={project!.id} ref={editor}
+            onChange={patch => patch.stage && patch.stage !== 'Outline' ? void leave(() => update(selected.id, patch)) : update(selected.id, patch)} onSend={() => setToast('大纲反馈已保存，Agent 修改流程尚未接入。')} />}
           {selected.outlineStep !== 'edit' && preview && <OutlineGeneration chapter={selected} preview={preview} refresh={refresh} onIdea={idea => update(selected.id, { idea })} onGenerate={() => update(selected.id, { outlineStep: 'choose' })} onChoose={text => update(selected.id, { outline: `${selected.idea}\n\n${text}`, outlineStep: 'edit' })} onRefresh={() => setRefresh(value => value + 1)} />}
-          {selected.outlineStep === 'edit' && (preview ? <OutlineEditor outline={selected.outline} comments={selected.outlineComments || []} readOnly={false}
+          {selected.outlineStep === 'edit' && preview && <OutlineEditor outline={selected.outline} comments={selected.outlineComments || []} readOnly={false}
             onChange={(outline, outlineComments) => update(selected.id, { outline, outlineComments, review: 'idle', issues: [], selected: [] })}
             onCommentsChange={outlineComments => update(selected.id, { outlineComments })}
             onSend={() => setToast('评论已保留在所选文本上；当前为交互预览，未调用真实 Agent。')}
-            confirm={<IconButton icon="check" label="确认大纲并进入正文" disabled={!selected.outline.trim()} onClick={() => void leave(() => update(selected.id, { stage: 'Draft', draft: selected.draft || previewProse }))} />} />
-            : <PersistedOutline key={selected.id} ref={editor} chapter={selected} projectId={project!.id} onChange={patch => patch.stage ? void leave(() => update(selected.id, patch)) : update(selected.id, patch)} onSend={() => setToast('大纲反馈已保存，Agent 修改流程尚未接入。')} />)}
+            confirm={<IconButton icon="check" label="确认大纲并进入正文" disabled={!selected.outline.trim()} onClick={() => void leave(() => update(selected.id, { stage: 'Draft', draft: selected.draft || previewProse }))} />} />}
           </MotionFrame>
-          {!preview && <p className="studio-integration-note">{selected.outlineStep === 'edit' ? '确认当前大纲后生成正文。' : '初始大纲生成与讨论尚未接入。已有大纲可继续确认和创作。'}</p>}
+          {!preview && <p className="studio-integration-note">{selected.legacyProduction ? '历史任务当前为只读。' : selected.documentId ? '正文生成已开始，大纲为只读。' : '比较方案、编辑大纲，再由你确认生成正文。大纲 Agent 反馈修订尚待接入。'}</p>}
         </section>}
         {writing && <article className="studio-manuscript" aria-label="章节创作">
           <ChapterScroll key={selected.id}>

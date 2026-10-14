@@ -5,7 +5,7 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import get_db_session, get_project_workspace
+from app.api.deps import get_db_session, get_project_workspace, get_default_actor_user_id
 from app.api.schemas_projects import CreateProjectRequest, ProjectResponse, UpdateProjectRequest
 from app.models import Project
 from app.services import ProjectService
@@ -19,10 +19,11 @@ async def create_project(
     payload: CreateProjectRequest,
     session: AsyncSession = Depends(get_db_session),
     workspace: ProjectWorkspace = Depends(get_project_workspace),
+    actor_id: UUID = Depends(get_default_actor_user_id),
 ) -> Project:
     data = payload.model_dump()
     data["metadata"] = data.pop("metadata_")
-    return await ProjectService(session, workspace).create_project(**data)
+    return await ProjectService(session, workspace).create_project(**data, owner_id=actor_id)
 
 
 @router.get("", response_model=list[ProjectResponse])

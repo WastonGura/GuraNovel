@@ -2,6 +2,15 @@
 
 Dates use Asia/Tokyo. Target: v0.12.0 desktop personal trial.
 
+## 2026-10-14 — #299 three outline candidates and author editing
+
+- Status: implementation and focused verification; latest-head Actions/review/merge pending.
+- Red: generation API returned 404 and the formal generate button remained disabled. Empty-project-to-V2 acceptance additionally exposed missing project ownership required by the existing production pipeline.
+- Green: three distinct persisted candidates, batch/history/query identities, version-checked selection, scoped author editing, approval and post-draft locking pass PostgreSQL cases. The UI test explicitly compares alternatives and selects without approving; 32 affected navigation tests pass, including confirmation of the just-flushed outline version.
+- Batches snapshot current setting versions, chapter ideas and preceding prose before a transaction-free model call. Requests are durable and replayed by ID; uncertain results block new calls until explicit author abandonment. Batch and selected-outline evidence cannot be rewritten through generic document operations.
+- Uses the existing structured-output gateway and OpenAI-compatible server configuration, plus an explicitly labeled deterministic Provider. No real-model quality claim until separate sampling.
+- Fixed Actions diagnostics in dependency branches: narrowed recovered text/version types, corrected test role options and fixture imports. These CI fixes are included here too. Version remains 0.11.0 pending the release preparation PR.
+
 ## 2026-10-14 — #303 persisted chapter ideas
 
 - Status: local implementation; PR/Actions pending. Ideas are stored per authoritative project/chapter with expected revisions and request identities; drafted/final chapters are read-only.
