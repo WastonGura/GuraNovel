@@ -93,6 +93,75 @@ function sampleChapter(overrides: Partial<Chapter> = {}): Chapter {
 }
 
 describe('Dashboard Setting Collections and Novel Integration', () => {
+  it('focuses the title and creates a Chinese-titled novel without a manual slug', async () => {
+    mockedApi.listProjects.mockResolvedValue([])
+    mockedApi.listSettingCollections.mockResolvedValue([])
+    mockedApi.createProject.mockResolvedValue(sampleProject({ id: 'auto-novel' }))
+    renderDashboard()
+    await screen.findByText('No projects yet. Create one to begin.')
+    fireEvent.click(screen.getByRole('button', { name: 'Create novel' }))
+    const dialog = screen.getByRole('dialog', { name: 'Create project' })
+    const title = within(dialog).getByLabelText('Title')
+    expect(title).toHaveFocus()
+    fireEvent.change(title, { target: { value: '雨停之前' } })
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Create project' }))
+    await waitFor(() => expect(mockedApi.createProject).toHaveBeenCalledWith(expect.objectContaining({
+      title: '雨停之前', slug: expect.stringMatching(/^novel-[a-z0-9]+$/),
+    })))
+  })
+
+  it('restores focus to the creation trigger when the modal is cancelled', async () => {
+    mockedApi.listProjects.mockResolvedValue([])
+    mockedApi.listSettingCollections.mockResolvedValue([])
+    renderDashboard()
+    await screen.findByText('No projects yet. Create one to begin.')
+    const trigger = screen.getByRole('button', { name: 'Create novel' })
+    trigger.focus(); fireEvent.click(trigger)
+    const dialog = screen.getByRole('dialog', { name: 'Create project' })
+    fireEvent(dialog, new Event('cancel', { cancelable: true }))
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Create project' })).not.toBeInTheDocument())
+    expect(trigger).toHaveFocus()
+  })
+
+  it('retains a failed form and focuses an actionable conflict message', async () => {
+    mockedApi.listProjects.mockResolvedValue([])
+    mockedApi.listSettingCollections.mockResolvedValue([])
+    mockedApi.createProject.mockRejectedValueOnce({ status: 409 })
+    renderDashboard()
+    await screen.findByText('No projects yet. Create one to begin.')
+    fireEvent.click(screen.getByRole('button', { name: 'Create novel' }))
+    const dialog = screen.getByRole('dialog', { name: 'Create project' })
+    fireEvent.change(within(dialog).getByLabelText('Title'), { target: { value: '雨停之前' } })
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Create project' }))
+    const error = await screen.findByRole('alert')
+    expect(error).toHaveTextContent('Slug 已被使用')
+    expect(error).toHaveFocus()
+    expect(within(dialog).getByLabelText('Title')).toHaveValue('雨停之前')
+  })
+
+  it('submits only once and keeps the pending modal open', async () => {
+    mockedApi.listProjects.mockResolvedValue([])
+    mockedApi.listSettingCollections.mockResolvedValue([])
+    let reject!: (cause: Error) => void
+    mockedApi.createProject.mockImplementationOnce(() => new Promise((_resolve, fail) => { reject = fail }))
+    renderDashboard()
+    await screen.findByText('No projects yet. Create one to begin.')
+    fireEvent.click(screen.getByRole('button', { name: 'Create novel' }))
+    const dialog = screen.getByRole('dialog', { name: 'Create project' })
+    fireEvent.change(within(dialog).getByLabelText('Title'), { target: { value: '雨停之前' } })
+    const form = within(dialog).getByRole('form')
+    fireEvent.submit(form); fireEvent.submit(form)
+    fireEvent(dialog, new Event('cancel', { cancelable: true }))
+    expect(dialog).toBeInTheDocument()
+    expect(mockedApi.createProject).toHaveBeenCalledTimes(1)
+    reject(new Error('network unavailable'))
+    expect(await screen.findByRole('alert')).toHaveTextContent('已保留填写内容')
+    fireEvent.submit(form)
+    await waitFor(() => expect(mockedApi.createProject).toHaveBeenCalledTimes(2))
+    const calls = mockedApi.createProject.mock.calls
+    expect(calls[0][0].slug).toBe(calls[1][0].slug)
+  })
+
   afterEach(() => {
     cleanup()
     vi.clearAllMocks()

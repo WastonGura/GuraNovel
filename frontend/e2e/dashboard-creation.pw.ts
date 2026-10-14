@@ -1,0 +1,22 @@
+import { expect, test } from '@playwright/test'
+
+test('creation modal contains keyboard focus, restores it and fits a small desktop', async ({ page }) => {
+  await page.setViewportSize({ width: 1062, height: 660 })
+  await page.route('**/api/v1/projects', route => route.fulfill({ json: [] }))
+  await page.route('**/api/v1/setting-collections', route => route.fulfill({ json: [] }))
+  await page.goto('/')
+  const trigger = page.getByRole('button', { name: 'Create novel', exact: true })
+  await trigger.click()
+  const modal = page.getByRole('dialog', { name: 'Create project' })
+  await expect(modal.getByLabel('Title', { exact: true })).toBeFocused()
+  await page.keyboard.press('Shift+Tab')
+  await expect(modal.getByRole('button', { name: 'Close create project dialog' })).toBeFocused()
+  await page.keyboard.press('Shift+Tab')
+  await expect(modal.getByRole('button', { name: 'Create project', exact: true })).toBeFocused()
+  const submit = await modal.getByRole('button', { name: 'Create project', exact: true }).boundingBox()
+  expect(submit).not.toBeNull()
+  expect(submit!.y + submit!.height).toBeLessThanOrEqual(660)
+  await page.keyboard.press('Escape')
+  await expect(modal).not.toBeVisible()
+  await expect(trigger).toBeFocused()
+})
