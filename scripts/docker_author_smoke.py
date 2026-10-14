@@ -30,6 +30,7 @@ def smoke(origin: str) -> dict:
     generation = {"request_id": str(uuid4()), "expected_idea_revision": saved["revision"]}
     batch = call("POST", base + "/outline/generations", generation)
     assert batch["status"] == "completed", f"Outline status: {batch['status']}"
+    assert batch.get("provenance", {}).get("provider_kind") == "fake", "CI smoke requires the deterministic Provider"
     assert len(batch["candidates"]) == 3
     assert len({item["content"] for item in batch["candidates"]}) == 3
     assert call("POST", base + "/outline/generations", generation) == batch
@@ -62,7 +63,7 @@ def smoke(origin: str) -> dict:
     assert call("GET", run)["status"] == "COMPLETED"
     return {"project_id": project["id"], "chapter_id": chapter["id"], "generation_id": batch["id"],
             "workflow_run_id": started["workflow_run_id"], "final_version_id": finalized["final_version_id"],
-            "provider": batch.get("provenance", {}).get("provider", "unknown"), "status": "COMPLETED"}
+            "provider": batch.get("provenance", {}).get("provider_kind", "unknown"), "status": "COMPLETED"}
 
 
 if __name__ == "__main__":
