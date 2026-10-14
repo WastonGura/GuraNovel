@@ -247,14 +247,23 @@ it('does not accept a draft when the save queue fails', async () => {
   expect(prose).not.toHaveAttribute('readonly')
 })
 
-async function openOutline() {
+async function openOutline(path = '/projects/p/studio/a') {
   vi.mocked(listChapters).mockResolvedValue([{ ...chapter('a'), current_draft_document_id: null, current_outline_document_id: 'outline-a' }])
   vi.mocked(readStudioFeedback).mockImplementation(async (_project, chapter_id, region) => ({ chapter_id, region, document_id: region === 'outline' ? 'outline-a' : 'doc-a', source_version_id: region === 'outline' ? 'outline-a-v1' : 'doc-a-v1', revision: 0, comments: [], requirements: '', read_only: false }))
-  open('/projects/p/studio/a')
+  open(path)
   const confirm = await screen.findByRole('button', { name: '确认大纲并生成正文' })
   await waitFor(() => expect(confirm).toBeEnabled())
   return confirm
 }
+
+it('moves the explicit outline route to Draft after the approved generation completes', async () => {
+  vi.mocked(startChapterProductionV2).mockResolvedValue({ workflow_run_id: 'run-a' } as Awaited<ReturnType<typeof startChapterProductionV2>>)
+  vi.mocked(getChapterProductionRun).mockResolvedValue({ chapter_id: 'a', status: 'AUTHOR_REVISION', awaiting_user: true, document_id: 'doc-a', document_version_id: 'doc-a-v1' } as ChapterProductionState)
+  const confirm = await openOutline('/projects/p/studio/a?stage=Outline')
+  fireEvent.click(confirm)
+  await waitFor(() => expect(screen.getByTestId('url')).toHaveTextContent('stage=Draft'))
+  expect(await screen.findByRole('textbox', { name: '章节正文' })).toHaveValue('Text doc-a')
+})
 
 it('confirms the version produced by flushing the latest author outline edit', async () => {
   vi.mocked(writeStudioOutline).mockResolvedValue({ id: 'outline-edited-v2' } as Awaited<ReturnType<typeof writeStudioOutline>>)
