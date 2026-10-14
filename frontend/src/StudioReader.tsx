@@ -12,8 +12,8 @@ const statusNames: Record<string, string> = { created: '准备阅读', preparing
   final_ballots_locked: '最终投票已保存', report_generating: '整理读者报告中', completed: '阅读已完成',
   degraded_completed: '部分阅读完成', failed: '阅读失败', cancelled: '阅读已取消' }
 
-export default function StudioReader({ projectId, chapter, onChange, onFinal }: {
-  projectId: string; chapter: StudioChapter; onChange: (patch: Partial<StudioChapter>) => void; onFinal: () => void
+export default function StudioReader({ projectId, chapter, sessionId, onChange, onFinal }: {
+  projectId: string; chapter: StudioChapter; sessionId?: string; onChange: (patch: Partial<StudioChapter>) => void; onFinal: () => void
 }) {
   const [panel, setPanel] = useState<ReaderPanelSessionDetail | null>(null)
   const [loaded, setLoaded] = useState(false)
@@ -33,14 +33,21 @@ export default function StudioReader({ projectId, chapter, onChange, onFinal }: 
     const controller = new AbortController()
     let active = true
     void (async () => {
-      const saved = sessionStorage.getItem(requestKey)
+      const saved = sessionId ? null : sessionStorage.getItem(requestKey)
       const recovered = saved ? JSON.parse(saved) : null
       if (recovered && (recovered.document_id !== chapter.documentId || recovered.document_version_id !== chapter.versionId
         || !Array.isArray(recovered.reader_profile_ids) || recovered.reader_profile_ids.some((id: string) => !names[id]))) throw new Error('Invalid saved invitation')
-      const panels = await listReaderPanels(projectId, chapter.id, { limit: 100 }, controller.signal)
-      const found = panels.find(item => !item.is_noop && item.document_id === chapter.documentId && item.document_version_id === chapter.versionId)
-      const value = found && !found.is_noop ? check(await getReaderPanel(projectId, chapter.id, found.session_id,
-        { include_initial_reports: true, include_transcript: true, data_limit: 200 }, controller.signal)) : null
+      let value: ReaderPanelSessionDetail | null
+      if (sessionId) {
+        value = check(await getReaderPanel(projectId, chapter.id, sessionId,
+          { include_initial_reports: true, include_transcript: true, data_limit: 200 }, controller.signal))
+        if (value.session_id !== sessionId) throw new Error('Reader session changed')
+      } else {
+        const panels = await listReaderPanels(projectId, chapter.id, { limit: 100 }, controller.signal)
+        const found = panels.find(item => !item.is_noop && item.document_id === chapter.documentId && item.document_version_id === chapter.versionId)
+        value = found && !found.is_noop ? check(await getReaderPanel(projectId, chapter.id, found.session_id,
+          { include_initial_reports: true, include_transcript: true, data_limit: 200 }, controller.signal)) : null
+      }
       if (!active) return
       setPanel(value); setPending(recovered); setLoaded(true)
       const invited = recovered?.reader_profile_ids || value?.reader_profile_ids
@@ -50,7 +57,7 @@ export default function StudioReader({ projectId, chapter, onChange, onFinal }: 
     return () => { active = false; controller.abort(); operation.current?.abort() }
     // A mounted panel belongs to one immutable chapter version.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [projectId, chapter.id, chapter.documentId, chapter.versionId])
+  }, [projectId, chapter.id, chapter.documentId, chapter.versionId, sessionId])
 
   async function run(cancel = false) {
     if ((!cancel && operation.current) || !loaded) return

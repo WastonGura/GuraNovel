@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type FormEvent, type MouseEvent, type PointerEvent } from 'react'
-import { useNavigate, useSearchParams } from 'react-router-dom'
+import { useLocation, useNavigate, useSearchParams } from 'react-router-dom'
 import {
   createProject,
   createSettingCollection,
@@ -251,6 +251,12 @@ function NovelDetails({
 }) {
   const navigate = useNavigate()
   const closeButton = useRef<HTMLButtonElement>(null)
+  const { state } = useLocation()
+  const retiredNotice = state?.retiredWorkspace === 'maintenance'
+    ? '项目维护暂未提供操作入口。已有任务和历史数据仍保留。'
+    : state?.retiredWorkspace === 'creation'
+      ? '作品构思暂未提供操作入口。你可以打开章节继续创作，已有任务和历史数据仍保留。'
+      : ''
   const [overrideProject, setOverrideProject] = useState<Project | null>(null)
   const currentProject = overrideProject && overrideProject.id === project.id ? overrideProject : project
   const [chapters, setChapters] = useState<Chapter[] | null>(null)
@@ -391,6 +397,7 @@ function NovelDetails({
 
           {/* Middle Column: Introduction / Tags OR Inline Edit Form */}
           <div className="novel-detail-mid">
+            {retiredNotice && <p className="muted" role="status">{retiredNotice}</p>}
             {editing ? (
               <form className="novel-inline-edit-form" onSubmit={handleSave} aria-label="Edit novel form">
                 <h3>编辑作品资料</h3>

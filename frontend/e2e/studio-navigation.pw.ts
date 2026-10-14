@@ -1,5 +1,5 @@
 /// <reference types="vite/client" />
-import { test } from '@playwright/test'
+import { expect, test } from '@playwright/test'
 import type { Chapter } from '../src/api/client'
 
 // HTTP fixtures exercise the real router and browser; this is not backend acceptance.
@@ -12,6 +12,7 @@ test('Studio deep links, history, pending recovery and server chapter identity',
   const chapters: Chapter[] = [chapter(first, 1), chapter(second, 2)];
   const drafts = new Map(chapters.map(ch => [ch.current_draft_document_id!, { document_id: ch.current_draft_document_id, version_id: 'version-1', content: `${ch.title}。这是来自 HTTP 测试替身的正文，用于验证正式导航。` }]));
   let writes = 0, creates = 0;
+  let legacy = false;
   const unexpected: string[] = [];
   await page.route('**/api/v1/**', async route => {
     const request = route.request(), path = request.url().replace(/^https?:\/\/[^/]+/, '').split('?')[0];
@@ -23,7 +24,8 @@ test('Studio deep links, history, pending recovery and server chapter identity',
       if (request.method() === 'POST') { creates++; const created = { ...chapter(createdId, 17), current_draft_document_id: null, title: '新章' }; chapters.push(created); return reply(created); }
       return reply(chapters);
     }
-    if (path.endsWith('/production-v2') && request.method() === 'GET') return reply([]);
+    if (path.endsWith('/production-v2') && request.method() === 'GET') return reply(legacy && path.includes(`/chapters/${first}/`)
+      ? [{ workflow_run_id: second, project_id: project.id, chapter_id: first, status: 'awaiting_approval', current_node: 'approval', started_at: stamp, updated_at: stamp }] : []);
     const feedback = path.match(/\/chapters\/([^/]+)\/feedback\/draft$/);
     if (feedback) {
       const draft = drafts.get(`doc-${feedback[1]}`)!;
@@ -95,6 +97,31 @@ test('Studio deep links, history, pending recovery and server chapter identity',
   await page.getByRole('button', { name: '展开章节侧边栏', exact: true }).click();
   await page.getByRole('button', { name: '固定章节目录', exact: true }).click();
   await page.waitForTimeout(500);
+
+  await page.goto(`/projects/${project.id}/chapters/${first}`);
+  await prose.waitFor();
+  await expect(page).toHaveURL(new RegExp(`/projects/${project.id}/studio/${first}$`));
+  await expect(page.getByRole('navigation', { name: 'Workbench navigation' })).toHaveCount(0);
+  await expect(page.getByText('现有工作台', { exact: true })).toHaveCount(0);
+  await page.goto(`/projects/${project.id}`);
+  await expect(page).toHaveURL(new RegExp(`project=${project.id}$`));
+  await expect(page.getByRole('dialog', { name: project.title, exact: true })).toBeVisible();
+  await page.goto(`/projects/${project.id}/maintenance/start`);
+  await expect(page.getByRole('status').filter({ hasText: '项目维护暂未提供操作入口' })).toBeVisible();
+  await page.goto(`/projects/${project.id}/creation/start`);
+  await expect(page.getByRole('status').filter({ hasText: '作品构思暂未提供操作入口' })).toBeVisible();
+  await page.goto(`/projects/${project.id}/chapters/${first}/documents/doc-${first}/versions/older-version/reader-panel/old-session`);
+  await expect(page.getByRole('alert')).toContainText('此读者链接对应的正文版本已变化');
+  await page.getByRole('link', { name: '打开当前章节' }).click();
+  await prose.waitFor();
+  legacy = true;
+  const writesBeforeLegacy = writes;
+  await page.goto(`/projects/${project.id}/chapters/${first}`);
+  await expect(prose).toHaveAttribute('readonly', '');
+  await expect(page.getByRole('alert')).toContainText('任务操作尚未迁移到新版');
+  await expect(page.getByRole('button', { name: '提交审阅', exact: true })).toBeDisabled();
+  await expect(page.getByRole('button', { name: '创建还原点', exact: true })).toBeDisabled();
+  expect(writes).toBe(writesBeforeLegacy);
 
   if (unexpected.length) throw new Error(JSON.stringify(unexpected));
   await page.unroute('**/api/v1/**');

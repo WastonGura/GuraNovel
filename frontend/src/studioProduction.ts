@@ -1,11 +1,17 @@
 import { ApiError, readDocumentContent, readStudioFeedback, submitStudioFeedback, type FeedbackSubmitRequest } from './api/client'
-import { getChapterProductionRun, getChapterProductionReviewReport, listChapterProductionRuns, reconcileChapterProduction,
+import { getChapterProductionRun, getChapterProductionReviewReport, listChapterProductionRuns, isLegacyChapterProductionRun, reconcileChapterProduction,
   resolveChapterProductionAction, triggerChapterReview, requestReviewRevision, finalizeChapterProduction, requestStudioFeedbackRevision,
   type ReviewRevisionSelection, type ChapterProductionState } from './api/chapterProductionV2Client'
 import { readerStageKey, reviewers, type StudioChapter } from './studioPreview'
 
 export const reviewStages = ['EDITOR_REVIEW', 'CHIEF_FINAL_REVIEW', 'LORE_FINAL_REVIEW']
 const invalid = () => new ApiError(409, 'production_changed', '章节状态或正文版本已变化，请重新加载核对。')
+export const legacyProductionMessage = '此章节保留旧版创作任务，当前仅可查看内容。任务操作尚未迁移到新版。'
+
+export async function loadLegacyStudioProduction(projectId: string, chapterId: string): Promise<Partial<StudioChapter>> {
+  const [latest] = await listChapterProductionRuns(projectId, chapterId, { limit: 1 })
+  return latest && isLegacyChapterProductionRun(latest) ? { legacyProduction: true, productionError: legacyProductionMessage } : {}
+}
 export const revisionRecoveryKey = (projectId: string, chapterId: string) => `guranovel:review-revision:${projectId}:${chapterId}`
 export const feedbackRevisionKey = (projectId: string, chapterId: string) => `guranovel:feedback-revision:${projectId}:${chapterId}`
 export type StudioFeedbackRequest = { runId: string; documentId: string; actionId: string; submission: FeedbackSubmitRequest }
@@ -77,6 +83,7 @@ async function reviewPatch(projectId: string, chapterId: string, documentId: str
 async function latestState(projectId: string, chapterId: string, signal?: AbortSignal) {
   const [latest] = await listChapterProductionRuns(projectId, chapterId, { limit: 1 }, signal)
   if (!latest) return null
+  if (isLegacyChapterProductionRun(latest)) throw new ApiError(409, 'legacy_workflow', legacyProductionMessage)
   const state = await getChapterProductionRun(projectId, chapterId, latest.workflow_run_id, signal)
   if (state.chapter_id !== chapterId || state.chapter_workflow_run_id !== latest.workflow_run_id) throw invalid()
   return state
@@ -90,7 +97,12 @@ export async function studioFinalIsComplete(projectId: string, chapterId: string
 }
 
 export async function loadStudioReview(projectId: string, chapterId: string, documentId: string, versionId: string): Promise<Partial<StudioChapter>> {
-  const state = await latestState(projectId, chapterId)
+  let state: ChapterProductionState | null
+  try { state = await latestState(projectId, chapterId) } catch (error) {
+    if (error instanceof ApiError && error.code === 'legacy_workflow')
+      return { legacyProduction: true, productionError: error.message }
+    throw error
+  }
   if (!state) return {}
   const patch = await reviewPatch(projectId, chapterId, documentId, versionId, state)
   const feedbackRequest: StudioFeedbackRequest | null = JSON.parse(sessionStorage.getItem(feedbackRevisionKey(projectId, chapterId)) || 'null')
@@ -170,7 +182,7 @@ export async function advanceStudioReview(projectId: string, chapter: StudioChap
   const { id: chapterId, documentId, versionId, draft } = chapter
   if (!documentId || !versionId || !draft.trim()) throw invalid()
   let state = await latestState(projectId, chapterId, signal)
-  if (!state) throw new ApiError(409, 'workflow_missing', '此章节没有可继续的创作流程，请先在现有工作台核对。')
+  if (!state) throw new ApiError(409, 'workflow_missing', '此章节没有可继续的创作流程，请重新加载本章核对。')
   const runId = state.chapter_workflow_run_id
   const readState = async () => {
     const next = await getChapterProductionRun(projectId, chapterId, runId, signal)

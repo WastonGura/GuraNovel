@@ -78,6 +78,7 @@ export type StudioChapter = {
   feedbackRequest?: import('./studioProduction').StudioFeedbackRequest
   productionState?: ChapterProductionState
   productionError?: string
+  legacyProduction?: boolean
   reviewReports?: ChapterProductionReviewReport[]
   chiefEditorRequired?: boolean
 }

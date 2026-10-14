@@ -2,8 +2,8 @@ import { useEffect, useLayoutEffect, useImperativeHandle, useRef, useState, type
 import { Link, useLocation, useNavigate, useParams } from 'react-router-dom'
 import { flushSync } from 'react-dom'
 import { ApiError, approveStudioOutline, createChapter, getProject, listChapters, readDocumentContent, readDocumentVersionContent, readRestorePointFeedback, createRestorePoint, restorePoint, type Project } from './api/client'
-import { getChapterProductionRun, listChapterProductionRuns, resumeChapterProduction, startChapterProductionV2 } from './api/chapterProductionV2Client'
-import { advanceStudioReview, finalizeStudioChapter, loadStudioReview, reviewStages, reviseStudioReview, studioRevisionSelection, revisionRecoveryKey, studioFinalIsComplete, prepareStudioFeedbackRevision, reviseStudioFeedback, feedbackRevisionKey } from './studioProduction'
+import { getChapterProductionRun, listChapterProductionRuns, isLegacyChapterProductionRun, resumeChapterProduction, startChapterProductionV2 } from './api/chapterProductionV2Client'
+import { advanceStudioReview, finalizeStudioChapter, loadStudioReview, loadLegacyStudioProduction, legacyProductionMessage, reviewStages, reviseStudioReview, studioRevisionSelection, revisionRecoveryKey, studioFinalIsComplete, prepareStudioFeedbackRevision, reviseStudioFeedback, feedbackRevisionKey } from './studioProduction'
 import { initialPreview, newStudioChapter, outlineOptions, previewIssues, previewProse, readerPersonas, readerStageKey, reviewers, stages, type Stage, type StudioChapter } from './studioPreview'
 import StudioReader from './StudioReader'
 import { useDraftAutosave } from './useDraftAutosave'
@@ -119,7 +119,7 @@ function ProseEditor({ chapter, projectId, preview, archive, busy, onChange, onC
   const workflowReadonly = !preview && (!!chapter.productionError || !!chapter.productionStatus && !['AUTHOR_REVISION', 'CANCELLED'].includes(chapter.productionStatus))
   const save = useDraftAutosave(chapter.documentId, chapter.versionId, chapter.draft, onSaved, {
     readOnly: workflowReadonly || chapter.published || chapter.review === 'running' || chapter.stage !== 'Draft',
-    feedback: projectId && chapter.documentId && !chapter.published ? { projectId, chapterId: chapter.id, region: 'draft',
+    feedback: projectId && chapter.documentId && !chapter.published && !chapter.legacyProduction ? { projectId, chapterId: chapter.id, region: 'draft',
       onChange: value => onFeedbackChange(value.comments, value.requirements, value.read_only) } : undefined,
   })
   useLayoutEffect(() => {
@@ -175,18 +175,22 @@ function PersistedOutline({ chapter, projectId, onChange, onSend, ref }: {
   const mounted = useRef(false)
   useEffect(() => { mounted.current = true; return () => { mounted.current = false } }, [])
   const save = useDraftAutosave(chapter.outlineDocumentId, chapter.outlineVersionId, chapter.outline, undefined, {
-    readOnly: chapter.published,
-    feedback: { projectId, chapterId: chapter.id, region: 'outline', onChange: value => onChange({ outlineComments: value.comments }) },
+    readOnly: chapter.published || chapter.legacyProduction,
+    feedback: chapter.legacyProduction ? undefined : { projectId, chapterId: chapter.id, region: 'outline', onChange: value => onChange({ outlineComments: value.comments }) },
   })
   useImperativeHandle(ref, () => ({ flush: save.flush, changeFeedback: save.changeFeedback, submitFeedback: ids => save.submit(ids) }))
   async function confirmAndDraft() {
-    if (startPending.current || !chapter.outlineDocumentId || !chapter.outlineVersionId) return
+    if (startPending.current || chapter.legacyProduction || !chapter.outlineDocumentId || !chapter.outlineVersionId) return
     startPending.current = true; setStarting(true); setStartMessage('正在保存并确认大纲…')
     try {
       if (!await save.flush()) { setStartMessage('大纲反馈尚未保存，请先处理保存失败或冲突。'); return }
       // A failed discovery request must never be mistaken for an empty run list.
       const runs = await listChapterProductionRuns(projectId, chapter.id, { limit: 1 })
       if (!mounted.current) return
+      if (runs[0] && isLegacyChapterProductionRun(runs[0])) {
+        onChange({ legacyProduction: true, productionError: legacyProductionMessage })
+        return
+      }
       let runId: string
       if (runs.length) {
         runId = runs[0].workflow_run_id
@@ -212,17 +216,18 @@ function PersistedOutline({ chapter, projectId, onChange, onSend, ref }: {
     } catch (error) {
       if (mounted.current) setStartMessage(error instanceof ApiError && error.status === 409
         ? '大纲或流程状态已变化，请重新加载后确认。'
-        : '正文生成未完成。可再次点击确认恢复原任务，或在现有工作台查看状态。')
+        : '正文生成未完成。可再次点击确认恢复原任务，或重新加载本章核对状态。')
     } finally {
       startPending.current = false
       if (mounted.current) setStarting(false)
     }
   }
   return <>
-    <OutlineEditor outline={save.text} comments={save.feedback?.comments || []} readOnly={starting || !save.feedback || save.feedback.read_only || chapter.published} textReadOnly
+    <OutlineEditor outline={save.text} comments={save.feedback?.comments || []} readOnly={starting || !save.feedback || save.feedback.read_only || chapter.published || Boolean(chapter.legacyProduction)} textReadOnly
       onChange={() => {}} onCommentsChange={comments => save.changeFeedback({ comments })} onSend={onSend}
       prepareSend={() => save.submit((save.feedback?.comments || []).map(comment => comment.id))}
-      confirm={<IconButton icon="check" label="确认大纲并生成正文" disabled={starting || !save.feedback || chapter.published || !save.text.trim()} onClick={() => void confirmAndDraft()} />} />
+      confirm={<IconButton icon="check" label="确认大纲并生成正文" disabled={starting || !save.feedback || chapter.published || chapter.legacyProduction || !save.text.trim()} onClick={() => void confirmAndDraft()} />} />
+    {chapter.legacyProduction && <p role="alert">{chapter.productionError}</p>}
     {startMessage && <p className="studio-integration-note" role="status">{startMessage}</p>}
     <div className="studio-save-status" role="status">{save.status}
       {save.status.includes('失败') && <button onClick={() => void save.flush()}>重试自动保存</button>}
@@ -241,6 +246,8 @@ function StudioLoader() {
   const location = useLocation()
   const navigate = useNavigate()
   const requestedView = new URLSearchParams(location.search).get('view')
+  const readerDocument = new URLSearchParams(location.search).get('readerDocument')
+  const readerVersion = new URLSearchParams(location.search).get('readerVersion')
   const preview = !projectId
   const [loaded, setLoaded] = useState<{ title: string; chapters: StudioChapter[]; project?: Project } | null>(() => preview ? { title: '动量干涉：Momentum Zero', chapters: initialPreview() } : null)
   const [error, setError] = useState('')
@@ -262,6 +269,7 @@ function StudioLoader() {
     let active = true
     Promise.all([getProject(projectId), listChapters(projectId)]).then(async ([project, chapters]) => {
       if (!active) return
+      setError('')
       if (requestedView === 'Setting') {
         if (project.setting_collection_id) {
           navigate(`/setting-collections/${encodeURIComponent(project.setting_collection_id)}`, {
@@ -286,8 +294,16 @@ function StudioLoader() {
           stage: finalReady ? 'Final' as const : draft ? 'Draft' as const : 'Outline' as const,
           published: finalReady, outlineStep: outline ? 'edit' as const : 'new' as const,
           ...(!finalReady && draft ? await loadStudioReview(projectId, chapter.id, draft.document_id, draft.version_id) : {}),
+          ...(!finalReady && !draft && outline ? await loadLegacyStudioProduction(projectId, chapter.id) : {}),
         }
       }))
+      if (readerDocument || readerVersion) {
+        const target = items.find(item => item.id === chapterId)
+        if (!target || target.documentId !== readerDocument || target.versionId !== readerVersion) {
+          if (active) setError('此读者链接对应的正文版本已变化，请从当前章节重新打开读者环节。')
+          return
+        }
+      }
       if (active) setLoaded({ title: project.title, chapters: items, project })
     }).catch((caught: unknown) => {
       if (active) {
@@ -299,8 +315,8 @@ function StudioLoader() {
       }
     })
     return () => { active = false }
-  }, [projectId, requestedView, chapterId, navigate])
-  if (error) return <div className="studio-load"><p role="alert">{error}</p><button onClick={() => window.location.reload()}>重新加载</button><Link to="/">返回首页</Link></div>
+  }, [projectId, requestedView, chapterId, readerDocument, readerVersion, navigate])
+  if (error) return <div className="studio-load"><p role="alert">{error}</p><button onClick={() => window.location.reload()}>重新加载</button>{(readerDocument || readerVersion) && <Link to={`/projects/${encodeURIComponent(projectId!)}/studio/${encodeURIComponent(chapterId || '')}`}>打开当前章节</Link>}<Link to="/">返回首页</Link></div>
   if (!loaded) return <div className="studio-load" role="status">正在打开创作区…</div>
   return <StudioWorkspace key={projectId || 'preview'} title={loaded.title} initial={loaded.chapters} initialId={chapterId} project={loaded.project} preview={preview} />
 }
@@ -464,6 +480,9 @@ function StudioWorkspace({ title, initial, initialId, project, preview }: {
   function navigateStudio(chapterId = selectedId, stage = selected?.stage) {
     const search = new URLSearchParams(location.search)
     search.delete('view')
+    if (chapterId !== selectedId || stage !== 'Reader') {
+      for (const key of ['readerDocument', 'readerVersion', 'readerSession']) search.delete(key)
+    }
     if (stage) search.set('stage', stage)
     const pathname = preview ? `/preview/studio${chapterId ? `/${encodeURIComponent(chapterId)}` : ''}` : `/projects/${encodeURIComponent(project!.id)}/studio${chapterId ? `/${encodeURIComponent(chapterId)}` : ''}`
     if (pathname !== location.pathname || search.toString() !== location.search.slice(1)) navigate({ pathname, search: search.toString() ? `?${search.toString()}` : '' }, { state: location.state })
@@ -670,6 +689,7 @@ function StudioWorkspace({ title, initial, initialId, project, preview }: {
     if (archiveSaving.current) return
     if (archive) setArchive(null)
     if (!selected || selected.published || stage === selected.stage) return
+    if (selected.legacyProduction && stage !== 'Outline' && stage !== 'Draft') { setToast(legacyProductionMessage); return }
     if (!preview && selected.productionStatus && !['AUTHOR_REVISION', 'CANCELLED'].includes(selected.productionStatus)) {
       if (stage === 'Review') {
         void leave(() => {
@@ -783,7 +803,7 @@ function StudioWorkspace({ title, initial, initialId, project, preview }: {
     </header>
     {noticesOpen && <section className="studio-notifications" aria-label="通知列表"><h2>通知</h2>{!notifications.length && <p className="studio-muted">暂无通知</p>}{notifications.slice().reverse().map(notice => <button key={notice.id} onClick={() => { selectChapter(notice.chapterId); setNoticesOpen(false) }}>{notice.message}<small>查看本章报告</small></button>)}</section>}
     <div className="studio-announcer" role="status" aria-live="polite">{notifications.at(-1)?.message}</div>
-    <section className={`studio-body${writing ? ' has-prose' : ''}`} aria-label="Create 工作区">{!selected ? <div className="studio-empty"><h1>开始新的一章</h1><button disabled={chapterPending} onClick={() => addChapter(volumes.at(-1) || '第一卷')}>新建章节</button>{!preview && <Link to={`/projects/${project?.id}`}>前往现有工作台</Link>}</div> : <>
+    <section className={`studio-body${writing ? ' has-prose' : ''}`} aria-label="Create 工作区">{!selected ? <div className="studio-empty"><h1>开始新的一章</h1><button disabled={chapterPending} onClick={() => addChapter(volumes.at(-1) || '第一卷')}>新建章节</button></div> : <>
         {!archive && selected.stage === 'Outline' && <section className={`studio-outline is-${selected.outlineStep}`} key={selected.id} aria-label="本章大纲">
           <MotionFrame className="studio-outline-flow" textKey={`${selected.outlineStep}-${refresh}`}>
           {selected.outlineStep !== 'edit' && <OutlineGeneration chapter={selected} preview={preview} refresh={refresh} onIdea={idea => update(selected.id, { idea })} onGenerate={() => update(selected.id, { outlineStep: 'choose' })} onChoose={text => update(selected.id, { outline: `${selected.idea}\n\n${text}`, outlineStep: 'edit' })} onRefresh={() => setRefresh(value => value + 1)} />}
@@ -794,7 +814,7 @@ function StudioWorkspace({ title, initial, initialId, project, preview }: {
             confirm={<IconButton icon="check" label="确认大纲并进入正文" disabled={!selected.outline.trim()} onClick={() => void leave(() => update(selected.id, { stage: 'Draft', draft: selected.draft || previewProse }))} />} />
             : <PersistedOutline key={selected.id} ref={editor} chapter={selected} projectId={project!.id} onChange={patch => patch.stage ? void leave(() => update(selected.id, patch)) : update(selected.id, patch)} onSend={() => setToast('大纲反馈已保存，Agent 修改流程尚未接入。')} />)}
           </MotionFrame>
-          {!preview && <p className="studio-integration-note">{selected.outlineStep === 'edit' ? '确认当前大纲后生成正文。' : '大纲讨论流程待接入。'}<Link to={`/projects/${project?.id}/chapters/${selected.id}`}>打开现有工作台</Link></p>}
+          {!preview && <p className="studio-integration-note">{selected.outlineStep === 'edit' ? '确认当前大纲后生成正文。' : '初始大纲生成与讨论尚未接入。已有大纲可继续确认和创作。'}</p>}
         </section>}
         {writing && <article className="studio-manuscript" aria-label="章节创作">
           <ChapterScroll key={selected.id}>
@@ -820,7 +840,7 @@ function StudioWorkspace({ title, initial, initialId, project, preview }: {
                 {selected.productionError && <p role="alert">{selected.productionError}</p>}
                 {!selected.productionError && selected.productionState?.awaiting_user && selected.productionState.action_kind === 'review_warning'
                   && <button disabled={Boolean(productionBusyId)} onClick={() => void runFormalReview(selected.id, selected.productionState)}>接受当前警告并继续审阅</button>}
-                {selected.stage === 'Draft' && (selected.feedbackRequest || selected.productionError) && (
+                {!selected.legacyProduction && selected.stage === 'Draft' && (selected.feedbackRequest || selected.productionError) && (
                   <button disabled={Boolean(productionBusyId)} onClick={() => void (selected.feedbackRequest ? runFormalFeedback(selected.id) : runFormalReview(selected.id))}>{selected.feedbackRequest ? '重试修改' : '重试审阅'}</button>
                 )}
                 {selected.stage === 'Review' && (selected.productionError || (!selected.productionState?.awaiting_user
@@ -883,11 +903,11 @@ function StudioWorkspace({ title, initial, initialId, project, preview }: {
           </MotionFrame>
           </ChapterScroll>
           <div className={`studio-manuscript-footer studio-chrome${hidden ? ' is-hidden' : ''}`}>
-            {archive ? <><span className="studio-muted">{archive.summary} · {archiveTime(archive.createdAt)}</span><div className="studio-actions"><button disabled={archiveBusy} onClick={() => selectChapter(selected.id)}>返回当前正文</button><button disabled={archiveBusy || selected.published || selected.review === 'running'} onClick={() => void saveArchive(true)}>从此存档继续写作</button></div></> : selected.stage === 'Draft' && <><span className="studio-muted">选中正文添加评论</span><div className="studio-actions"><IconButton icon="restorepoint" label="创建还原点" disabled={archiveBusy || Boolean(productionBusyId) || selected.published || !selected.draft.trim() || (!preview && !selected.documentId)} onClick={() => void saveArchive()} /><IconButton icon="review" label="提交审阅" disabled={archiveBusy || Boolean(productionBusyId) || !selected.draft.trim()} onClick={() => startReview(selected.id)} /></div></>}
+            {archive ? <><span className="studio-muted">{archive.summary} · {archiveTime(archive.createdAt)}</span><div className="studio-actions"><button disabled={archiveBusy} onClick={() => selectChapter(selected.id)}>返回当前正文</button><button disabled={archiveBusy || selected.legacyProduction || selected.published || selected.review === 'running'} onClick={() => void saveArchive(true)}>从此存档继续写作</button></div></> : selected.stage === 'Draft' && <><span className="studio-muted">{selected.legacyProduction ? '旧版任务 · 内容只读' : '选中正文添加评论'}</span><div className="studio-actions"><IconButton icon="restorepoint" label="创建还原点" disabled={archiveBusy || Boolean(productionBusyId) || selected.legacyProduction || selected.published || !selected.draft.trim() || (!preview && !selected.documentId)} onClick={() => void saveArchive()} /><IconButton icon="review" label="提交审阅" disabled={archiveBusy || Boolean(productionBusyId) || selected.legacyProduction || !selected.draft.trim()} onClick={() => startReview(selected.id)} /></div></>}
             {!archive && selected.stage === 'Final' && <><span className="studio-muted">{preview ? selected.published ? '本章已发布' : '最后确认后发布' : selected.published ? '本章已在本地定稿' : '等待作者确认本地定稿'}</span><IconButton icon="publish" label={preview ? '发布章节' : '本地定稿'} disabled={selected.published || Boolean(productionBusyId)} onClick={() => setPublishing(true)} /></>}
           </div>
         </article>}
-        {!archive && selected.stage === 'Reader' && !preview && <StudioReader key={`${selected.id}:${selected.versionId}`} projectId={project!.id} chapter={selected} onChange={patch => update(selected.id, patch)} onFinal={() => changeStage('Final')} />}
+        {!archive && selected.stage === 'Reader' && !preview && <StudioReader key={`${selected.id}:${selected.versionId}:${new URLSearchParams(location.search).get('readerSession') || ''}`} projectId={project!.id} chapter={selected} sessionId={new URLSearchParams(location.search).get('readerSession') || undefined} onChange={patch => update(selected.id, patch)} onFinal={() => changeStage('Final')} />}
         {!archive && selected.stage === 'Reader' && preview && <section className={`studio-reader studio-enter${selected.discussion ? ' is-discussion' : ''}`} aria-label="读者环节" key={`${selected.id}-${selected.discussion}`}>
           {!selected.discussion ? <><h2>邀请读者</h2><div className="studio-reader-list">{readerPersonas.map(([id, name, description]) => <div className="studio-reader-person" key={id}><span className="studio-avatar" aria-hidden="true" /><div><strong>{name}</strong><small>{description}</small></div><button className={selected.readers.includes(id) ? 'is-invited' : ''} aria-pressed={selected.readers.includes(id)} aria-label={`${selected.readers.includes(id) ? '取消邀请' : '邀请'}${name}`} onClick={() => update(selected.id, { readers: selected.readers.includes(id) ? selected.readers.filter(value => value !== id) : [...selected.readers, id] })}>{selected.readers.includes(id) ? '取消' : '邀请'}</button></div>)}</div><div className="studio-reader-footer"><button onClick={() => changeStage('Final')}>跳过读者环节</button><button className="studio-primary" disabled={!selected.readers.length} onClick={() => update(selected.id, { discussion: true })}>开始阅读</button></div></> : <><div className="studio-reader-transcript"><div className="studio-message"><span className="studio-avatar" /><div><p>主持人 <time>刚刚 · 预览</time></p><button className="studio-file" onClick={() => changeStage('Final')}><img src={asset('chapter')} alt="" />第{selected.number}话 {selected.title}</button></div></div><div className="studio-message"><span className="studio-avatar" /><div><p>主持人 <time>刚刚 · 预览</time></p><span className="studio-accent">@全体成员</span><p>阅读这篇文章并给出意见。</p></div></div>{readerPersonas.filter(([id]) => selected.readers.includes(id)).map(([id, name, description]) => <div className="studio-message" key={id}><span className="studio-avatar" /><div><p>{name} <time>示例发言</time></p><p>我会{description.replace('关注', '重点看')}。这段食堂的日常很有画面感，期待接下来人物之间的关系。</p></div></div>)}</div><div className="studio-reader-footer"><span className="studio-muted">作者旁观 · 无需参与讨论</span><button onClick={() => changeStage('Final')}>结束旁观，进入终稿</button></div></>}
         </section>}
@@ -898,7 +918,7 @@ function StudioWorkspace({ title, initial, initialId, project, preview }: {
       <section className={`studio-stats studio-floating${pins.stats ? ' is-pinned' : ''}${hidden && !pins.stats ? ' is-hidden' : ''}`} inert={(hidden || !sidebarOpen) && !pins.stats} aria-label="创作统计"><div><img src={asset('time')} alt="时间" />{Math.floor(seconds / 3600)}h {Math.floor(seconds / 60) % 60}m {seconds % 60}s</div><div><img src={asset('font')} alt="字数" />{(selected?.draft.replace(/\s/g, '').length || 0).toLocaleString()} 字</div><Pin label="统计面板" pinned={pins.stats} onChange={() => setPins(value => ({ ...value, stats: !value.stats }))} /></section>
       <section className={`studio-directory studio-floating${pins.directory ? ' is-pinned' : ''}${hidden && !pins.directory ? ' is-hidden' : ''}`} inert={(hidden || !sidebarOpen) && !pins.directory} aria-label="章节目录"><div className="studio-directory-tools"><Pin label="章节目录" pinned={pins.directory} onChange={() => setPins(value => ({ ...value, directory: !value.directory }))} /></div><div className="studio-directory-title"><h2>{title}</h2><IconButton icon="add" label="新建卷" disabled={!preview} onClick={() => setVolumes(items => [...items, `第${items.length + 1}卷`])} /></div><div className="studio-directory-scroll">{volumes.slice().reverse().map(volume => <details key={volume} open><summary><span>{volume}</span><IconButton icon="add" label={`在${volume}新建章节`} disabled={chapterPending} onClick={event => { event.preventDefault(); addChapter(volume) }} /></summary>{chapters.filter(chapter => chapter.volume === volume).slice().sort((a, b) => b.number - a.number).map(chapter => <ChapterArchiveRow projectId={project?.id} key={chapter.id} chapter={chapter} current={selectedId === chapter.id} activeArchive={archive?.chapterId === chapter.id ? archive.id : undefined} preview={preview} local={archives[chapter.id] || []} revision={archiveRevision} onChapter={() => selectChapter(chapter.id)} onArchive={entry => viewArchive(chapter, entry)} />)}</details>)}</div></section>
     </aside>
-    <footer className={`studio-bottom studio-chrome${hidden ? ' is-hidden' : ''}`}><button onClick={() => void leave(() => navigate('/'))}>返回书架</button><span>{preview ? '交互预览 · Agent 流程为示例' : '真实章节 · 流程已接通'}</span>{!preview && selected && <button onClick={() => void leave(() => navigate(`/projects/${project?.id}/chapters/${selected.id}`))}>现有工作台</button>}</footer>
+    <footer className={`studio-bottom studio-chrome${hidden ? ' is-hidden' : ''}`}><button onClick={() => void leave(() => navigate('/'))}>返回书架</button><span>{preview ? '交互预览 · Agent 流程为示例' : '章节内容与状态保存到服务器'}</span></footer>
     <GlobalAssistant hidden={hidden} project={project} chapter={selected} currentView={selected?.stage || 'Create'} preview={preview} />
     {(toast || storageError) && <div className="studio-toast" role={storageError ? 'alert' : 'status'}>{storageError || toast}<button aria-label="关闭提示" onClick={() => { setToast(''); setStorageError('') }}>×</button></div>}
     {publishing && <PublishDialog preview={preview} busy={Boolean(productionBusyId)} error={selected?.productionError} onClose={() => setPublishing(false)} onConfirm={() => void publish()} />}
