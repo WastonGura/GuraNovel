@@ -21,6 +21,7 @@ Dates use Asia/Tokyo. Target: v0.12.0 desktop personal trial.
 - Red: no accessible unavailable-settings control, English creation stages, and unwired setting discussion presented as a real Agent. Three behavior tests failed before implementation.
 - Green: unavailable preferences and setting discussion have explicit disabled controls; examples stay in preview mode. Dashboard/forms and creation stages use Chinese author terms, review identities/severity are translated, and local finalization is distinct from an external publication.
 - Validation: 118 affected Dashboard/Studio/setting/navigation cases and the focused Chromium creation/keyboard case pass. Existing test selectors were updated for translated labels. Full gates run in Actions.
+- Docker interaction exposed a stale `stage=Draft` URL after submission. The explicit-route regression failed before the fix; progress now synchronizes the URL and stale route recovery does not display a misleading author warning. All 69 Studio/navigation cases and focused ESLint pass. Remaining review progress text is translated to Chinese.
 - README distinguishes the desktop delivery scope, future capabilities and deterministic Provider evidence. No model quality or release claim; version unchanged.
 
 ## 2026-10-14 — #306 author creation form

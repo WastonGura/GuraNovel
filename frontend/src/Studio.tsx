@@ -446,8 +446,8 @@ function StudioWorkspace({ title, initial, initialId, project, preview }: {
   const currentReviewer = ({ EDITOR_REVIEW: reviewers[0], CHIEF_FINAL_REVIEW: reviewers[1], LORE_FINAL_REVIEW: reviewers[2] } as Record<string, string>)[selected?.productionStatus || '']
   const contextText = activeComment ? activeComment.text : archive ? archive.requirements || (archive.feedbackAvailable ? '此存档没有通用写作要求。' : '此历史存档未记录写作要求和评论。') : showingOutline ? selected?.outline || '暂无大纲' : selected?.stage === 'Review'
     ? !preview ? selected.productionStatus === 'REVISION_READY' ? '本轮审阅已完成。' : selected.productionState?.awaiting_user ? '审阅暂停，等待你处理本轮问题。'
-      : selected.productionStatus === 'FAILED' ? '审阅中断，可重试恢复当前流程。' : currentReviewer ? `${currentReviewer} ${productionBusyId === selected.id ? '审阅中…' : '等待继续审阅。'}` : '正在读取审阅状态…'
-      : selected.review === 'idle' ? '' : [...['Editor Reviewer', 'Chief Reviewer', 'Lore Reviewer'].map(name => `${name} 开始审阅`), ...['Editor Reviewer', 'Chief Reviewer', 'Lore Reviewer'].slice(0, selected.completed).map(name => `${name} 完成审阅`)].join('\n')
+      : selected.productionStatus === 'FAILED' ? '审阅中断，可重试恢复当前流程。' : currentReviewer ? `${reviewerNames[currentReviewer]} ${productionBusyId === selected.id ? '审阅中…' : '等待继续审阅。'}` : '正在读取审阅状态…'
+      : selected.review === 'idle' ? '' : [...reviewers.map(name => `${reviewerNames[name]} 开始审阅`), ...reviewers.slice(0, selected.completed).map(name => `${reviewerNames[name]} 完成审阅`)].join('\n')
     : selected?.requirements || '希望这一段怎样展开？'
 
   useEffect(() => {
@@ -640,8 +640,14 @@ function StudioWorkspace({ title, initial, initialId, project, preview }: {
       if (origin !== navigation.current || controller.signal.aborted) return
       const chapter = currentChapters.current.find(item => item.id === id)
       if (!chapter) return
+      let progressStage = chapter.stage
       const progress = (patch: Partial<StudioChapter>) => {
-        if (!controller.signal.aborted) update(id, patch)
+        if (controller.signal.aborted) return
+        update(id, patch)
+        if (patch.stage && patch.stage !== progressStage && origin === navigation.current) {
+          progressStage = patch.stage
+          navigateStudio(id, patch.stage)
+        }
       }
       const revision = chapter.revisionRequest || (revisedIds ? studioRevisionSelection(chapter, revisedIds) : undefined)
       if (revision) {
@@ -656,7 +662,11 @@ function StudioWorkspace({ title, initial, initialId, project, preview }: {
         ? '章节版本或流程已变化，请重试读取服务器状态；如仍冲突，请重新加载核对。'
         : '提交或审阅未完成。重试会先核对服务器进度，不会重新创建流程。' })
     } finally {
-      if (productionPending.current === controller) { productionPending.current = null; setProductionBusyId('') }
+      if (productionPending.current === controller) {
+        productionPending.current = null; setProductionBusyId('')
+        const current = currentChapters.current.find(chapter => chapter.id === id)
+        if (current && origin === navigation.current && !controller.signal.aborted) navigateStudio(id, current.stage)
+      }
     }
   }
   async function runFormalFeedback(id: string) {
@@ -769,17 +779,23 @@ function StudioWorkspace({ title, initial, initialId, project, preview }: {
     })
   }
   useEffect(() => {
+    if (productionBusyId) return
     const rawStage = new URLSearchParams(location.search).get('stage')
     if (!rawStage) return
     const matched = stages.find(s => s.toLowerCase() === rawStage.toLowerCase())
     if (matched && selected && selected.stage !== matched && !selected.published) {
       const timer = window.setTimeout(() => {
+        if (productionPending.current) return
+        if (matched === 'Draft' && !preview && selected.productionStatus && !['AUTHOR_REVISION', 'CANCELLED'].includes(selected.productionStatus)) {
+          navigateStudio(selected.id, selected.stage)
+          return
+        }
         changeStage(matched)
       }, 0)
       return () => window.clearTimeout(timer)
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [location.search, selected?.id, selected?.stage, selected?.published])
+  }, [location.search, selected?.id, selected?.stage, selected?.published, productionBusyId])
   function addChapter(volume: string) {
     if (creatingChapter.current) return
     void leave(() => {
