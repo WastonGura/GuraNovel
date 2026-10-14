@@ -137,6 +137,7 @@ function renderWorkspace(initialUrl = '/setting-collections/col-123') {
 
 describe('SettingCollectionWorkspace', () => {
   beforeEach(() => {
+    sessionStorage.clear()
     vi.clearAllMocks()
     mockedGetSettingCollection.mockResolvedValue(mockCollection)
     mockedListCollectionProjects.mockResolvedValue(mockProjects)

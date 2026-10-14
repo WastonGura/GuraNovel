@@ -8,6 +8,13 @@ Dates use Asia/Tokyo. Target: v0.12.0 desktop personal trial.
 - Removed the Qodana workflow at the maintainer's explicit request. GitHub Actions ci.yml remains the canonical quality gate; no token or license update is needed.
 - Validation: diff review and Actions run 38515444409 passed, with unrelated product jobs skipped by path filtering. This configuration change does not claim behavioral TDD evidence.
 
+## 2026-10-14 — #302 version-bound setting comments
+
+- Status: implemented locally; dependent PR and Actions pending.
+- Red: API returned success but omitted comment metadata; source editing never flushed comment anchors to the server; reload lost the feedback recovery snapshot; deleting a quoted span did not mark its comment orphaned.
+- Green: content and validated UTF-16 comment anchors share one optimistic document write/version. Metadata records the exact resulting source version and the immutable version retains feedback. Stale writes do not alter comments. Affected setting regression tests and the PostgreSQL round-trip are run locally via uv; full gates run in Actions.
+- UI save queues track text plus comments, flush while editing, retain failed snapshots including their original version, and preserve orphaned quotes. Existing unrelated draft recovery behavior is retained. No version bump.
+
 ## 2026-10-14 — #298 durable setting deletion and undo
 
 - Status: local implementation; review and latest-head Actions pending. New nullable document tombstone migration 0012 preserves content/version/reference identities; archived and foreign-owner restoration is rejected. A deleted-documents listing and idempotent undelete API support recovery after reload/restart.
