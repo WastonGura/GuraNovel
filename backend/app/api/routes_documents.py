@@ -21,6 +21,7 @@ from app.api.schemas_documents import (
 from app.core.errors import ConflictError, ForbiddenError, NotFoundError
 from app.models import Document, DocumentVersion, Project, SettingCollection
 from app.services import DocumentService
+from app.services.setting_document_trash import set_setting_document_deleted
 from app.workspace.markdown_store import MarkdownStore
 
 router = APIRouter(prefix="/documents")
@@ -45,7 +46,7 @@ async def _document_metadata(session: AsyncSession, document_id: UUID) -> Docume
             selectinload(Document.project),
             selectinload(Document.setting_collection),
         )
-        .where(Document.id == document_id)
+        .where(Document.id == document_id, Document.deleted_at.is_(None))
     )
     if document is None:
         raise NotFoundError("Document not found.")
@@ -204,6 +205,9 @@ async def delete_document(
     )
     if document is None:
         raise NotFoundError("Document not found.")
+    if document.setting_collection_id is not None:
+        await set_setting_document_deleted(session, document_id, deleted=True, actor_id=actor_id)
+        return
     workspace_root: str | None = None
     if document.setting_collection_id is not None:
         collection = document.setting_collection or await session.get(SettingCollection, document.setting_collection_id)
@@ -234,4 +238,14 @@ async def delete_document(
                 store.delete(doc_path)
         except Exception:
             pass
+
+
+@router.post("/{document_id}/undelete", response_model=DocumentResponse)
+async def undelete_document(
+    document_id: UUID,
+    actor_id: UUID | None = Depends(get_actor_user_id),
+    session: AsyncSession = Depends(get_db_session),
+) -> Document:
+    await set_setting_document_deleted(session, document_id, deleted=False, actor_id=actor_id)
+    return await _document_metadata(session, document_id)
 

@@ -497,7 +497,8 @@ class DocumentService:
         )
 
     async def read_version_content(self, document_id: UUID, version_id: UUID) -> str:
-        document = await self._document(document_id)
+        # Immutable references held by existing tasks survive soft deletion.
+        document = await self._document(document_id, include_deleted=True)
         version = await self.session.scalar(
             select(DocumentVersion).where(
                 DocumentVersion.id == version_id, DocumentVersion.document_id == document.id
@@ -682,7 +683,7 @@ class DocumentService:
         )
         return version
 
-    async def _document(self, document_id: UUID) -> Document:
+    async def _document(self, document_id: UUID, *, include_deleted: bool = False) -> Document:
         document = await self.session.scalar(
             select(Document)
             .options(
@@ -692,7 +693,7 @@ class DocumentService:
             )
             .where(Document.id == document_id)
         )
-        if document is None:
+        if document is None or (document.deleted_at is not None and not include_deleted):
             raise NotFoundError("Document not found.")
         return document
 
@@ -707,7 +708,7 @@ class DocumentService:
             .where(Document.id == document_id)
             .with_for_update()
         )
-        if document is None:
+        if document is None or document.deleted_at is not None:
             raise NotFoundError("Document not found.")
         return document
 

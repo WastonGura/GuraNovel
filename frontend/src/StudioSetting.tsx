@@ -29,7 +29,8 @@ export interface StudioSettingProps {
   onApplyProposal?: (proposal: SettingChangeProposal) => Promise<{ versionId: string; documentId: string } | 'conflict' | false>
   onRenameNote?: (noteId: string, newTitle: string) => Promise<boolean>
   onCreateNote?: (category: SettingCategory, title: string, tempId: string) => Promise<SettingNote | null>
-  onDeleteNotes?: (noteIds: string[]) => Promise<boolean>
+  onDeleteNotes?: (noteIds: string[]) => Promise<boolean | string[]>
+  onRestoreNotes?: (noteIds: string[]) => Promise<boolean | string[]>
   onViewChange?: (view: SettingView) => void
   initialView?: Partial<SettingView>
   initialConversation?: Conversation
@@ -75,6 +76,7 @@ export default function StudioSetting({
   onRenameNote,
   onCreateNote,
   onDeleteNotes,
+  onRestoreNotes,
   onViewChange,
   initialView,
   initialConversation,
@@ -135,6 +137,8 @@ export default function StudioSetting({
   const [error, setError] = useState(initial.error)
   const [saved, setSaved] = useState(false)
   const [deleted, setDeleted] = useState<{ items: { note: SettingNote; index: number }[]; staged: NonNullable<Conversation['stagedComments']> } | null>(null)
+  const mutationPending = useRef(false)
+  const [mutationBusy, setMutationBusy] = useState(false)
   const search = useRef<HTMLInputElement>(null)
   const noteInput = useRef<HTMLTextAreaElement>(null)
 
@@ -349,23 +353,51 @@ export default function StudioSetting({
     persist(currentNotes.current.map(note => ids.includes(note.id) ? rest.shift()! : note), currentConversation.current, true)
   }
   function deleteNotes(ids: string[]) {
-    if (readOnly || (editing && !titleCommit())) return
+    if (readOnly || mutationPending.current || (editing && !titleCommit())) return
     const items = currentNotes.current.flatMap((note, index) => ids.includes(note.id) ? [{ note, index }] : [])
     if (!items.length) return
-    const chat = currentConversation.current, staged = (chat.stagedComments || []).filter(item => ids.includes(item.noteId))
-    const next = currentNotes.current.filter(note => !ids.includes(note.id))
-    if (!persist(next, { ...chat, contextId: ids.includes(chat.contextId || '') ? null : chat.contextId, stagedComments: chat.stagedComments?.filter(item => !ids.includes(item.noteId)) }, true)) return
-    if (onDeleteNotes) {
-      void onDeleteNotes(ids)
+    const commit = (succeeded: string[]) => {
+      if (!succeeded.length) { setError('删除失败，条目仍保留，请重试。'); return }
+      const chat = currentConversation.current, staged = (chat.stagedComments || []).filter(item => succeeded.includes(item.noteId))
+      const next = currentNotes.current.filter(note => !succeeded.includes(note.id))
+      if (!persist(next, { ...chat, contextId: succeeded.includes(chat.contextId || '') ? null : chat.contextId, stagedComments: chat.stagedComments?.filter(item => !succeeded.includes(item.noteId)) }, true)) return
+      setDeleted(previous => ({ items: [...(previous?.items || []), ...items.filter(item => succeeded.includes(item.note.id))], staged: [...(previous?.staged || []), ...staged] }))
+      if (succeeded.includes(selectedId)) { setSelectedId(next.find(note => note.category === category)?.id || ''); setEditing(false) }
+      setError(succeeded.length === ids.length ? '' : '部分删除失败，失败条目仍保留，可重试。')
     }
-    setDeleted({ items, staged })
-    if (ids.includes(selectedId)) { setSelectedId(next.find(note => note.category === category)?.id || ''); setEditing(false) }
+    if (onDeleteNotes) {
+      mutationPending.current = true; setMutationBusy(true)
+      void (async () => {
+        try {
+          for (const id of ids) { if (!await runSave(id)) { setError('内容尚未保存，已暂停删除。'); return } }
+          const result = await onDeleteNotes(ids)
+          commit(result === true ? ids : Array.isArray(result) ? result.filter(id => ids.includes(id)) : [])
+        } catch { setError('删除失败，条目仍保留，请重试。') }
+        finally { mutationPending.current = false; setMutationBusy(false) }
+      })()
+    } else if (preview) commit(ids)
+    else setError('删除功能尚未接入。')
   }
   function undoDelete() {
-    if (!deleted || readOnly) return
-    const next = [...currentNotes.current]
-    deleted.items.forEach(({ note, index }) => { if (!next.some(item => item.id === note.id)) next.splice(Math.min(index, next.length), 0, note) })
-    if (persist(next, { ...currentConversation.current, stagedComments: [...(currentConversation.current.stagedComments || []), ...deleted.staged] }, true)) setDeleted(null)
+    if (!deleted || readOnly || mutationPending.current) return
+    const commit = (succeeded: string[]) => {
+      if (!succeeded.length) { setError('恢复失败，已保留撤销操作，请重试。'); return }
+      const next = [...currentNotes.current]
+      deleted.items.filter(item => succeeded.includes(item.note.id)).forEach(({ note, index }) => { if (!next.some(item => item.id === note.id)) next.splice(Math.min(index, next.length), 0, note) })
+      if (persist(next, { ...currentConversation.current, stagedComments: [...(currentConversation.current.stagedComments || []), ...deleted.staged.filter(item => succeeded.includes(item.noteId))] }, true)) {
+        const remaining = deleted.items.filter(item => !succeeded.includes(item.note.id))
+        setDeleted(remaining.length ? { items: remaining, staged: deleted.staged.filter(item => !succeeded.includes(item.noteId)) } : null)
+        setError(remaining.length ? '部分恢复失败，可再次撤销。' : '')
+      }
+    }
+    const ids = deleted.items.map(item => item.note.id)
+    if (onRestoreNotes) {
+      mutationPending.current = true; setMutationBusy(true)
+      void onRestoreNotes(ids).then(result => commit(result === true ? ids : Array.isArray(result) ? result.filter(id => ids.includes(id)) : []))
+        .catch(() => setError('恢复失败，已保留撤销操作，请重试。'))
+        .finally(() => { mutationPending.current = false; setMutationBusy(false) })
+    } else if (preview) commit(ids)
+    else setError('恢复失败，服务端恢复功能尚未接入。')
   }
   function create(title?: string) {
     if (readOnly) return
@@ -662,7 +694,8 @@ export default function StudioSetting({
         <button className={mode === 'search' ? 'is-active' : ''} aria-pressed={mode === 'search'} onClick={() => showMode('search')}><img src="/ui/setting/search.svg" alt="" />搜索内容</button>
       </div>
       <SettingNoteList notes={shown} category={category} activeId={mode === 'note' ? active?.id : undefined} disabled={readOnly || !activePage} onOpen={choose} onOrder={orderNotes} onDelete={deleteNotes} />
-      {deleted && <div className="setting-delete-undo" role="status"><small>已删除 {deleted.items.length} 项，正文引用保留</small><button type="button" onClick={undoDelete}>撤销删除</button></div>}
+      {mutationBusy && <p role="status">正在同步删除或恢复…</p>}
+      {deleted && <div className="setting-delete-undo" role="status"><small>已删除 {deleted.items.length} 项，正文引用保留</small><button type="button" disabled={mutationBusy} onClick={undoDelete}>撤销删除</button></div>}
       <small className="setting-local-note">{saveStatusText || (collection ? (collection.status === 'archived' ? '已归档 · 只读' : saved ? '已保存' : '设定集') : preview ? saved ? '已保存到本机 · 交互预览' : '示例设定 · 交互预览' : '设定接口尚未接入')}</small>
     </aside>
     </div>

@@ -109,11 +109,12 @@ async def list_collection_projects(
 @router.get("/{collection_id}/documents", response_model=list[DocumentResponse])
 async def list_collection_documents(
     collection_id: UUID,
+    deleted: bool = False,
     actor_user_id: UUID | None = Depends(get_actor_user_id),
     session: AsyncSession = Depends(get_db_session),
 ) -> list[Document]:
     return await SettingCollectionService(session).list_documents_for_collection(
-        collection_id, actor_user_id=actor_user_id
+        collection_id, actor_user_id=actor_user_id, deleted=deleted
     )
 
 

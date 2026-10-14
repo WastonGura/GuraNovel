@@ -373,6 +373,7 @@ class SettingContextResolver:
                 select(Document)
                 .where(
                     Document.setting_collection_id == setting_collection_id,
+                    Document.deleted_at.is_(None),
                     Document.type.in_(types_to_query),
                     Document.current_version_id.is_not(None),
                 )

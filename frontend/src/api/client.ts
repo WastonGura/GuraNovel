@@ -920,6 +920,10 @@ export function deleteDocument(documentId: string): Promise<void> {
   return request('DELETE', () => apiPath('documents', documentId), () => undefined)
 }
 
+export function undeleteDocument(documentId: string): Promise<Document> {
+  return request('POST', () => apiPath('documents', documentId, 'undelete'), decodeDocument)
+}
+
 export function createSettingCollection(
   payload: CreateSettingCollectionRequest
 ): Promise<SettingCollection> {

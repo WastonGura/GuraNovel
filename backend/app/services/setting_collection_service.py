@@ -242,13 +242,14 @@ class SettingCollectionService:
         return list(await self.session.scalars(stmt))
 
     async def list_documents_for_collection(
-        self, collection_id: UUID, *, actor_user_id: UUID | None = None
+        self, collection_id: UUID, *, actor_user_id: UUID | None = None, deleted: bool = False
     ) -> list[Document]:
         await self.get_setting_collection(collection_id, actor_user_id=actor_user_id)
         stmt = (
             select(Document)
             .options(selectinload(Document.current_version))
-            .where(Document.setting_collection_id == collection_id)
+            .where(Document.setting_collection_id == collection_id,
+                   Document.deleted_at.is_not(None) if deleted else Document.deleted_at.is_(None))
             .order_by(Document.created_at, Document.id)
         )
         return list(await self.session.scalars(stmt))

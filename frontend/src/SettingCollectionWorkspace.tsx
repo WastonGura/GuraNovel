@@ -5,6 +5,7 @@ import {
   applySettingProposal,
   createCollectionDocument,
   deleteDocument,
+  undeleteDocument,
   getDocument,
   getSettingCollection,
   listCollectionDocuments,
@@ -242,16 +243,24 @@ export default function SettingCollectionWorkspace() {
     }
   }
 
-  async function handleDeleteNotes(noteIds: string[]): Promise<boolean> {
-    if (isArchived) return false
-    try {
-      await Promise.all(noteIds.map((id) => deleteDocument(id)))
-      setCollection((prev) => (prev ? { ...prev, revision: prev.revision + 1 } : prev))
-      setNotes((prev) => prev.filter((n) => !noteIds.includes(n.id)))
-      return true
-    } catch {
-      return false
-    }
+  async function handleDeleteNotes(noteIds: string[]): Promise<string[]> {
+    if (isArchived) return []
+    const results = await Promise.allSettled(noteIds.map(id => deleteDocument(id)))
+    const succeeded = noteIds.filter((_, index) => results[index].status === 'fulfilled')
+    setNotes(prev => prev.filter(note => !succeeded.includes(note.id)))
+    return succeeded
+  }
+
+  async function handleRestoreNotes(noteIds: string[]): Promise<string[]> {
+    if (isArchived) return []
+    const results = await Promise.allSettled(noteIds.map(async id => {
+      const document = await undeleteDocument(id)
+      const body = await readDocumentContent(id)
+      return documentToSettingNote(document, body.content)
+    }))
+    const restored = results.flatMap(result => result.status === 'fulfilled' ? [result.value] : [])
+    setNotes(prev => [...prev.filter(note => !restored.some(item => item.id === note.id)), ...restored])
+    return restored.map(note => note.id)
   }
 
   async function handleApplyProposal(
@@ -480,6 +489,7 @@ export default function SettingCollectionWorkspace() {
           onRenameNote={isPreview ? undefined : handleRenameNote}
           onCreateNote={isPreview ? undefined : handleCreateNote}
           onDeleteNotes={isPreview ? undefined : handleDeleteNotes}
+          onRestoreNotes={isPreview ? undefined : handleRestoreNotes}
           syncUrlParams={true}
           defaultPinned={true}
           saveStatusText={saveStatusMessage}
