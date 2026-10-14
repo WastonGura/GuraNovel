@@ -12,14 +12,14 @@ PROMPT_VERSION = "chapter-outline-v1"
 
 
 class OutlineOption(BaseModel):
-    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+    model_config = ConfigDict(strict=True, extra="forbid", str_strip_whitespace=True)
     title: str = Field(min_length=1, max_length=200)
     summary: str = Field(min_length=1, max_length=2000)
     content: str = Field(min_length=20, max_length=24000)
 
 
 class OutlineOptions(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(strict=True, extra="forbid")
     candidates: list[OutlineOption] = Field(min_length=3, max_length=3)
 
     @model_validator(mode="after")
@@ -47,8 +47,6 @@ async def generate_outline_options(snapshot: dict) -> tuple[OutlineOptions, dict
     api_key = settings.openai_compatible_api_key
     if not settings.openai_compatible_base_url or not api_key or not settings.openai_compatible_model or not settings.openai_compatible_timeout_seconds:
         raise ProviderConfigurationError()
-    transport = OpenAICompatibleStructuredOutputTransport(base_url=settings.openai_compatible_base_url,
-        api_key=api_key.get_secret_value(), timeout_seconds=settings.openai_compatible_timeout_seconds)
     profile = StructuredOutputProfile(profile_id="chapter_outline_options", provider_kind="openai_compatible",
         model_identifier=settings.openai_compatible_model, prompt_template_version=PROMPT_VERSION,
         system_prompt="你是小说大纲助手。依据作者思路、不可变设定和前文，生成三个事件路径明显不同的本章大纲。"
@@ -58,6 +56,8 @@ async def generate_outline_options(snapshot: dict) -> tuple[OutlineOptions, dict
         output_schema_name="chapter_outline_options", output_schema=OutlineOptions,
         timeout_seconds=settings.openai_compatible_timeout_seconds, max_input_chars=1_000_000,
         max_output_bytes=400_000, max_tokens=8000)
+    transport = OpenAICompatibleStructuredOutputTransport(base_url=settings.openai_compatible_base_url,
+        api_key=api_key.get_secret_value(), timeout_seconds=settings.openai_compatible_timeout_seconds)
     try:
         response = await StructuredOutputGateway(profile, transport).call(StructuredOutputRequest(
             profile_id=profile.profile_id, user_prompt=json.dumps(snapshot, ensure_ascii=False)))
