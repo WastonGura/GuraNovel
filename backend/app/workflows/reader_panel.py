@@ -229,7 +229,7 @@ class ReaderPanelConfig:
     max_model_calls_per_phase: int = 20
     max_total_input_tokens: int = 2_000_000
     max_total_output_tokens: int = 1_000_000
-    max_input_tokens_per_call: int = 8192
+    max_input_tokens_per_call: int = 65_536
     max_output_tokens_per_call: int = 4096
     max_messages: int = 200
     max_provider_attempts: int = 3
@@ -341,7 +341,7 @@ def get_mode_preset_config(mode: PanelMode | str) -> ReaderPanelConfig:
             max_rounds_per_issue=1,
             min_valid_readers=2,
             max_total_model_calls=30,
-            max_input_tokens_per_call=8192,
+            max_input_tokens_per_call=65_536,
             max_execution_seconds=1200,
             blind_panel=True,
             include_transcript=True,
@@ -365,7 +365,7 @@ def get_mode_preset_config(mode: PanelMode | str) -> ReaderPanelConfig:
             max_rounds_per_issue=2,
             min_valid_readers=3,
             max_total_model_calls=80,
-            max_input_tokens_per_call=8192,
+            max_input_tokens_per_call=65_536,
             max_execution_seconds=2400,
             blind_panel=True,
             include_transcript=True,
@@ -391,7 +391,7 @@ def get_mode_preset_config(mode: PanelMode | str) -> ReaderPanelConfig:
             max_rounds_per_issue=3,
             min_valid_readers=4,
             max_total_model_calls=150,
-            max_input_tokens_per_call=12288,
+            max_input_tokens_per_call=65_536,
             max_execution_seconds=3600,
             blind_panel=True,
             include_transcript=True,

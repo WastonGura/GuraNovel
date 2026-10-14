@@ -2,6 +2,15 @@
 
 Dates use Asia/Tokyo. Target: v0.12.0 desktop personal trial.
 
+## 2026-10-14 — #338 bounded Chinese Reader input and truthful source
+
+- Status: implementation; PR/latest-head Actions/review and live Reader acceptance pending. No migration or app version bump.
+- Diagnosis correction: studio_* aliases already load through ProfileRegistry. No persona ID/UI change is needed; the initial ID hypothesis in #338 was corrected before implementation.
+- Red: a PostgreSQL HTTP test with the production adapter and streamed transport fixture rejected a normal Chinese chapter before cold reading because the 8192 per-call reservation counts UTF-8 bytes. A second test reported simulated=true for a configured real provider.
+- Green: default non-off per-call reservations are 65536, still bounded by total input/call/time budgets and the provider's input policy. This is a conservative reservation, not actual token usage. New sessions snapshot server-owned provider/model configuration without credentials/endpoints; unknown providers remain unverified.
+- Validation: both new PostgreSQL cases pass, with two actual adapter/transport calls and complete Chinese source retained. 126 provider/service unit cases pass, retaining explicit low-budget failure coverage. The test stream fixture was corrected after an intermediate pre-consumed-response error; that fixture error is not claimed as a product Red.
+- Existing sessions retain their immutable original configuration/source snapshot. A failed disposable live sample is retained; a new invitation is required to use the revised budget. Actual model quality remains separate from the streamed fixture evidence.
+
 ## 2026-10-14 — #336 reject unchanged feedback revisions
 
 - Status: implementation; PR/latest-head Actions/review and real quality revalidation pending.
