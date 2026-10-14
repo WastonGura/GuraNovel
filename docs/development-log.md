@@ -2,6 +2,12 @@
 
 Dates use Asia/Tokyo. Target: v0.12.0 desktop personal trial.
 
+## 2026-10-14 — #320 remove Qodana
+
+- Status: reviewed and Squash merged through PR #321 at a1b05a0; no release or version bump.
+- Removed the Qodana workflow at the maintainer's explicit request. GitHub Actions ci.yml remains the canonical quality gate; no token or license update is needed.
+- Validation: diff review and Actions run 38515444409 passed, with unrelated product jobs skipped by path filtering. This configuration change does not claim behavioral TDD evidence.
+
 ## 2026-10-14 — #309 author capability and status copy
 
 - Status: local implementation and focused verification; PR/latest-head Actions/review pending.
