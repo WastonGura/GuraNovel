@@ -6,7 +6,9 @@ import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import Chapter, Project
-from tests.integration.test_studio_restore_points import client  # noqa: F401
+from tests.integration import test_studio_restore_points as restore_points
+
+client = restore_points.client
 
 pytestmark = [pytest.mark.integration, pytest.mark.anyio]
 
