@@ -19,8 +19,8 @@ async def create_project(
     payload: CreateProjectRequest,
     session: AsyncSession = Depends(get_db_session),
     workspace: ProjectWorkspace = Depends(get_project_workspace),
-    actor_id: UUID = Depends(get_default_actor_user_id),
 ) -> Project:
+    actor_id = await get_default_actor_user_id(session)
     data = payload.model_dump()
     data["metadata"] = data.pop("metadata_")
     return await ProjectService(session, workspace).create_project(**data, owner_id=actor_id)

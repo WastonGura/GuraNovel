@@ -130,7 +130,8 @@ async def create_batch(session: AsyncSession, project_id: UUID, chapter_id: UUID
         metadata={"studio_outline_batch": True, "context_hash": context_hash})
     run.metadata_ = {**run.metadata_, "candidates": candidates, "provenance": provenance,
                      "document_id": str(document.id), "version_id": str(document.current_version_id)}
-    run.status = "completed"; run.completed_at = datetime.now(UTC)
+    run.status = "completed"
+    run.completed_at = datetime.now(UTC)
     await documents.commit_staged_document(document, (current_write, version_write))
     return batch_response(run)
 
@@ -176,7 +177,8 @@ async def select_candidate(session: AsyncSession, project_id: UUID, chapter_id: 
         content=candidate["content"], source=DocumentSource.USER,
         metadata={"studio_selected_outline": True, "generation_id": str(run_id), "candidate_id": str(candidate_id)})
     chapter.current_outline_document_id = document.id
-    chapter.approved_outline_version_id = None; chapter.status = "OUTLINE_DISCUSSION"
+    chapter.approved_outline_version_id = None
+    chapter.status = "OUTLINE_DISCUSSION"
     chapter.metadata_ = {**(chapter.metadata_ or {}), receipt_key: {"request_id": str(request_id),
         "run_id": str(run_id), "candidate_id": str(candidate_id), "expected_version": str(expected_current_version_id) if expected_current_version_id else None,
         "version_id": str(document.current_version_id)}}
@@ -195,6 +197,7 @@ async def save_selected_outline(session: AsyncSession, project_id: UUID, chapter
     version, current_write, version_write = await documents.stage_write_document(document_id=document.id,
         content=content, expected_current_version_id=expected_current_version_id, source=DocumentSource.USER,
         studio_outline_edit=True)
-    chapter.approved_outline_version_id = None; chapter.status = "OUTLINE_DISCUSSION"
+    chapter.approved_outline_version_id = None
+    chapter.status = "OUTLINE_DISCUSSION"
     await documents.commit_staged_document(document, (current_write, version_write))
     return version
