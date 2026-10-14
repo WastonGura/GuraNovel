@@ -50,7 +50,7 @@ def batch_response(run: WorkflowRun) -> dict:
         status = "uncertain"
     return dict(id=run.id, project_id=run.project_id, chapter_id=run.chapter_id, status=status,
         idea_text=value["idea_text"], idea_revision=value["idea_revision"], context_hash=value["context_hash"],
-        candidates=value.get("candidates", []), started_at=run.started_at,
+        candidates=[{**item, "id": UUID(item["id"])} for item in value.get("candidates", [])], started_at=run.started_at,
         failure_code=value.get("failure_code"), provenance=value.get("provenance", {}))
 
 
