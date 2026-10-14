@@ -1,7 +1,7 @@
 .studio-page-surface.is-setting .studio-body { height: calc(100% - 115px - 10.5vh); left: 0; max-width: none; top: 115px; transform: none; width: 100%; }
 .studio.is-setting .studio-header { pointer-events: none; }
 .studio.is-setting .studio-header button, .studio.is-setting .studio-header nav { pointer-events: auto; }
-.studio-setting { --setting-sidebar: clamp(230px, 16.7vw, 340px); --setting-gap: clamp(30px, 3.2vw, 66px); height: 100%; position: relative; }
+.studio-setting { --setting-sidebar: clamp(230px, 16.7vw, 340px); --setting-gap: clamp(30px, 3.2vw, 66px); width: 100%; height: 100%; position: relative; }
 .setting-sidebar { bottom: 0; left: 0; pointer-events: none; position: absolute; top: 0; width: calc(var(--setting-sidebar) + 20px); z-index: 5; }
 .studio .setting-sidebar-trigger { border: 0; height: 100%; left: 0; padding: 0; pointer-events: auto; position: absolute; top: 0; width: 24px; }
 .setting-sidebar-trigger > span { background: #d6d6d6; border-radius: 2px; display: block; height: 44px; margin: auto; width: 3px; }
@@ -287,12 +287,25 @@
   display: block;
   height: 100dvh;
   min-height: 0;
+  width: 100%;
+  overflow: hidden;
+}
+
+.setting-workspace-shell > main,
+.setting-workspace-shell .setting-app-main {
+  display: block;
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  padding: 0;
+  margin: 0;
   overflow: hidden;
 }
 
 .setting-workspace-page {
   display: flex;
   flex-direction: column;
+  width: 100%;
   height: 100vh;
   height: 100dvh;
   min-height: 0;
@@ -480,12 +493,15 @@
 .setting-workspace-body {
   flex: 1 1 0;
   min-height: 0;
+  width: 100%;
   height: calc(100% - 48px);
   position: relative;
   overflow: hidden;
+  padding: 0;
 }
 
 .setting-workspace-body .studio-setting {
+  width: 100%;
   height: 100%;
 }
 
