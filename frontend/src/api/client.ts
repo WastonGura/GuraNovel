@@ -829,6 +829,62 @@ export function readChapterIdea(projectId: string, chapterId: string): Promise<C
 export function writeChapterIdea(projectId: string, chapterId: string, payload: ChapterIdeaWrite): Promise<ChapterIdea> {
   return request('PUT', () => apiPath('projects', projectId, 'chapters', chapterId, 'outline', 'idea'), chapterIdeaDecoder(projectId, chapterId), payload)
 }
+
+export interface OutlineCandidate { id: string; title: string; summary: string; content: string }
+export interface OutlineGeneration {
+  id: string; project_id: string; chapter_id: string; status: 'running' | 'completed' | 'failed' | 'uncertain' | 'cancelled'
+  idea_text: string; idea_revision: number; context_hash: string; candidates: OutlineCandidate[]; started_at: string
+  failure_code: string | null; provenance: Metadata
+}
+export interface OutlineSelection { request_id: string; candidate_id: string; expected_current_version_id: string | null }
+export interface SelectedOutline { chapter_id: string; document_id: string; version_id: string }
+function outlineGenerationDecoder(projectId: string, chapterId: string) {
+  return (value: unknown): OutlineGeneration => {
+    const data = object(value), status = string(data.status)
+    if (data.project_id !== projectId || data.chapter_id !== chapterId || !['running', 'completed', 'failed', 'uncertain', 'cancelled'].includes(status)
+      || !Array.isArray(data.candidates)) throw invalidResponse()
+    const candidates = data.candidates.map(value => { const item = object(value); return {
+      id: string(item.id), title: string(item.title), summary: string(item.summary), content: string(item.content),
+    } })
+    if (status === 'completed' && (candidates.length !== 3 || new Set(candidates.map(item => item.id)).size !== 3)) throw invalidResponse()
+    return { id: string(data.id), project_id: projectId, chapter_id: chapterId, status: status as OutlineGeneration['status'],
+      idea_text: string(data.idea_text), idea_revision: integer(data.idea_revision), context_hash: string(data.context_hash), candidates,
+      started_at: string(data.started_at), failure_code: nullableString(data.failure_code), provenance: metadata(data.provenance) }
+  }
+}
+export function listOutlineGenerations(projectId: string, chapterId: string): Promise<OutlineGeneration[]> {
+  return request('GET', () => apiPath('projects', projectId, 'chapters', chapterId, 'outline', 'generations'), value => {
+    if (!Array.isArray(value)) throw invalidResponse()
+    return value.map(outlineGenerationDecoder(projectId, chapterId))
+  })
+}
+export function getOutlineGeneration(projectId: string, chapterId: string, runId: string): Promise<OutlineGeneration> {
+  return request('GET', () => apiPath('projects', projectId, 'chapters', chapterId, 'outline', 'generations', runId), value => {
+    const batch = outlineGenerationDecoder(projectId, chapterId)(value)
+    if (batch.id !== runId) throw invalidResponse()
+    return batch
+  })
+}
+export function createOutlineGeneration(projectId: string, chapterId: string, payload: { request_id: string; expected_idea_revision: number }): Promise<OutlineGeneration> {
+  return request('POST', () => apiPath('projects', projectId, 'chapters', chapterId, 'outline', 'generations'), value => {
+    const batch = outlineGenerationDecoder(projectId, chapterId)(value)
+    if (batch.id !== payload.request_id || batch.idea_revision !== payload.expected_idea_revision) throw invalidResponse()
+    return batch
+  }, payload)
+}
+export function cancelOutlineGeneration(projectId: string, chapterId: string, runId: string): Promise<OutlineGeneration> {
+  return request('POST', () => apiPath('projects', projectId, 'chapters', chapterId, 'outline', 'generations', runId, 'cancel'), outlineGenerationDecoder(projectId, chapterId))
+}
+export function selectOutlineCandidate(projectId: string, chapterId: string, runId: string, payload: OutlineSelection): Promise<SelectedOutline> {
+  return request('POST', () => apiPath('projects', projectId, 'chapters', chapterId, 'outline', 'generations', runId, 'select'), value => {
+    const data = object(value)
+    if (data.chapter_id !== chapterId) throw invalidResponse()
+    return { chapter_id: chapterId, document_id: string(data.document_id), version_id: string(data.version_id) }
+  }, payload)
+}
+export function writeStudioOutline(projectId: string, chapterId: string, payload: WriteDocumentRequest): Promise<DocumentVersion> {
+  return request('PUT', () => apiPath('projects', projectId, 'chapters', chapterId, 'outline', 'content'), decodeDocumentVersion, payload)
+}
 export interface StudioFeedback {
   chapter_id: string; region: FeedbackRegion; document_id: string | null; source_version_id: string | null
   revision: number; comments: StudioComment[]; requirements: string; read_only: boolean

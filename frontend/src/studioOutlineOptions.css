@@ -1,0 +1,14 @@
+.studio-outline-alternatives { width: min(1120px, 100%); margin: 0 auto; padding: 24px; box-sizing: border-box; }
+.studio-outline-alternatives h2 { font-size: 24px; margin-top: 0; }
+.studio-outline-alternatives label { display: block; margin: 16px 0; }
+.studio-outline-alternatives textarea { display: block; width: 100%; min-height: 120px; box-sizing: border-box; padding: 16px; resize: vertical; border: 1px solid #ddd; border-radius: 16px; font: inherit; }
+.studio-outline-alternatives select { margin-left: 12px; max-width: 100%; padding: 8px; }
+.studio-outline-candidates { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 20px; margin-top: 24px; }
+.studio-outline-candidates article { min-width: 0; border: 1px solid #ddd; border-radius: 16px; padding: 20px; }
+.studio-outline-candidates h3 { margin-top: 0; }
+.studio-outline-candidates summary { cursor: pointer; margin: 16px 0; }
+.studio-outline-candidates pre { white-space: pre-wrap; overflow-wrap: anywhere; font: inherit; line-height: 1.8; }
+.studio-outline-candidates button { margin-top: 16px; }
+@media (max-width: 900px) { .studio-outline-candidates { grid-template-columns: 1fr; } }
+.studio-outline.is-persisted { max-width: 1200px; min-height: 0; justify-content: flex-start; align-items: stretch; overflow-y: auto; box-sizing: border-box; }
+.studio-outline.is-persisted .studio-outline-flow { flex: none; }

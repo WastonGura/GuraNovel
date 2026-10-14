@@ -1,5 +1,5 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'
-import { ApiError, decodeStudioFeedback, readStudioFeedback, submitStudioFeedback, writeDocument, writeStudioDraft, writeStudioFeedback,
+import { ApiError, decodeStudioFeedback, readStudioFeedback, submitStudioFeedback, writeDocument, writeStudioDraft, writeStudioOutline, writeStudioFeedback,
   type FeedbackRegion, type FeedbackSubmitRequest, type FeedbackWriteRequest, type StudioFeedback } from './api/client'
 import { reanchorFeedbackComments } from './studioPreview'
 
@@ -207,6 +207,7 @@ export function useDraftAutosave(documentId: string | undefined, versionId: stri
             const payload: { content: string; expected_current_version_id: string } = { content, expected_current_version_id: state.versionId! }
             const saved = target?.region === 'draft'
               ? await writeStudioDraft(target.projectId, target.chapterId, payload)
+              : target?.region === 'outline' ? await writeStudioOutline(target.projectId, target.chapterId, payload)
               : await writeDocument(documentId, payload)
             state.versionId = saved.id; state.saved = content
             if (mounted.current) callbacks.current.onSaved?.(saved.id, state.text)
@@ -283,5 +284,5 @@ export function useDraftAutosave(documentId: string | undefined, versionId: stri
     // The queue reads current text, callbacks and feedback, never a render snapshot.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [text, changeTick])
-  return { text, change, feedback, changeFeedback, submit, status, flush, reloadServer }
+  return { text, change, feedback, changeFeedback, submit, status, flush, reloadServer, savedVersion: () => current.current.versionId }
 }

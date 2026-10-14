@@ -60,25 +60,45 @@ function ProjectForm({
   const [cover, setCover] = useState('')
   const [pending, setPending] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [slugSuffix] = useState(() => crypto.randomUUID().slice(0, 8))
+  const [returnFocus] = useState(() => document.activeElement as HTMLElement | null)
+  const dialogRef = useRef<HTMLDialogElement>(null)
+  const titleRef = useRef<HTMLInputElement>(null)
+  const errorRef = useRef<HTMLParagraphElement>(null)
+  const submitting = useRef(false)
 
   useEffect(() => {
-    const closeOnEscape = (event: globalThis.KeyboardEvent) => { if (event.key === 'Escape') onClose() }
-    window.addEventListener('keydown', closeOnEscape)
-    return () => window.removeEventListener('keydown', closeOnEscape)
-  }, [onClose])
+    const dialog = dialogRef.current!
+    if (typeof dialog.showModal === 'function') dialog.showModal()
+    else dialog.setAttribute('open', '')
+    titleRef.current?.focus()
+    return () => {
+      if (typeof dialog.close === 'function') dialog.close()
+      returnFocus?.focus()
+    }
+  }, [returnFocus])
+
+  useEffect(() => { if (error) errorRef.current?.focus() }, [error])
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
-    if (pending) return
-    if (!slug.trim() || !title.trim()) {
-      setError('Slug and title are required.')
+    if (submitting.current) return
+    if (!title.trim()) {
+      setError('请填写作品标题。')
       return
     }
+    const titleSlug = title.normalize('NFKD').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 45)
+    const effectiveSlug = slug.trim() || `${titleSlug || 'novel'}-${slugSuffix}`
+    if (!/^[a-z0-9][a-z0-9_-]{0,63}$/i.test(effectiveSlug)) {
+      setError('高级选项中的 Slug 请使用 1–64 个英文字母、数字、连字符或下划线，并以字母或数字开头。')
+      return
+    }
+    submitting.current = true
     setPending(true)
     setError(null)
     try {
       const payload: CreateProjectRequest = {
-        slug: slug.trim(),
+        slug: effectiveSlug,
         title: title.trim(),
         genre: genre.trim() || null,
         target_platform: platform.trim() || null,
@@ -98,24 +118,37 @@ function ProjectForm({
       const project = await createProject(payload)
       onCreated?.(project)
       navigate(`/projects/${encodeURIComponent(project.id)}/studio`)
-    } catch {
-      setError('Project could not be created. Try again.')
+    } catch (cause) {
+      const status = cause && typeof cause === 'object' && 'status' in cause ? cause.status : undefined
+      setError(status === 409
+        ? 'Slug 已被使用。请在高级选项中修改后重试；如果刚才的响应丢失，请先关闭弹窗检查书架。'
+        : '创建失败，已保留填写内容。请检查网络后重试；如果响应丢失，请先关闭弹窗检查书架。')
     } finally {
+      submitting.current = false
       setPending(false)
     }
   }
 
   return (
     <div className="dashboard-dialog-backdrop" role="presentation" onMouseDown={(event) => {
-      if (event.target === event.currentTarget) onClose()
+      if (event.target === event.currentTarget && !submitting.current) onClose()
     }}>
-      <div className="dashboard-create-dialog novel-create-dialog" role="dialog" aria-modal="true" aria-labelledby="create-project-title">
-        <button className="dashboard-dialog-close" data-glow type="button" onClick={onClose} aria-label="Close create project dialog">×</button>
+      <dialog ref={dialogRef} className="dashboard-create-dialog novel-create-dialog" aria-labelledby="create-project-title" onCancel={(event) => {
+        event.preventDefault()
+        if (!submitting.current) onClose()
+      }} onKeyDown={(event) => {
+        if (event.key !== 'Tab') return
+        const controls = Array.from(event.currentTarget.querySelectorAll<HTMLElement>('button:not(:disabled), input:not(:disabled), select:not(:disabled), textarea:not(:disabled), summary, a[href], [tabindex="0"]'))
+          .filter(control => control.getClientRects().length > 0)
+        const target = event.shiftKey ? controls.at(-1) : controls[0]
+        const boundary = event.shiftKey ? controls[0] : controls.at(-1)
+        if (document.activeElement === boundary && target) { event.preventDefault(); target.focus() }
+      }}>
+        <button className="dashboard-dialog-close" data-glow type="button" onClick={onClose} disabled={pending} aria-label="Close create project dialog">×</button>
         <form className="workspace-form novel-create-form" onSubmit={submit} aria-label="Create project">
           <h2 id="create-project-title">Create project</h2>
           <div className="form-grid">
-            <label>Slug<input autoFocus value={slug} onChange={(event) => setSlug(event.target.value)} required /></label>
-            <label>Title<input value={title} onChange={(event) => setTitle(event.target.value)} required /></label>
+            <label className="form-field-full">Title<input ref={titleRef} value={title} onChange={(event) => setTitle(event.target.value)} required aria-describedby={error ? 'create-project-error' : undefined} /></label>
             <label>Genre (optional)<input value={genre} onChange={(event) => setGenre(event.target.value)} /></label>
             <label>Target platform (optional)<input value={platform} onChange={(event) => setPlatform(event.target.value)} /></label>
             <label className="form-field-full">
@@ -159,10 +192,15 @@ function ProjectForm({
               />
             </label>
           </div>
-          {error && <p className="notice" role="alert">{error}</p>}
+          <details className="novel-create-advanced">
+            <summary>高级选项：作品标识</summary>
+            <p id="slug-help">自动生成内部标识。需要固定链接时可自行填写。</p>
+            <label>Slug<input value={slug} onChange={(event) => setSlug(event.target.value)} aria-describedby="slug-help create-project-error" /></label>
+          </details>
+          {error && <p ref={errorRef} id="create-project-error" className="notice" role="alert" tabIndex={-1}>{error}</p>}
           <button data-glow type="submit" disabled={pending}>{pending ? 'Creating project…' : 'Create project'}</button>
         </form>
-      </div>
+      </dialog>
     </div>
   )
 }

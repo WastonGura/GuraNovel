@@ -7,7 +7,7 @@ from uuid import UUID
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.errors import AppError, ConflictError, NotFoundError
+from app.core.errors import AppError, ConflictError, NotFoundError, ForbiddenError
 from app.models import Project, SettingCollection
 from app.workspace import ProjectWorkspace
 
@@ -43,6 +43,7 @@ class ProjectService:
         target_platform: str | None = None,
         metadata: dict | None = None,
         setting_collection_id: UUID | None = None,
+        owner_id: UUID | None = None,
     ) -> Project:
         assert self.workspace is not None
         await self._lock_slug(slug)
@@ -54,6 +55,8 @@ class ProjectService:
             setting_collection = await self.session.get(SettingCollection, setting_collection_id)
             if setting_collection is None:
                 raise NotFoundError("Setting collection not found.")
+            if owner_id is not None and setting_collection.owner_id is not None and setting_collection.owner_id != owner_id:
+                raise ForbiddenError("You do not have permission to use this setting collection.")
         else:
             setting_collection = None
 
@@ -66,6 +69,7 @@ class ProjectService:
                     slug=f"{slug}-settings",
                     title=f"{title} 设定集",
                     workspace_root=str(workspace_root),
+                    owner_id=owner_id,
                 )
                 self.session.add(setting_collection)
                 await self.session.flush()
@@ -78,6 +82,7 @@ class ProjectService:
                 metadata_=metadata or {},
                 workspace_root=str(workspace_root),
                 setting_collection_id=setting_collection.id,
+                owner_id=owner_id,
             )
             self.session.add(project)
             await self.session.flush()

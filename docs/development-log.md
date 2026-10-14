@@ -15,6 +15,25 @@ Dates use Asia/Tokyo. Target: v0.12.0 desktop personal trial.
 - Removed the Qodana workflow at the maintainer's explicit request. GitHub Actions ci.yml remains the canonical quality gate; no token or license update is needed.
 - Validation: diff review and Actions run 38515444409 passed, with unrelated product jobs skipped by path filtering. This configuration change does not claim behavioral TDD evidence.
 
+## 2026-10-14 — #306 author creation form
+
+- Status: implemented and focused verification; PR/latest-head Actions/review pending. No version bump.
+- Red: the title did not receive focus, cancelling did not return focus, and Chromium Shift+Tab did not cycle inside the modal.
+- Green: a native modal makes the background inert; explicit Tab boundary handling cycles within visible controls, Escape restores trigger focus, and pending submissions keep the modal open. Chinese titles generate a stable Slug; manual overrides live under advanced options.
+- Thirteen Dashboard component tests pass, including retained inputs, conflict-message focus, double-submit suppression and stable retry Slug. One focused Chromium keyboard/small-desktop case passes at 1062×660. Intro height is bounded and the submit action stays reachable.
+- Creation uses the existing project endpoint and transaction; uncertain response copy directs authors to inspect the bookshelf before another create attempt. No new server idempotency guarantee is claimed.
+
+## 2026-10-14 — #299 three outline candidates and author editing
+
+- Status: implementation and focused verification; latest-head Actions/review/merge pending.
+- Red: generation API returned 404 and the formal generate button remained disabled. Empty-project-to-V2 acceptance additionally exposed missing project ownership required by the existing production pipeline.
+- Green: three distinct persisted candidates, batch/history/query identities, version-checked selection, scoped author editing, approval and post-draft locking pass PostgreSQL cases. The UI test explicitly compares alternatives and selects without approving; 32 affected navigation tests pass, including confirmation of the just-flushed outline version.
+- Batches snapshot current setting versions, chapter ideas and preceding prose before a transaction-free model call. Requests are durable and replayed by ID; uncertain results block new calls until explicit author abandonment. Batch and selected-outline evidence cannot be rewritten through generic document operations.
+- Uses the existing structured-output gateway and OpenAI-compatible server configuration, plus an explicitly labeled deterministic Provider. No real-model quality claim until separate sampling.
+- Real-adapter validation found missing strict output-model configuration before any model request. Red: an actual gateway plus transport-fixture case raised the same policy rejection; Green: strict root/nested models pass, preserve three options and record token usage. Transport allocation now follows successful profile validation. Live quality sampling remains separate.
+- Follow-up acceptance: strict candidate UUIDs must be reconstructed at the HTTP response boundary; persisted model output survived a response-validation failure and can be queried after this fix. All four outline PostgreSQL cases pass. A browser-created `stage=Outline` URL also needed to advance to `stage=Draft` after approval; its failing navigation assertion now passes with all 33 affected navigation cases.
+- Fixed Actions diagnostics in dependency branches: narrowed recovered text/version types, corrected test role options and fixture imports. These CI fixes are included here too. Version remains 0.11.0 pending the release preparation PR.
+
 ## 2026-10-14 — #303 persisted chapter ideas
 
 - Status: local implementation; PR/Actions pending. Ideas are stored per authoritative project/chapter with expected revisions and request identities; drafted/final chapters are read-only.

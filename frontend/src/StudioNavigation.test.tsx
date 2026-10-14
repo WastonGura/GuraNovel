@@ -3,11 +3,11 @@ import { Link, MemoryRouter, Route, Routes, useLocation, useNavigate } from 'rea
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import Studio from './Studio'
 import { draftRecoveryCopies } from './useDraftAutosave'
-import { writeStudioDraft, readChapterIdea, writeChapterIdea } from './api/client'
+import { writeStudioDraft, readChapterIdea, writeChapterIdea, listOutlineGenerations, createOutlineGeneration, selectOutlineCandidate, writeStudioOutline, type OutlineGeneration } from './api/client'
 import { ApiError, approveStudioOutline, createChapter, getProject, listChapters, readDocumentContent, readStudioFeedback, submitStudioFeedback, writeDocument, writeStudioFeedback, type Chapter, type Project, type StudioFeedback } from './api/client'
 import { getChapterProductionRun, getChapterProductionReviewReport, listChapterProductionRuns, resolveChapterProductionAction, triggerChapterReview, resumeChapterProduction, startChapterProductionV2, requestStudioFeedbackRevision, type ChapterProductionState, type ChapterProductionReviewReport } from './api/chapterProductionV2Client'
 
-vi.mock('./api/client', async original => ({ ...await original<typeof import('./api/client')>(), readChapterIdea: vi.fn(), writeChapterIdea: vi.fn(), writeStudioDraft: vi.fn(), approveStudioOutline: vi.fn(), createChapter: vi.fn(), getProject: vi.fn(), listChapters: vi.fn(), readDocumentContent: vi.fn(), readStudioFeedback: vi.fn(), submitStudioFeedback: vi.fn(), writeDocument: vi.fn(), writeStudioFeedback: vi.fn() }))
+vi.mock('./api/client', async original => ({ ...await original<typeof import('./api/client')>(), listOutlineGenerations: vi.fn(), createOutlineGeneration: vi.fn(), selectOutlineCandidate: vi.fn(), writeStudioOutline: vi.fn(), readChapterIdea: vi.fn(), writeChapterIdea: vi.fn(), writeStudioDraft: vi.fn(), approveStudioOutline: vi.fn(), createChapter: vi.fn(), getProject: vi.fn(), listChapters: vi.fn(), readDocumentContent: vi.fn(), readStudioFeedback: vi.fn(), submitStudioFeedback: vi.fn(), writeDocument: vi.fn(), writeStudioFeedback: vi.fn() }))
 vi.mock('./api/chapterProductionV2Client', async original => ({ ...await original<typeof import('./api/chapterProductionV2Client')>(), getChapterProductionRun: vi.fn(), getChapterProductionReviewReport: vi.fn(), listChapterProductionRuns: vi.fn(), resolveChapterProductionAction: vi.fn(), triggerChapterReview: vi.fn(), resumeChapterProduction: vi.fn(), startChapterProductionV2: vi.fn(), requestStudioFeedbackRevision: vi.fn() }))
 const project = (id: string) => ({ id, title: `Novel ${id}`, setting_collection_id: `sc-${id}`, metadata: {} }) as Project
 const chapter = (id: string, number = 1) => ({ id, title: `Chapter ${id}`, chapter_number: number, metadata: {}, current_draft_document_id: `doc-${id}` }) as Chapter
@@ -18,6 +18,7 @@ function Navigation() {
 function open(path: string) { return render(<MemoryRouter initialEntries={[path]}><Navigation /><Routes><Route path="/projects/:projectId/studio" element={<Studio />} /><Route path="/projects/:projectId/studio/:chapterId" element={<Studio />} /><Route path="/setting-collections/:settingCollectionId" element={<div>Setting Collection</div>} /><Route path="/" element={<div>Dashboard</div>} /></Routes></MemoryRouter>) }
 beforeEach(() => {
   vi.resetAllMocks(); localStorage.clear(); sessionStorage.clear(); draftRecoveryCopies.clear()
+  vi.mocked(listOutlineGenerations).mockResolvedValue([])
   vi.mocked(readChapterIdea).mockImplementation(async (project_id, chapter_id) => ({ project_id, chapter_id, text: '', revision: 0, read_only: false }))
   vi.mocked(listChapterProductionRuns).mockResolvedValue([])
   vi.mocked(writeStudioDraft).mockImplementation((_project, chapterId, payload) => writeDocument(`doc-${chapterId}`, payload))
@@ -50,6 +51,29 @@ beforeEach(() => {
   })
 })
 afterEach(() => { cleanup(); vi.restoreAllMocks() })
+
+it('generates three comparable alternatives and persists an explicit author selection', async () => {
+  vi.mocked(listChapters).mockResolvedValue([{ ...chapter('a'), current_draft_document_id: null }])
+  vi.mocked(readChapterIdea).mockResolvedValue({ project_id: 'p', chapter_id: 'a', text: '调查档案', revision: 1, read_only: false })
+  const batch = { id: 'batch-1', project_id: 'p', chapter_id: 'a', status: 'completed', idea_revision: 1, idea_text: '调查档案', context_hash: 'hash',
+    started_at: '2026-10-14T00:00:00Z', failure_code: null, provenance: { provider_kind: 'fake' },
+    candidates: ['线索追踪', '人物抉择', '反转验证'].map((title, index) => ({ id: `option-${index}`, title, summary: `${title}的摘要`, content: `${title}的完整大纲` })) } as OutlineGeneration
+  vi.mocked(createOutlineGeneration).mockResolvedValue(batch)
+  vi.mocked(selectOutlineCandidate).mockResolvedValue({ chapter_id: 'a', document_id: 'outline-a', version_id: 'outline-a-v1' })
+  vi.mocked(readStudioFeedback).mockResolvedValue({ chapter_id: 'a', region: 'outline', document_id: 'outline-a', source_version_id: 'outline-a-v1', revision: 0, comments: [], requirements: '', read_only: false })
+  open('/projects/p/studio/a')
+  const generate = await screen.findByRole('button', { name: '生成大纲方案' })
+  await waitFor(() => expect(generate).toBeEnabled())
+  fireEvent.click(generate)
+  for (const title of ['线索追踪', '人物抉择', '反转验证']) await screen.findByRole('button', { name: `采用此方案：${title}` })
+  expect(selectOutlineCandidate).not.toHaveBeenCalled()
+  fireEvent.click(screen.getByRole('button', { name: '采用此方案：人物抉择' }))
+  const outline = await screen.findByRole('textbox', { name: '编辑大纲' })
+  await waitFor(() => expect(outline).not.toHaveAttribute('readonly'))
+  expect(selectOutlineCandidate).toHaveBeenCalledWith('p', 'a', 'batch-1', expect.objectContaining({ candidate_id: 'option-1', expected_current_version_id: null }))
+  expect(approveStudioOutline).not.toHaveBeenCalled()
+  expect(startChapterProductionV2).not.toHaveBeenCalled()
+})
 
 it('loads saved chapter ideas and flushes edits before navigating to settings', async () => {
   vi.mocked(listChapters).mockResolvedValue([{ ...chapter('a'), current_draft_document_id: null }])
@@ -217,14 +241,33 @@ it('does not accept a draft when the save queue fails', async () => {
   expect(prose).not.toHaveAttribute('readonly')
 })
 
-async function openOutline() {
+async function openOutline(path = '/projects/p/studio/a') {
   vi.mocked(listChapters).mockResolvedValue([{ ...chapter('a'), current_draft_document_id: null, current_outline_document_id: 'outline-a' }])
   vi.mocked(readStudioFeedback).mockImplementation(async (_project, chapter_id, region) => ({ chapter_id, region, document_id: region === 'outline' ? 'outline-a' : 'doc-a', source_version_id: region === 'outline' ? 'outline-a-v1' : 'doc-a-v1', revision: 0, comments: [], requirements: '', read_only: false }))
-  open('/projects/p/studio/a')
+  open(path)
   const confirm = await screen.findByRole('button', { name: '确认大纲并生成正文' })
   await waitFor(() => expect(confirm).toBeEnabled())
   return confirm
 }
+
+it('moves the explicit outline route to Draft after the approved generation completes', async () => {
+  vi.mocked(startChapterProductionV2).mockResolvedValue({ workflow_run_id: 'run-a' } as Awaited<ReturnType<typeof startChapterProductionV2>>)
+  vi.mocked(getChapterProductionRun).mockResolvedValue({ chapter_id: 'a', status: 'AUTHOR_REVISION', awaiting_user: true, document_id: 'doc-a', document_version_id: 'doc-a-v1' } as ChapterProductionState)
+  const confirm = await openOutline('/projects/p/studio/a?stage=Outline')
+  fireEvent.click(confirm)
+  await waitFor(() => expect(screen.getByTestId('url')).toHaveTextContent('stage=Draft'))
+  expect(await screen.findByRole('textbox', { name: '章节正文' })).toHaveValue('Text doc-a')
+})
+
+it('confirms the version produced by flushing the latest author outline edit', async () => {
+  vi.mocked(writeStudioOutline).mockResolvedValue({ id: 'outline-edited-v2' } as Awaited<ReturnType<typeof writeStudioOutline>>)
+  const confirm = await openOutline()
+  fireEvent.change(screen.getByRole('textbox', { name: '编辑大纲' }), { target: { value: '作者在确认前刚修改的大纲' } })
+  fireEvent.click(confirm)
+  await waitFor(() => expect(approveStudioOutline).toHaveBeenCalledWith('p', 'a', 'outline-a', 'outline-edited-v2'))
+  expect(writeStudioOutline).toHaveBeenCalledWith('p', 'a', { content: '作者在确认前刚修改的大纲', expected_current_version_id: 'outline-a-v1' })
+  expect(writeDocument).not.toHaveBeenCalled()
+})
 
 it('requires explicit warning consent again for each reviewer and preserves it across response-loss retry', async () => {
   vi.mocked(listChapters).mockResolvedValue([chapter('a')])
