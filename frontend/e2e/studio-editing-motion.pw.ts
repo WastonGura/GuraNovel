@@ -29,7 +29,7 @@ test.describe('Studio Editing Comments and Continuous Motion E2E', () => {
       await checkZeroScroll()
 
       // 2. Navigate to Draft stage
-      const draftTab = page.getByRole('button', { name: 'Draft', exact: true })
+      const draftTab = page.getByRole('button', { name: '正文', exact: true })
       await expect(draftTab).toBeVisible()
       await draftTab.click()
 
@@ -72,7 +72,7 @@ test.describe('Studio Editing Comments and Continuous Motion E2E', () => {
       await checkZeroScroll()
 
       // 7. Check Review stage comment isolation
-      const reviewTab = page.getByRole('button', { name: 'Review', exact: true })
+      const reviewTab = page.getByRole('button', { name: '审阅', exact: true })
       if (await reviewTab.isVisible()) {
         await reviewTab.click()
         await checkZeroScroll()
@@ -88,7 +88,7 @@ test.describe('Studio Editing Comments and Continuous Motion E2E', () => {
     await page.goto('/preview/studio')
 
     // Go to Draft
-    const draftTab = page.getByRole('button', { name: 'Draft', exact: true })
+    const draftTab = page.getByRole('button', { name: '正文', exact: true })
     await draftTab.click()
 
     const proseTextarea = page.getByRole('textbox', { name: '章节正文' })

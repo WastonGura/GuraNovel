@@ -20,6 +20,9 @@ import GlobalAssistant from './GlobalAssistant'
 
 const asset = (name: string) => name === 'setting' ? '/ui/icons/setting.svg' : `/ui/studio/${name}.svg${name === 'notification' ? '?solid=1' : ''}`
 const storageKey = 'guranovel:studio-preview:v1'
+const stageNames: Record<Stage, string> = { Outline: '大纲', Draft: '正文', Review: '审阅', Reader: '读者评审', Final: '定稿' }
+const reviewerNames: Record<string, string> = { 'Editor Reviewer': '编辑审阅', 'Chief Reviewer': '主编审阅', 'Lore Reviewer': '设定一致性审阅' }
+const severityNames: Record<string, string> = { PASS: '通过', WARN: '需确认', BLOCK: '需修改', Suggestion: '建议', Warning: '需确认', Block: '需修改' }
 type Focus = 'off' | 'auto' | 'manual'
 type Notice = { id: string; chapterId: string; message: string; read: boolean }
 
@@ -828,7 +831,7 @@ function StudioWorkspace({ title, initial, initialId, project, preview }: {
       </div>
       <nav ref={workflow} className={`studio-workflow studio-chrome${hidden ? ' is-hidden' : ''}`} style={{ '--workflow-progress': selected ? stages.indexOf(selected.stage) / (stages.length - 1) : 0 } as CSSProperties} aria-label="创作阶段">
         <span className="studio-workflow-progress" aria-hidden="true" />
-        {stages.map(stage => <button key={stage} aria-current={selected?.stage === stage ? 'step' : undefined} onClick={() => changeStage(stage)} disabled={!selected || selected.published} title={selected?.published ? preview ? '已发布章节不可修改' : '已定稿章节不可修改' : stage}>{stage}<i /></button>)}
+        {stages.map(stage => <button key={stage} aria-current={selected?.stage === stage ? 'step' : undefined} onClick={() => changeStage(stage)} disabled={!selected || selected.published} title={selected?.published ? '已定稿章节不可修改' : stageNames[stage]}>{stageNames[stage]}<i /></button>)}
       </nav>
     </header>
     {noticesOpen && <section className="studio-notifications" aria-label="通知列表"><h2>通知</h2>{!notifications.length && <p className="studio-muted">暂无通知</p>}{notifications.slice().reverse().map(notice => <button key={notice.id} onClick={() => { selectChapter(notice.chapterId); setNoticesOpen(false) }}>{notice.message}<small>查看本章报告</small></button>)}</section>}
@@ -884,7 +887,7 @@ function StudioWorkspace({ title, initial, initialId, project, preview }: {
                 {selected.review === 'idle' && <button disabled={!preview} onClick={() => startReview(selected.id)}>开始审阅</button>}
                 {selected.review === 'done' && <div className="studio-report" aria-label="审阅报告">
                   <h3 data-sweep-text>审阅报告 <small>{selected.issues.length} 个问题{preview ? ' · 示例报告' : ''}</small></h3>
-                  <p data-sweep-text className="studio-muted">勾选的问题将交给 Agent 修改，Block 为必选项。</p>
+                  <p data-sweep-text className="studio-muted">勾选的问题将交给 Agent 修改，需修改的问题必须处理。</p>
                   {reviewers.map(reviewer => {
                     const issues = selected.issues.filter(issue => issue.reviewer === reviewer)
                     const role = ({ 'Editor Reviewer': 'editor_agent', 'Chief Reviewer': 'chief_editor_agent', 'Lore Reviewer': 'lore_agent' } as const)[reviewer]
@@ -893,7 +896,7 @@ function StudioWorkspace({ title, initial, initialId, project, preview }: {
                       : reviewer === currentReviewer ? productionBusyId === selected.id ? '审阅中' : '待审阅' : '未审阅'
                       : ['Block', 'Warning', 'Suggestion'].find(level => issues.some(issue => issue.level === level)) || 'PASS'
                     return <details className="studio-review-group" key={`${selected.id}-${reviewer}`} open>
-                      <summary><img src="/ui/studio/ooui-collapse.svg" alt="" /><span data-sweep-text>{reviewer}</span><span data-sweep-text className={`studio-severity is-${highest.toLowerCase()}`}>{highest}</span></summary>
+                      <summary><img src="/ui/studio/ooui-collapse.svg" alt="" /><span data-sweep-text>{reviewerNames[reviewer] || reviewer}</span><span data-sweep-text className={`studio-severity is-${highest.toLowerCase()}`}>{severityNames[highest] || highest}</span></summary>
                       {report && <p data-sweep-text className="studio-muted">{report.summary}</p>}
                       {issues.map(issue => <div className="studio-issue" key={issue.id}>
                         <input type="checkbox" aria-label={`交给 Agent 修改：${issue.title}`} checked={selected.selected.includes(issue.id)} disabled={issue.level === 'Block' || productionBusyId === selected.id || Boolean(selected.productionError) || Boolean(selected.revisionRequest)} onChange={event => {

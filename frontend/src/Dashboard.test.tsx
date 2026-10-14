@@ -93,18 +93,24 @@ function sampleChapter(overrides: Partial<Chapter> = {}): Chapter {
 }
 
 describe('Dashboard Setting Collections and Novel Integration', () => {
+  it('clearly marks global preferences as unavailable', async () => {
+    mockedApi.listProjects.mockResolvedValue([])
+    mockedApi.listSettingCollections.mockResolvedValue([])
+    renderDashboard()
+    expect(await screen.findByRole('button', { name: '全局设置（暂未提供）' })).toBeDisabled()
+  })
   it('focuses the title and creates a Chinese-titled novel without a manual slug', async () => {
     mockedApi.listProjects.mockResolvedValue([])
     mockedApi.listSettingCollections.mockResolvedValue([])
     mockedApi.createProject.mockResolvedValue(sampleProject({ id: 'auto-novel' }))
     renderDashboard()
-    await screen.findByText('No projects yet. Create one to begin.')
-    fireEvent.click(screen.getByRole('button', { name: 'Create novel' }))
-    const dialog = screen.getByRole('dialog', { name: 'Create project' })
-    const title = within(dialog).getByLabelText('Title')
+    await screen.findByText('还没有作品，新建一部开始创作。')
+    fireEvent.click(screen.getByRole('button', { name: '新建作品' }))
+    const dialog = screen.getByRole('dialog', { name: '创建作品' })
+    const title = within(dialog).getByLabelText('标题')
     expect(title).toHaveFocus()
     fireEvent.change(title, { target: { value: '雨停之前' } })
-    fireEvent.click(within(dialog).getByRole('button', { name: 'Create project' }))
+    fireEvent.click(within(dialog).getByRole('button', { name: '创建作品' }))
     await waitFor(() => expect(mockedApi.createProject).toHaveBeenCalledWith(expect.objectContaining({
       title: '雨停之前', slug: expect.stringMatching(/^novel-[a-z0-9]+$/),
     })))
@@ -114,12 +120,12 @@ describe('Dashboard Setting Collections and Novel Integration', () => {
     mockedApi.listProjects.mockResolvedValue([])
     mockedApi.listSettingCollections.mockResolvedValue([])
     renderDashboard()
-    await screen.findByText('No projects yet. Create one to begin.')
-    const trigger = screen.getByRole('button', { name: 'Create novel' })
+    await screen.findByText('还没有作品，新建一部开始创作。')
+    const trigger = screen.getByRole('button', { name: '新建作品' })
     trigger.focus(); fireEvent.click(trigger)
-    const dialog = screen.getByRole('dialog', { name: 'Create project' })
+    const dialog = screen.getByRole('dialog', { name: '创建作品' })
     fireEvent(dialog, new Event('cancel', { cancelable: true }))
-    await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Create project' })).not.toBeInTheDocument())
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: '创建作品' })).not.toBeInTheDocument())
     expect(trigger).toHaveFocus()
   })
 
@@ -128,15 +134,15 @@ describe('Dashboard Setting Collections and Novel Integration', () => {
     mockedApi.listSettingCollections.mockResolvedValue([])
     mockedApi.createProject.mockRejectedValueOnce({ status: 409 })
     renderDashboard()
-    await screen.findByText('No projects yet. Create one to begin.')
-    fireEvent.click(screen.getByRole('button', { name: 'Create novel' }))
-    const dialog = screen.getByRole('dialog', { name: 'Create project' })
-    fireEvent.change(within(dialog).getByLabelText('Title'), { target: { value: '雨停之前' } })
-    fireEvent.click(within(dialog).getByRole('button', { name: 'Create project' }))
+    await screen.findByText('还没有作品，新建一部开始创作。')
+    fireEvent.click(screen.getByRole('button', { name: '新建作品' }))
+    const dialog = screen.getByRole('dialog', { name: '创建作品' })
+    fireEvent.change(within(dialog).getByLabelText('标题'), { target: { value: '雨停之前' } })
+    fireEvent.click(within(dialog).getByRole('button', { name: '创建作品' }))
     const error = await screen.findByRole('alert')
     expect(error).toHaveTextContent('Slug 已被使用')
     expect(error).toHaveFocus()
-    expect(within(dialog).getByLabelText('Title')).toHaveValue('雨停之前')
+    expect(within(dialog).getByLabelText('标题')).toHaveValue('雨停之前')
   })
 
   it('submits only once and keeps the pending modal open', async () => {
@@ -145,10 +151,10 @@ describe('Dashboard Setting Collections and Novel Integration', () => {
     let reject!: (cause: Error) => void
     mockedApi.createProject.mockImplementationOnce(() => new Promise((_resolve, fail) => { reject = fail }))
     renderDashboard()
-    await screen.findByText('No projects yet. Create one to begin.')
-    fireEvent.click(screen.getByRole('button', { name: 'Create novel' }))
-    const dialog = screen.getByRole('dialog', { name: 'Create project' })
-    fireEvent.change(within(dialog).getByLabelText('Title'), { target: { value: '雨停之前' } })
+    await screen.findByText('还没有作品，新建一部开始创作。')
+    fireEvent.click(screen.getByRole('button', { name: '新建作品' }))
+    const dialog = screen.getByRole('dialog', { name: '创建作品' })
+    fireEvent.change(within(dialog).getByLabelText('标题'), { target: { value: '雨停之前' } })
     const form = within(dialog).getByRole('form')
     fireEvent.submit(form); fireEvent.submit(form)
     fireEvent(dialog, new Event('cancel', { cancelable: true }))
@@ -175,7 +181,7 @@ describe('Dashboard Setting Collections and Novel Integration', () => {
 
     renderDashboard()
 
-    expect(await screen.findByRole('heading', { name: /setting collections/i })).toBeInTheDocument()
+    expect(await screen.findByRole('heading', { name: '设定集' })).toBeInTheDocument()
     const card = await screen.findByRole('button', { name: 'Open Great Lore setting collection' })
     expect(card).toBeInTheDocument()
     expect(within(card).getByText('r2')).toBeInTheDocument()
@@ -194,7 +200,7 @@ describe('Dashboard Setting Collections and Novel Integration', () => {
 
     renderDashboard()
 
-    expect(await screen.findByText('No setting collections yet. Create one to begin.')).toBeInTheDocument()
+    expect(await screen.findByText('还没有设定集，可以新建或随作品自动创建。')).toBeInTheDocument()
   })
 
   it('creates a new setting collection from the dashboard and navigates to it', async () => {
@@ -203,17 +209,17 @@ describe('Dashboard Setting Collections and Novel Integration', () => {
     mockedApi.createSettingCollection.mockResolvedValue(sampleCollection({ id: 'col-new', title: 'New Realm' }))
 
     renderDashboard()
-    await screen.findByText('No setting collections yet. Create one to begin.')
+    await screen.findByText('还没有设定集，可以新建或随作品自动创建。')
 
-    fireEvent.click(screen.getByRole('button', { name: 'Create setting collection' }))
-    const dialog = screen.getByRole('dialog', { name: 'Create setting collection' })
+    fireEvent.click(screen.getByRole('button', { name: '新建设定集' }))
+    const dialog = screen.getByRole('dialog', { name: '新建设定集' })
     expect(dialog).toBeInTheDocument()
 
-    fireEvent.change(within(dialog).getByLabelText('Title'), { target: { value: 'New Realm' } })
+    fireEvent.change(within(dialog).getByLabelText('标题'), { target: { value: 'New Realm' } })
     fireEvent.change(within(dialog).getByLabelText('Slug (optional)'), { target: { value: 'new-realm' } })
-    fireEvent.change(within(dialog).getByLabelText('Description (optional)'), { target: { value: 'Realm overview' } })
+    fireEvent.change(within(dialog).getByLabelText('说明（可选）'), { target: { value: 'Realm overview' } })
 
-    const submitBtn = within(dialog).getByRole('button', { name: 'Create setting collection' })
+    const submitBtn = within(dialog).getByRole('button', { name: '新建设定集' })
     fireEvent.click(submitBtn)
 
     await waitFor(() => {
@@ -234,13 +240,13 @@ describe('Dashboard Setting Collections and Novel Integration', () => {
     mockedApi.createSettingCollection.mockReturnValue(new Promise(() => undefined))
 
     renderDashboard()
-    await screen.findByText('No setting collections yet. Create one to begin.')
+    await screen.findByText('还没有设定集，可以新建或随作品自动创建。')
 
-    fireEvent.click(screen.getByRole('button', { name: 'Create setting collection' }))
-    const dialog = screen.getByRole('dialog', { name: 'Create setting collection' })
-    fireEvent.change(within(dialog).getByLabelText('Title'), { target: { value: 'Pending Realm' } })
+    fireEvent.click(screen.getByRole('button', { name: '新建设定集' }))
+    const dialog = screen.getByRole('dialog', { name: '新建设定集' })
+    fireEvent.change(within(dialog).getByLabelText('标题'), { target: { value: 'Pending Realm' } })
 
-    const submitBtn = within(dialog).getByRole('button', { name: 'Create setting collection' })
+    const submitBtn = within(dialog).getByRole('button', { name: '新建设定集' })
     fireEvent.click(submitBtn)
     fireEvent.click(submitBtn)
 
@@ -254,19 +260,19 @@ describe('Dashboard Setting Collections and Novel Integration', () => {
     mockedApi.createProject.mockResolvedValue(sampleProject({ id: 'proj-new' }))
 
     renderDashboard()
-    await screen.findByText('No projects yet. Create one to begin.')
+    await screen.findByText('还没有作品，新建一部开始创作。')
 
-    fireEvent.click(screen.getByRole('button', { name: 'Create novel' }))
-    const dialog = screen.getByRole('dialog', { name: 'Create project' })
+    fireEvent.click(screen.getByRole('button', { name: '新建作品' }))
+    const dialog = screen.getByRole('dialog', { name: '创建作品' })
 
     fireEvent.change(within(dialog).getByLabelText('Slug'), { target: { value: 'new-novel' } })
-    fireEvent.change(within(dialog).getByLabelText('Title'), { target: { value: 'New Novel' } })
+    fireEvent.change(within(dialog).getByLabelText('标题'), { target: { value: 'New Novel' } })
 
     // Verify setting collection selector default is 'new' (blank collection)
-    const select = within(dialog).getByLabelText('Setting collection') as HTMLSelectElement
+    const select = within(dialog).getByLabelText('设定集') as HTMLSelectElement
     expect(select.value).toBe('new')
 
-    fireEvent.click(within(dialog).getByRole('button', { name: 'Create project' }))
+    fireEvent.click(within(dialog).getByRole('button', { name: '创建作品' }))
 
     await waitFor(() => {
       expect(mockedApi.createProject).toHaveBeenCalledWith({
@@ -288,21 +294,21 @@ describe('Dashboard Setting Collections and Novel Integration', () => {
     mockedApi.createProject.mockResolvedValue(sampleProject({ id: 'proj-bound' }))
 
     renderDashboard()
-    await screen.findByText('No projects yet. Create one to begin.')
+    await screen.findByText('还没有作品，新建一部开始创作。')
 
-    fireEvent.click(screen.getByRole('button', { name: 'Create novel' }))
-    const dialog = screen.getByRole('dialog', { name: 'Create project' })
+    fireEvent.click(screen.getByRole('button', { name: '新建作品' }))
+    const dialog = screen.getByRole('dialog', { name: '创建作品' })
 
     fireEvent.change(within(dialog).getByLabelText('Slug'), { target: { value: 'cyber-chronicles' } })
-    fireEvent.change(within(dialog).getByLabelText('Title'), { target: { value: 'Cyber Chronicles' } })
-    fireEvent.change(within(dialog).getByLabelText('Genre (optional)'), { target: { value: 'Sci-Fi' } })
-    fireEvent.change(within(dialog).getByLabelText('Target platform (optional)'), { target: { value: 'Qidian' } })
-    fireEvent.change(within(dialog).getByLabelText('Setting collection'), { target: { value: 'col-42' } })
-    fireEvent.change(within(dialog).getByLabelText('Introduction (optional)'), { target: { value: 'Neon lights and shadows.' } })
-    fireEvent.change(within(dialog).getByLabelText('Labels (optional)'), { target: { value: 'Cyberpunk, Action' } })
-    fireEvent.change(within(dialog).getByLabelText('Cover URL or preset (optional)'), { target: { value: 'cover-2.jpg' } })
+    fireEvent.change(within(dialog).getByLabelText('标题'), { target: { value: 'Cyber Chronicles' } })
+    fireEvent.change(within(dialog).getByLabelText('题材（可选）'), { target: { value: 'Sci-Fi' } })
+    fireEvent.change(within(dialog).getByLabelText('目标平台（可选）'), { target: { value: 'Qidian' } })
+    fireEvent.change(within(dialog).getByLabelText('设定集'), { target: { value: 'col-42' } })
+    fireEvent.change(within(dialog).getByLabelText('简介（可选）'), { target: { value: 'Neon lights and shadows.' } })
+    fireEvent.change(within(dialog).getByLabelText('标签（可选）'), { target: { value: 'Cyberpunk, Action' } })
+    fireEvent.change(within(dialog).getByLabelText('封面地址或预设（可选）'), { target: { value: 'cover-2.jpg' } })
 
-    fireEvent.click(within(dialog).getByRole('button', { name: 'Create project' }))
+    fireEvent.click(within(dialog).getByRole('button', { name: '创建作品' }))
 
     await waitFor(() => {
       expect(mockedApi.createProject).toHaveBeenCalledWith({
@@ -401,27 +407,27 @@ describe('Dashboard Setting Collections and Novel Integration', () => {
     fireEvent.click(within(dialog).getByRole('button', { name: '编辑资料' }))
 
     // Edit inputs are displayed
-    const titleInput = within(dialog).getByLabelText('Edit title')
+    const titleInput = within(dialog).getByLabelText('编辑标题')
     expect(titleInput).toHaveValue('Archive of Ash')
     fireEvent.change(titleInput, { target: { value: 'Archive of Ash: Reborn' } })
 
-    const genreInput = within(dialog).getByLabelText('Edit genre')
+    const genreInput = within(dialog).getByLabelText('编辑题材')
     fireEvent.change(genreInput, { target: { value: 'Dark Fantasy' } })
 
-    const platformInput = within(dialog).getByLabelText('Edit target platform')
+    const platformInput = within(dialog).getByLabelText('编辑目标平台')
     fireEvent.change(platformInput, { target: { value: 'Kindle' } })
 
-    const colSelect = within(dialog).getByLabelText('Edit setting collection')
+    const colSelect = within(dialog).getByLabelText('编辑关联设定集')
     fireEvent.change(colSelect, { target: { value: 'col-2' } })
 
-    const introInput = within(dialog).getByLabelText('Edit introduction')
+    const introInput = within(dialog).getByLabelText('编辑简介')
     fireEvent.change(introInput, { target: { value: 'New expanded introduction.' } })
 
-    const labelsInput = within(dialog).getByLabelText('Edit labels')
+    const labelsInput = within(dialog).getByLabelText('编辑标签')
     fireEvent.change(labelsInput, { target: { value: 'Dark Fantasy, Epic' } })
 
     // Save changes
-    fireEvent.click(within(dialog).getByRole('button', { name: 'Save changes' }))
+    fireEvent.click(within(dialog).getByRole('button', { name: '保存修改' }))
 
     await waitFor(() => {
       expect(mockedApi.updateProject).toHaveBeenCalledWith('project-1', {
@@ -455,11 +461,11 @@ describe('Dashboard Setting Collections and Novel Integration', () => {
     renderDashboard()
     await screen.findAllByRole('button', { name: 'Open Solar Empire' })
 
-    const search = await screen.findByRole('searchbox', { name: 'Search novels' })
+    const search = await screen.findByRole('searchbox', { name: '搜索作品' })
     fireEvent.focus(search)
     fireEvent.change(search, { target: { value: 'Solar' } })
 
-    const results = screen.getByLabelText('Search results')
+    const results = screen.getByLabelText('搜索结果')
     expect(within(results).getByRole('button', { name: 'Solar Empire' })).toBeInTheDocument()
     const colResult = within(results).getByRole('button', { name: /Solar Tech Bible/ })
     expect(colResult).toBeInTheDocument()

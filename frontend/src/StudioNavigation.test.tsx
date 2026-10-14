@@ -52,6 +52,12 @@ beforeEach(() => {
 })
 afterEach(() => { cleanup(); vi.restoreAllMocks() })
 
+it('uses author-facing Chinese stage names', async () => {
+  open('/projects/p/studio/a')
+  const workflow = await screen.findByRole('navigation', { name: '创作阶段' })
+  for (const name of ['大纲', '正文', '审阅', '读者评审', '定稿']) expect(within(workflow).getByRole('button', { name })).toBeInTheDocument()
+})
+
 it('generates three comparable alternatives and persists an explicit author selection', async () => {
   vi.mocked(listChapters).mockResolvedValue([{ ...chapter('a'), current_draft_document_id: null }])
   vi.mocked(readChapterIdea).mockResolvedValue({ project_id: 'p', chapter_id: 'a', text: '调查档案', revision: 1, read_only: false })
@@ -157,12 +163,12 @@ it('restores actual review reports without treating missing reviewers as PASS', 
   expect(screen.getByRole('checkbox', { name: '交给 Agent 修改：先离开再抵达。' })).toBeDisabled()
   expect(screen.getByRole('textbox', { name: '章节正文' })).toHaveAttribute('readonly')
   expect(getChapterProductionReviewReport).toHaveBeenCalledWith('p', 'a', 'run-a', 'report-a', { documentId: 'doc-a', versionId: 'doc-a-v1' }, undefined)
-  fireEvent.click(screen.getByRole('button', { name: 'Draft' }))
+  fireEvent.click(screen.getByRole('button', { name: '正文' }))
   expect(screen.getByRole('textbox', { name: '章节正文' })).toHaveAttribute('readonly')
   expect(screen.getByText('正文已进入审阅，请通过修改流程继续写作。')).toBeInTheDocument()
-  fireEvent.click(screen.getByRole('button', { name: 'Outline' }))
+  fireEvent.click(screen.getByRole('button', { name: '大纲' }))
   await screen.findByRole('region', { name: '本章大纲' })
-  fireEvent.click(screen.getByRole('button', { name: 'Review' }))
+  fireEvent.click(screen.getByRole('button', { name: '审阅' }))
   await screen.findByText('时间线存在矛盾。')
 })
 
@@ -290,7 +296,7 @@ it('confirms the exact outline version and opens only the server author-gate dra
   vi.mocked(startChapterProductionV2).mockResolvedValue({ workflow_run_id: 'run-a' } as Awaited<ReturnType<typeof startChapterProductionV2>>)
   vi.mocked(getChapterProductionRun).mockResolvedValue({ chapter_id: 'a', status: 'AUTHOR_REVISION', awaiting_user: true, document_id: 'doc-a', document_version_id: 'doc-a-v1' } as ChapterProductionState)
   const confirm = await openOutline()
-  fireEvent.click(screen.getByRole('button', { name: 'Draft' }))
+  fireEvent.click(screen.getByRole('button', { name: '正文' }))
   expect(startChapterProductionV2).not.toHaveBeenCalled()
   expect(screen.queryByRole('textbox', { name: '章节正文' })).not.toBeInTheDocument()
   fireEvent.click(confirm); fireEvent.click(confirm)
