@@ -17,7 +17,9 @@
 
 ## 尚待接入的能力
 
-初始大纲生成和作者编辑由 [#299](https://github.com/WastonGura/GuraNovel/issues/299) 跟进。构思与项目维护的新版操作入口尚未提供；已有任务和历史数据仍可通过后端 API 读取。文档版本恢复仍使用现有服务，设定历史入口由 [#311](https://github.com/WastonGura/GuraNovel/issues/311) 跟进。
+本地 v0.12 开发分支已接入持久化思路、每批三个大纲方案、历史比较、作者选择和版本化编辑；确认后使用已有 V2 正文流程。生成请求先持久化再调用 Provider，超时后核对原请求；放弃未确定任务须作者明确确认，可能存在已发生的模型调用。相关实现由 [#299](https://github.com/WastonGura/GuraNovel/issues/299) 跟进，以 PR 验证及合并状态为准。
+
+构思与项目维护的新版操作入口尚未提供；已有任务和历史数据仍可通过后端 API 读取。大纲 Agent 反馈修订尚未接入。设定历史入口由 [#311](https://github.com/WastonGura/GuraNovel/issues/311) 跟进。首期模型大纲使用现有 `CHAPTER_GENERATION_PROVIDER` 与 `OPENAI_COMPATIBLE_*` 配置；fake 结果只证明流程。
 
 前端测试以新的路由、正文保存、审阅和读者接口为准；移除旧页面专属测试，保留 API 契约测试，并覆盖旧链接重定向、浏览器后退和版本/会话不匹配。
 

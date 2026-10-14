@@ -361,7 +361,7 @@ class DocumentService:
             kwargs.get("version_metadata")
         )
         document = await self._locked_document(kwargs["document_id"])
-        self._ensure_document_is_mutable(document)
+        self._ensure_document_is_mutable(document, allow_outline_edit=kwargs.get("studio_outline_edit", False))
         self._ensure_actor_permission(document, kwargs.get("actor_user_id"))
         self._ensure_expected_current_version(document, kwargs["expected_current_version_id"])
         setting_collection = getattr(document, "setting_collection", None)
@@ -744,12 +744,14 @@ class DocumentService:
             raise DocumentVersionConflictError("The document has a newer version.")
 
     @staticmethod
-    def _ensure_document_is_mutable(document: Document) -> None:
+    def _ensure_document_is_mutable(document: Document, *, allow_outline_edit: bool = False) -> None:
         metadata = getattr(document, "metadata_", None)
         if metadata is None:
             metadata = getattr(document, "metadata", None)
         if isinstance(metadata, dict) and bool(metadata.get("legacy_setting_context")):
             raise ConflictError("Legacy project setting documents are read-only and cannot be modified.")
+        if isinstance(metadata, dict) and (metadata.get("studio_outline_batch") or metadata.get("studio_selected_outline") and not allow_outline_edit):
+            raise ConflictError("Use the scoped outline editor; generated batches are immutable.")
         setting_collection = getattr(document, "setting_collection", None)
         if setting_collection is not None and getattr(setting_collection, "status", None) == "archived":
             raise ConflictError("Archived setting collections are read-only and cannot be modified.")

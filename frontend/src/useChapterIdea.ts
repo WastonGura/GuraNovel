@@ -99,5 +99,5 @@ export function useChapterIdea(projectId: string, chapterId: string, ref?: Ref<I
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [text, ready, readOnly])
   useImperativeHandle(ref, () => ({ flush, changeFeedback: () => {}, submitFeedback: async () => false }))
-  return { text, status, ready, readOnly, revision, change, flush, reloadServer }
+  return { text, status, ready, readOnly, revision, getRevision: () => state.current.base?.revision, change, flush, reloadServer }
 }

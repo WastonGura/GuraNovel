@@ -207,6 +207,8 @@ async def delete_document(
     )
     if document is None:
         raise NotFoundError("Document not found.")
+    if (document.metadata_ or {}).get("studio_outline_batch") or (document.metadata_ or {}).get("studio_selected_outline"):
+        raise ConflictError("Generated outline evidence cannot be deleted through generic document operations.")
     if document.setting_collection_id is not None:
         await set_setting_document_deleted(session, document_id, deleted=True, actor_id=actor_id)
         return
