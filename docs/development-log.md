@@ -9,6 +9,12 @@ Dates use Asia/Tokyo. Target: v0.12.0 desktop personal trial.
 - Existing implementation: regression verification, not retrospective TDD. Prior local baseline: 419 unit tests and 11 Chromium tests passed; current PR's complete verification is delegated to Actions.
 - Adopted the accepted uv/TDD/PR/v0.12.0 development plan. Original checkout and its unrelated backend changes are preserved. Initial outlines, durable delete undo/comments/ideas remain follow-up work.
 
+## 2026-10-14 — #320 remove Qodana
+
+- Status: reviewed and Squash merged through PR #321 at a1b05a0; no release or version bump.
+- Removed the Qodana workflow at the maintainer's explicit request. GitHub Actions ci.yml remains the canonical quality gate; no token or license update is needed.
+- Validation: diff review and Actions run 38515444409 passed, with unrelated product jobs skipped by path filtering. This configuration change does not claim behavioral TDD evidence.
+
 ## 2026-10-14 — #300 standalone setting workspace baseline
 
 - Status: implemented locally; PR and GitHub Actions verification pending.
