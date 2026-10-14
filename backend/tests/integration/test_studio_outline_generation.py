@@ -86,6 +86,14 @@ async def test_generated_outline_starts_real_v2_pipeline_only_after_author_appro
     client._transport.app.dependency_overrides[get_project_workspace] = lambda: ProjectWorkspace(tmp_path)
     project = await client.post("/api/v1/projects", json={"title": "From blank", "slug": f"blank-{uuid4()}"})
     assert project.status_code == 201, project.text
+    from app.services.setting_context_resolver import SettingContextResolver
+    from app.models import SettingCollection
+    from uuid import UUID
+    collection = await async_session.get(SettingCollection, UUID(project.json()["setting_collection_id"]))
+    collection.revision = 7
+    await async_session.commit()
+    context = await SettingContextResolver(async_session).resolve_for_project(UUID(project.json()["id"]))
+    assert context.collection_revision == 7 and context.documents == ()
     chapter = await client.post(f"/api/v1/projects/{project.json()['id']}/chapters", json={"title": "First chapter"})
     assert chapter.status_code == 201, chapter.text
     idea_url = f"/api/v1/projects/{project.json()['id']}/chapters/{chapter.json()['id']}/outline/idea"
@@ -102,3 +110,18 @@ async def test_generated_outline_starts_real_v2_pipeline_only_after_author_appro
     draft = await client.get(f"/api/v1/documents/{started.json()['draft_document_id']}/content")
     assert draft.status_code == 200
     assert draft.json()["content"].strip()
+    run_url = f"{production}/{started.json()['workflow_run_id']}"
+    accepted = await client.post(f"{run_url}/actions/{started.json()['action_request_id']}/resolve", json={
+        "decision": "accept", "expected_current_version_id": draft.json()["version_id"]})
+    assert accepted.status_code == 200, accepted.text
+    for _ in range(5):
+        state = (await client.get(run_url)).json()
+        if state["status"] == "REVISION_READY":
+            break
+        reviewed = await client.post(f"{run_url}/review")
+        assert reviewed.status_code == 200, reviewed.text
+    else:
+        pytest.fail("First chapter never became ready for local finalization")
+    finalized = await client.post(f"{run_url}/finalize", json={"expected_current_version_id": state["document_version_id"]})
+    assert finalized.status_code == 200, finalized.text
+    assert (await client.get(run_url)).json()["status"] == "COMPLETED"
