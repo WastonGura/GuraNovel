@@ -87,6 +87,11 @@ Before review, a PR should:
 
 ## Review policy
 
+GitHub Actions in `.github/workflows/ci.yml` is the canonical quality gate. Qodana was
+removed at the maintainer's request on 2026-10-14; it is not a prerequisite for merging.
+Complete CI runs remotely. Local Python work uses uv and focused tests; new behavior
+follows Red → Green → Refactor, with evidence recorded in the PR and development log.
+
 A PR can be merged when:
 
 - It satisfies the issue acceptance criteria.
