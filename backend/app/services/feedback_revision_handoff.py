@@ -129,6 +129,7 @@ class _ClaimContext:
     binding: ChapterActionBinding
     document: Document
     version: DocumentVersion
+    outline_content: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -407,7 +408,12 @@ class _FeedbackClaimPhase:
             action, run, chapter, document.id, version.id, version.content_hash,
             document.id, version.id, version.content_hash,
         )
-        return _ClaimContext(run, state, checkpoint, action, binding, document, version)
+        _, outline, outline_version = await self.repository.approved_outline(
+            scope.project_id, scope.chapter_id, lock=True,
+        )
+        self.service._validate_outline_metadata(self.service._run_metadata(run), outline, outline_version)  # type: ignore[attr-defined]
+        outline_content = await self.documents.read_version_content(outline.id, outline_version.id)
+        return _ClaimContext(run, state, checkpoint, action, binding, document, version, outline_content)
 
 
 class FeedbackRevisionHandoff:
