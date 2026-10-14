@@ -45,6 +45,7 @@ jobs:
             backend:
               - 'backend/**'
               - '.github/workflows/ci.yml'
+              - 'scripts/docker_author_smoke.py'
             frontend:
               - 'frontend/**'
               - '.github/workflows/ci.yml'
@@ -213,6 +214,47 @@ jobs:
       - name: "Run Playwright smoke test"
         run: npm run test:e2e
 
+  version-consistency:
+    name: "Release - Version consistency"
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.11.21"
+          python-version: '3.11'
+      - name: "Test version mismatch detection"
+        run: uv run --no-project python -m unittest discover -s scripts/tests
+      - name: "Check product versions"
+        run: uv run --no-project python scripts/check_versions.py
+
+  docker-author-smoke:
+    name: "Release - Docker author workflow"
+    needs: detect-changes
+    if: needs.detect-changes.outputs.backend == 'true' || needs.detect-changes.outputs.frontend == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      GURANOVEL_FRONTEND_PORT: '15283'
+      GURANOVEL_BACKEND_PORT: '18213'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.11.21"
+          python-version: '3.11'
+      - name: "Build and start README Docker stack"
+        run: docker compose -p guranovel-ci up -d --build --wait --wait-timeout 180
+      - name: "Verify actual author API through frontend proxy"
+        run: uv run --no-project python scripts/docker_author_smoke.py
+      - name: "Collect Docker diagnostics"
+        if: failure()
+        run: docker compose -p guranovel-ci logs --no-color --tail 100
+      - name: "Remove disposable CI stack"
+        if: always()
+        run: docker compose -p guranovel-ci down -v
+
   all-checks-passed:
     name: "All Checks Passed"
     needs:
@@ -221,6 +263,8 @@ jobs:
       - backend-unit
       - backend-integration
       - frontend-quality
+      - version-consistency
+      - docker-author-smoke
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 5
