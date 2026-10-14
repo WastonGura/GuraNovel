@@ -55,7 +55,8 @@ async def generate_outline_options(snapshot: dict) -> tuple[OutlineOptions, dict
                       "不得代替作者选择，不生成正文，不声称修改了任何文档。",
         output_schema_name="chapter_outline_options", output_schema=OutlineOptions,
         timeout_seconds=settings.openai_compatible_timeout_seconds, max_input_chars=1_000_000,
-        max_output_bytes=400_000, max_tokens=8000)
+        max_output_bytes=400_000, max_tokens=8000,
+        reasoning_effort=getattr(settings, "openai_compatible_reasoning_effort", None))
     transport = OpenAICompatibleStructuredOutputTransport(base_url=settings.openai_compatible_base_url,
         api_key=api_key.get_secret_value(), timeout_seconds=settings.openai_compatible_timeout_seconds)
     try:

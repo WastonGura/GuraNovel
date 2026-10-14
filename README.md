@@ -27,6 +27,8 @@ v0.12.0 开发以书架、Studio 和独立设定集为正式入口：创建作�
 
 默认 fake Provider 返回确定性示例，只用于流程验证。真实模型调用需要配置 `CHAPTER_GENERATION_PROVIDER`、`CHAPTER_PRODUCTION_PROVIDER` 和 `OPENAI_COMPATIBLE_*`，质量验收单独记录，不能由测试替身结果推断。以下完整流程介绍包含后端能力与后续产品方向。
 
+兼容模型可选设置 `OPENAI_COMPATIBLE_REASONING_EFFORT=none|low|medium|high|max`，作用于三个大纲方案、V2 写作/修订/审阅及 Reader。省略时不发送此参数；仅在服务商支持时设置。桌面抽测使用 `deepseek-flash`、`none` 与 120 秒超时，以实际用量和耗时为准。[DeepSeek 思考模式说明](https://api-docs.deepseek.com/guides/thinking_mode/)介绍了该参数与默认行为。
+
 ## 完整创作工作流
 
 GuraNovel 覆盖长篇小说从创意立项到多章节连载审阅的全生命周期：

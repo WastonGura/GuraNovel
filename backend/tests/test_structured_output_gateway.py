@@ -56,7 +56,7 @@ async def test_gateway_returns_strict_typed_output_and_trusted_provenance() -> N
         input_tokens=7,
         output_tokens=11,
     )
-    gateway = StructuredOutputGateway(_profile(), transport)
+    gateway = StructuredOutputGateway(_profile(reasoning_effort="low"), transport)
 
     response = await gateway.call(
         StructuredOutputRequest("reader_initial_v1", "[S001] Chapter text")
@@ -76,6 +76,7 @@ async def test_gateway_returns_strict_typed_output_and_trusted_provenance() -> N
     assert transport.requests[0].output_schema_name == "reader_initial_output"
     assert transport.requests[0].output_schema["additionalProperties"] is False
     assert transport.requests[0].timeout_seconds == 30
+    assert transport.requests[0].reasoning_effort == "low"
     assert "keep" not in repr(response)
     assert "keep" not in repr(transport)
     with pytest.raises(ValueError):

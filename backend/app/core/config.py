@@ -47,6 +47,7 @@ class Settings(BaseSettings):
     openai_compatible_api_key: SecretStr | None = None
     openai_compatible_model: str | None = None
     openai_compatible_timeout_seconds: float | None = None
+    openai_compatible_reasoning_effort: Literal["none", "low", "medium", "high", "max"] | None = None
 
     @field_validator("openai_compatible_base_url")
     @classmethod

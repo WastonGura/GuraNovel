@@ -1,6 +1,7 @@
 import gzip
 import json
 import logging
+from dataclasses import replace
 
 import httpx
 import pytest
@@ -62,6 +63,20 @@ def raw_response(
         headers=headers,
         stream=_CountingStream([payload]),
     )
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("effort", [None, "none", "low", "max"])
+async def test_server_reasoning_budget_reaches_compatible_provider(effort) -> None:
+    def respond(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(request.content)
+        if payload.get("reasoning_effort") != effort or (effort is None and "reasoning_effort" in payload):
+            return raw_response(b'{}', status_code=400)
+        return raw_response(json.dumps({"choices": [{"message": {"content": '{"answer":"bounded"}'}}]}).encode())
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+        transport = OpenAICompatibleStructuredOutputTransport(base_url="https://provider.test/v1", api_key="fixture-key", client=client)
+        response = await transport.call(replace(transport_request(max_output_bytes=1024), reasoning_effort=effort))
+    assert response.payload == '{"answer":"bounded"}'
 
 
 @pytest.mark.anyio

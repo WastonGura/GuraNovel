@@ -124,6 +124,8 @@ class OpenAICompatibleStructuredOutputTransport:
                 payload["top_p"] = request.top_p
             if request.max_tokens is not None:
                 payload["max_tokens"] = request.max_tokens
+            if request.reasoning_effort is not None:
+                payload["reasoning_effort"] = request.reasoning_effort
 
             transport_error: Exception | None = None
             retry_fallback = False

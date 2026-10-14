@@ -234,12 +234,14 @@ def get_chapter_production_v2_composition() -> ChapterProductionV2Composition:
                 api_key=api_key_value,
                 model=model,
                 timeout_seconds=timeout,
+                reasoning_effort=settings.openai_compatible_reasoning_effort,
             )
             review_provider = OpenAICompatibleChapterReviewProvider(
                 base_url=base_url,
                 api_key=api_key_value,
                 model=model,
                 timeout_seconds=timeout,
+                reasoning_effort=settings.openai_compatible_reasoning_effort,
             )
         except Exception:
             raise ProviderConfigurationError() from None
@@ -286,6 +288,7 @@ def get_reader_panel_provider(
         api_key=api_key_value,
         model=model,
         timeout_seconds=timeout,
+        reasoning_effort=getattr(configured_settings, "openai_compatible_reasoning_effort", None),
     )
 
 

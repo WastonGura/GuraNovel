@@ -53,6 +53,7 @@ class OpenAICompatibleReaderPanelProvider:
         *,
         model: str | None = None,
         timeout_seconds: float = 60.0,
+        reasoning_effort: str | None = None,
         client: httpx.AsyncClient | None = None,
         registry: ProfileRegistry | None = None,
     ) -> None:
@@ -64,6 +65,7 @@ class OpenAICompatibleReaderPanelProvider:
         )
         self._model = model
         self._timeout_seconds = timeout_seconds
+        self._reasoning_effort = reasoning_effort
         self._registry = registry or ProfileRegistry()
         self._gateways: dict[str, StructuredOutputGateway[Any]] = {}
         self.last_provenance: str | None = None
@@ -101,6 +103,7 @@ class OpenAICompatibleReaderPanelProvider:
                 temperature=profile.model.temperature,
                 top_p=profile.model.top_p,
                 max_tokens=profile.model.max_tokens,
+                reasoning_effort=self._reasoning_effort,
             )
             self._gateways[key] = StructuredOutputGateway(gateway_profile, self._transport)
         return self._gateways[key]

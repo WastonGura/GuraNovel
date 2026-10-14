@@ -42,6 +42,7 @@ class OpenAICompatibleChapterWriterProvider:
         "_gateways",
         "_model",
         "_timeout_seconds",
+        "_reasoning_effort",
         "_transport",
         "last_input_tokens",
         "last_output_tokens",
@@ -55,12 +56,14 @@ class OpenAICompatibleChapterWriterProvider:
         api_key: str,
         model: str | None = None,
         timeout_seconds: float = 30.0,
+        reasoning_effort: str | None = None,
         client: httpx.AsyncClient | None = None,
     ) -> None:
         self._base_url = base_url.rstrip("/")
         self._api_key = api_key
         self._model = model
         self._timeout_seconds = timeout_seconds
+        self._reasoning_effort = reasoning_effort
         self._client = client
         self._transport = OpenAICompatibleStructuredOutputTransport(
             base_url=base_url,
@@ -94,6 +97,7 @@ class OpenAICompatibleChapterWriterProvider:
                 temperature=profile.model.temperature,
                 top_p=profile.model.top_p,
                 max_tokens=profile.model.max_tokens,
+                reasoning_effort=self._reasoning_effort,
             )
             self._gateways[key] = StructuredOutputGateway(gateway_profile, self._transport)
         return self._gateways[key]
