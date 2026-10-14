@@ -96,7 +96,7 @@ export default function StudioSetting({
         try {
           const feedback = JSON.parse(sessionStorage.getItem(`guranovel:setting-feedback-recovery:${n.id}`) || 'null')
           if (feedback && typeof feedback.body === 'string' && typeof feedback.versionId === 'string') {
-            return { ...n, body: feedback.body, versionId: feedback.versionId,
+            return { ...n, body: feedback.body as string, versionId: feedback.versionId as string,
               comments: restoreOutlineComments(feedback.comments, feedback.body) }
           }
           const draft = sessionStorage.getItem(`guranovel:setting-draft-recovery:${n.id}`)
