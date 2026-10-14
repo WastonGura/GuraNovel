@@ -2,6 +2,12 @@
 
 Dates use Asia/Tokyo. Target: v0.12.0 desktop personal trial.
 
+## 2026-10-14 — #328 bounded model transport negotiation
+
+- Status: implemented; PR #329/latest-head Actions/review pending. No version bump.
+- Red: a compression-capable mock service returned valid gzip after default compression negotiation, which the bounded raw transport rejected. Green: explicitly request identity; all 20 transport cases pass, retaining unexpected-compression and size-limit rejection.
+- Live read-only provider diagnostics confirmed identity negotiation is honored. Model quality remains a separate acceptance item.
+
 ## 2026-10-14 — #323 release CI gates
 
 - Status: CI implementation; PR/latest-head Actions pending. No version bump.
