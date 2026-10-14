@@ -131,7 +131,7 @@ class OpenAICompatibleStructuredOutputTransport:
                 async with self.__client.stream(
                     "POST",
                     f"{self.__base_url}/chat/completions",
-                    headers={"Authorization": f"Bearer {self.__api_key}"},
+                    headers={"Authorization": f"Bearer {self.__api_key}", "Accept-Encoding": "identity"},
                     json=payload,
                     timeout=request.timeout_seconds,
                     follow_redirects=False,
