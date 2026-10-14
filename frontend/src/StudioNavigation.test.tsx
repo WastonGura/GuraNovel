@@ -215,7 +215,7 @@ it('flushes edited prose before submission and recovers a lost acceptance respon
     state = { ...state, status: state.status === 'EDITOR_REVIEW' ? 'LORE_FINAL_REVIEW' : 'REVISION_READY' }
     return { workflow_run_id: 'run-a', draft_document_id: 'doc-a', draft_version_id: version, action_request_id: null }
   })
-  open('/projects/p/studio/a')
+  open('/projects/p/studio/a?stage=Draft')
   const prose = await screen.findByRole('textbox', { name: '章节正文' })
   await waitFor(() => expect(prose).not.toHaveAttribute('readonly'))
   fireEvent.change(prose, { target: { value: '点击提交前的最新正文' } })
@@ -228,6 +228,8 @@ it('flushes edited prose before submission and recovers a lost acceptance respon
   expect(prose).toHaveAttribute('readonly')
   fireEvent.click(screen.getByRole('button', { name: '重试审阅' }))
   await screen.findByText('本轮审阅已完成。')
+  await waitFor(() => expect(screen.getByTestId('url')).toHaveTextContent('stage=Review'))
+  expect(screen.queryByText('正文已进入审阅，请通过修改流程继续写作。')).not.toBeInTheDocument()
   expect(resolveChapterProductionAction).toHaveBeenCalledTimes(1)
   expect(triggerChapterReview).toHaveBeenCalledTimes(2)
   expect(prose).toHaveValue('点击提交前的最新正文')
