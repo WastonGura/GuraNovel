@@ -16,8 +16,22 @@ from app.services.studio_feedback import StudioFeedbackService
 from app.services.studio_restore_points import StudioRestorePoints
 from app.services.studio_outline import approve_studio_outline
 from app.services.studio_draft import save_studio_draft
+from app.api.schemas_studio import ChapterIdeaWrite, ChapterIdeaResponse
+from app.services.studio_ideas import read_idea, write_idea
 
 router = APIRouter(prefix="/projects/{project_id}/chapters/{chapter_id}")
+
+
+@router.get("/outline/idea", response_model=ChapterIdeaResponse)
+async def read_chapter_idea(project_id: UUID, chapter_id: UUID,
+                            session: AsyncSession = Depends(get_db_session)):
+    return await read_idea(session, project_id, chapter_id)
+
+
+@router.put("/outline/idea", response_model=ChapterIdeaResponse)
+async def write_chapter_idea(project_id: UUID, chapter_id: UUID, payload: ChapterIdeaWrite,
+                             session: AsyncSession = Depends(get_db_session)):
+    return await write_idea(session, project_id, chapter_id, **payload.model_dump())
 
 
 @router.put("/draft/content", response_model=DocumentVersionResponse)
