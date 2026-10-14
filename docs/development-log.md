@@ -9,6 +9,13 @@ Dates use Asia/Tokyo. Target: v0.12.0 desktop personal trial.
 - Added a Docker build/health/real-HTTP author workflow gate through the frontend proxy, including persisted ideas, exactly three candidates, replay identities, selection, approval, prose save, review and idempotent local finalization. Both new jobs feed All Checks Passed.
 - Local clean-checkout Docker build at 7e31742 passed; services became healthy. Actual API acceptance exposed a previously uncovered 422 when reviewing a blank project's first chapter. This is a product gap to fix separately, not a reason to weaken the smoke gate. Deterministic Provider evidence is separate from real-model quality.
 
+## 2026-10-14 — #326 first-chapter review
+
+- Status: implementation and focused verification; PR/latest-head Actions/review pending.
+- Red: the real Docker author smoke and a PostgreSQL HTTP test returned 422 at first-chapter Editor review when no optional context documents existed. Existing tests had seeded those documents.
+- Green: optional review context may be empty while exact prose, approved outline, project/chapter scope and version validation remain mandatory. Empty bound collections preserve their own revision instead of using legacy fallback. The blank-project test now reaches COMPLETED local finalization; all 32 review-agent contract cases pass.
+- Updated the former mandatory-optional-context assertion to require empty context with intact prose/outline identity; cross-project, wrong-kind and evidence checks remain. No migration, version bump or real-model quality claim.
+
 ## 2026-10-14 — #320 remove Qodana
 
 - Status: reviewed and Squash merged through PR #321 at a1b05a0; no release or version bump.

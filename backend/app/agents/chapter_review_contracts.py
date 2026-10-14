@@ -211,7 +211,7 @@ class _ChapterReviewRequest(_StrictReviewModel):
     workflow_run_id: UUID
     target: ChapterReviewTarget
     approved_outline: ApprovedOutlineSnapshot
-    contexts: tuple[ReviewContextSnapshot, ...] = Field(min_length=1, max_length=16)
+    contexts: tuple[ReviewContextSnapshot, ...] = Field(max_length=16)
 
     @model_validator(mode="after")
     def exact_bound_context(self) -> Self:
