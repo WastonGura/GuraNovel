@@ -837,7 +837,7 @@ function StudioWorkspace({ title, initial, initialId, project, preview }: {
         {!archive && selected.stage === 'Outline' && <section className={`studio-outline is-${selected.outlineStep}${preview ? '' : ' is-persisted'}`} key={selected.id} aria-label="本章大纲">
           <MotionFrame className="studio-outline-flow" textKey={`${selected.outlineStep}-${refresh}`}>
           {!preview && <PersistedChapterOutline chapter={selected} projectId={project!.id} ref={editor}
-            onChange={patch => patch.stage && patch.stage !== 'Outline' ? void leave(() => update(selected.id, patch)) : update(selected.id, patch)} onSend={() => setToast('大纲反馈已保存，Agent 修改流程尚未接入。')} />}
+            onChange={patch => patch.stage && patch.stage !== 'Outline' ? void leave(() => { update(selected.id, patch); navigateStudio(selected.id, patch.stage) }) : update(selected.id, patch)} onSend={() => setToast('大纲反馈已保存，Agent 修改流程尚未接入。')} />}
           {selected.outlineStep !== 'edit' && preview && <OutlineGeneration chapter={selected} preview={preview} refresh={refresh} onIdea={idea => update(selected.id, { idea })} onGenerate={() => update(selected.id, { outlineStep: 'choose' })} onChoose={text => update(selected.id, { outline: `${selected.idea}\n\n${text}`, outlineStep: 'edit' })} onRefresh={() => setRefresh(value => value + 1)} />}
           {selected.outlineStep === 'edit' && preview && <OutlineEditor outline={selected.outline} comments={selected.outlineComments || []} readOnly={false}
             onChange={(outline, outlineComments) => update(selected.id, { outline, outlineComments, review: 'idle', issues: [], selected: [] })}
