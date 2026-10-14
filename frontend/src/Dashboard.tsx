@@ -19,9 +19,9 @@ const icon = (name: string) => asset(`icons/${name}.svg`)
 
 function greeting() {
   const hour = new Date().getHours()
-  if (hour < 12) return 'Good Morning'
-  if (hour < 18) return 'Good Afternoon'
-  return 'Good Evening'
+  if (hour < 12) return '早上好'
+  if (hour < 18) return '下午好'
+  return '晚上好'
 }
 
 function wordCount(project: Project) {
@@ -144,19 +144,19 @@ function ProjectForm({
         const boundary = event.shiftKey ? controls[0] : controls.at(-1)
         if (document.activeElement === boundary && target) { event.preventDefault(); target.focus() }
       }}>
-        <button className="dashboard-dialog-close" data-glow type="button" onClick={onClose} disabled={pending} aria-label="Close create project dialog">×</button>
-        <form className="workspace-form novel-create-form" onSubmit={submit} aria-label="Create project">
-          <h2 id="create-project-title">Create project</h2>
+        <button className="dashboard-dialog-close" data-glow type="button" onClick={onClose} disabled={pending} aria-label="关闭创建作品">×</button>
+        <form className="workspace-form novel-create-form" onSubmit={submit} aria-label="创建作品">
+          <h2 id="create-project-title">创建作品</h2>
           <div className="form-grid">
-            <label className="form-field-full">Title<input ref={titleRef} value={title} onChange={(event) => setTitle(event.target.value)} required aria-describedby={error ? 'create-project-error' : undefined} /></label>
-            <label>Genre (optional)<input value={genre} onChange={(event) => setGenre(event.target.value)} /></label>
-            <label>Target platform (optional)<input value={platform} onChange={(event) => setPlatform(event.target.value)} /></label>
+            <label className="form-field-full">标题<input ref={titleRef} value={title} onChange={(event) => setTitle(event.target.value)} required aria-describedby={error ? 'create-project-error' : undefined} /></label>
+            <label>题材（可选）<input value={genre} onChange={(event) => setGenre(event.target.value)} /></label>
+            <label>目标平台（可选）<input value={platform} onChange={(event) => setPlatform(event.target.value)} /></label>
             <label className="form-field-full">
-              Setting collection
+              设定集
               <select
                 value={selectedCollectionId}
                 onChange={(event) => setSelectedCollectionId(event.target.value)}
-                aria-label="Setting collection"
+                aria-label="设定集"
               >
                 <option value="new">同时创建空白设定集 (默认)</option>
                 {collections.map((col) => (
@@ -167,7 +167,7 @@ function ProjectForm({
               </select>
             </label>
             <label className="form-field-full">
-              Introduction (optional)
+              简介（可选）
               <textarea
                 value={introduction}
                 onChange={(event) => setIntroduction(event.target.value)}
@@ -176,7 +176,7 @@ function ProjectForm({
               />
             </label>
             <label>
-              Labels (optional)
+              标签（可选）
               <input
                 value={labels}
                 onChange={(event) => setLabels(event.target.value)}
@@ -184,7 +184,7 @@ function ProjectForm({
               />
             </label>
             <label>
-              Cover URL or preset (optional)
+              封面地址或预设（可选）
               <input
                 value={cover}
                 onChange={(event) => setCover(event.target.value)}
@@ -198,7 +198,7 @@ function ProjectForm({
             <label>Slug<input value={slug} onChange={(event) => setSlug(event.target.value)} aria-describedby="slug-help create-project-error" /></label>
           </details>
           {error && <p ref={errorRef} id="create-project-error" className="notice" role="alert" tabIndex={-1}>{error}</p>}
-          <button data-glow type="submit" disabled={pending}>{pending ? 'Creating project…' : 'Create project'}</button>
+          <button data-glow type="submit" disabled={pending}>{pending ? '正在创建作品…' : '创建作品'}</button>
         </form>
       </dialog>
     </div>
@@ -229,7 +229,7 @@ function SettingCollectionForm({
     event.preventDefault()
     if (pending) return
     if (!title.trim()) {
-      setError('Title is required.')
+      setError('请填写标题。')
       return
     }
     setPending(true)
@@ -244,7 +244,7 @@ function SettingCollectionForm({
       onClose()
       navigate(`/setting-collections/${encodeURIComponent(collection.id)}`)
     } catch {
-      setError('Setting collection could not be created. Try again.')
+      setError('设定集创建失败，已保留内容，请检查网络后重试。')
     } finally {
       setPending(false)
     }
@@ -255,19 +255,19 @@ function SettingCollectionForm({
       if (event.target === event.currentTarget) onClose()
     }}>
       <div className="dashboard-create-dialog" role="dialog" aria-modal="true" aria-labelledby="create-collection-title">
-        <button className="dashboard-dialog-close" data-glow type="button" onClick={onClose} aria-label="Close create setting collection dialog">×</button>
-        <form className="workspace-form" onSubmit={submit} aria-label="Create setting collection">
-          <h2 id="create-collection-title">Create setting collection</h2>
+        <button className="dashboard-dialog-close" data-glow type="button" onClick={onClose} aria-label="关闭新建设定集">×</button>
+        <form className="workspace-form" onSubmit={submit} aria-label="新建设定集">
+          <h2 id="create-collection-title">新建设定集</h2>
           <div className="form-grid">
-            <label>Title<input autoFocus value={title} onChange={(event) => setTitle(event.target.value)} required /></label>
+            <label>标题<input autoFocus value={title} onChange={(event) => setTitle(event.target.value)} required /></label>
             <label>Slug (optional)<input value={slug} onChange={(event) => setSlug(event.target.value)} placeholder="留空自动生成" /></label>
             <label className="form-field-full">
-              Description (optional)
+              说明（可选）
               <textarea value={description} onChange={(event) => setDescription(event.target.value)} rows={2} placeholder="设定集说明…" />
             </label>
           </div>
           {error && <p className="notice" role="alert">{error}</p>}
-          <button data-glow type="submit" disabled={pending}>{pending ? 'Creating collection…' : 'Create setting collection'}</button>
+          <button data-glow type="submit" disabled={pending}>{pending ? '正在创建设定集…' : '新建设定集'}</button>
         </form>
       </div>
     </div>
@@ -347,7 +347,7 @@ function NovelDetails({
     event.preventDefault()
     if (saving) return
     if (!editTitle.trim()) {
-      setSaveError('Title is required.')
+      setSaveError('请填写标题。')
       return
     }
     setSaving(true)
@@ -374,7 +374,7 @@ function NovelDetails({
       onProjectUpdated?.(updated)
       setEditing(false)
     } catch {
-      setSaveError('Failed to save novel details. Try again.')
+      setSaveError('资料保存失败，已保留修改，请检查网络后重试。')
     } finally {
       setSaving(false)
     }
@@ -393,7 +393,7 @@ function NovelDetails({
       <section className={`novel-detail${closing ? ' is-closing' : ''}`} role="dialog" aria-modal="true" aria-labelledby="novel-detail-title" onAnimationEnd={() => {
         if (closing) onClose()
       }}>
-        <button ref={closeButton} className="dashboard-dialog-close" data-glow type="button" onClick={() => setClosing(true)} aria-label="Close novel details">×</button>
+        <button ref={closeButton} className="dashboard-dialog-close" data-glow type="button" onClick={() => setClosing(true)} aria-label="关闭作品详情">×</button>
 
         <div className="novel-detail-columns">
           {/* Left Column: Cover, Title & Meta */}
@@ -402,7 +402,7 @@ function NovelDetails({
             <h2 id="novel-detail-title">{currentProject.title}</h2>
             <div className="novel-detail-badges">
               <span className="novel-badge">字数：{wordCount(currentProject)}</span>
-              <span className="novel-badge">状态：{currentProject.status === 'draft' ? '草稿' : currentProject.status}</span>
+              <span className="novel-badge">状态：{({ draft: '草稿', active: '创作中', completed: '已完成', archived: '已归档' } as Record<string, string>)[currentProject.status] || '状态待核对'}</span>
               {currentProject.genre && <span className="novel-badge">{currentProject.genre}</span>}
               {currentProject.target_platform && <span className="novel-badge">{currentProject.target_platform}</span>}
             </div>
@@ -437,39 +437,39 @@ function NovelDetails({
           <div className="novel-detail-mid">
             {retiredNotice && <p className="muted" role="status">{retiredNotice}</p>}
             {editing ? (
-              <form className="novel-inline-edit-form" onSubmit={handleSave} aria-label="Edit novel form">
+              <form className="novel-inline-edit-form" onSubmit={handleSave} aria-label="编辑作品资料">
                 <h3>编辑作品资料</h3>
                 <label>
-                  Title
+                  标题
                   <input
                     value={editTitle}
                     onChange={(e) => setEditTitle(e.target.value)}
                     required
-                    aria-label="Edit title"
+                    aria-label="编辑标题"
                   />
                 </label>
                 <label>
-                  Genre (optional)
+                  题材（可选）
                   <input
                     value={editGenre}
                     onChange={(e) => setEditGenre(e.target.value)}
-                    aria-label="Edit genre"
+                    aria-label="编辑题材"
                   />
                 </label>
                 <label>
-                  Target platform (optional)
+                  目标平台（可选）
                   <input
                     value={editPlatform}
                     onChange={(e) => setEditPlatform(e.target.value)}
-                    aria-label="Edit target platform"
+                    aria-label="编辑目标平台"
                   />
                 </label>
                 <label>
-                  Setting collection
+                  设定集
                   <select
                     value={editCollectionId}
                     onChange={(e) => setEditCollectionId(e.target.value)}
-                    aria-label="Edit setting collection"
+                    aria-label="编辑关联设定集"
                   >
                     <option value="">(无关联设定集)</option>
                     {collections.map((col) => (
@@ -480,26 +480,26 @@ function NovelDetails({
                   </select>
                 </label>
                 <label>
-                  Introduction (optional)
+                  简介（可选）
                   <textarea
                     value={editIntro}
                     onChange={(e) => setEditIntro(e.target.value)}
                     rows={3}
-                    aria-label="Edit introduction"
+                    aria-label="编辑简介"
                   />
                 </label>
                 <label>
-                  Labels (optional)
+                  标签（可选）
                   <input
                     value={editLabels}
                     onChange={(e) => setEditLabels(e.target.value)}
-                    aria-label="Edit labels"
+                    aria-label="编辑标签"
                   />
                 </label>
                 {saveError && <p className="notice" role="alert">{saveError}</p>}
                 <div className="novel-edit-actions">
                   <button data-glow type="submit" disabled={saving}>
-                    {saving ? 'Saving…' : 'Save changes'}
+                    {saving ? '正在保存…' : '保存修改'}
                   </button>
                   <button data-glow type="button" onClick={() => setEditing(false)}>
                     Cancel
@@ -517,7 +517,7 @@ function NovelDetails({
                 {displayLabels.length > 0 && (
                   <div className="novel-detail-tags-section">
                     <h3>标签</h3>
-                    <div className="novel-detail-tags" aria-label="Novel tags">
+                    <div className="novel-detail-tags" aria-label="作品标签">
                       {displayLabels.map((lbl, idx) => (
                         <span key={idx} className="novel-tag">{lbl}</span>
                       ))}
@@ -534,22 +534,22 @@ function NovelDetails({
               <button className="volume-toggle" data-glow type="button" onClick={() => setExpanded((value) => !value)} aria-expanded={expanded}>
                 <span className="volume-caret" aria-hidden="true">{expanded ? '⌄' : '›'}</span>
                 <span>第一卷 …</span>
-                <img src={icon('rename')} alt="重命名卷" />
+                <img src={icon('rename')} alt="" />
               </button>
-              {chapters === null && !failed && <p className="detail-status" role="status">Loading chapters…</p>}
-              {failed && <p className="detail-status notice" role="alert">Chapters could not be loaded. Try again.</p>}
+              {chapters === null && !failed && <p className="detail-status" role="status">正在加载章节…</p>}
+              {failed && <p className="detail-status notice" role="alert">章节加载失败，请关闭后重新打开作品。</p>}
               {expanded && chapters?.length === 0 && <p className="detail-status">暂无章节</p>}
               {expanded && chapters && chapters.length > 0 && <ul className="detail-chapter-list">
                 {chapters.map((chapter) => <li key={chapter.id}>
                   <button data-glow type="button" onClick={() => navigate(`/projects/${encodeURIComponent(currentProject.id)}/studio/${encodeURIComponent(chapter.id)}`)}>
                     <span>第{chapter.chapter_number}话</span><span>{chapter.title || '未命名章节'}</span>
-                    <img src={icon('rename')} alt="重命名章节" />
+                    <img src={icon('rename')} alt="" />
                   </button>
                 </li>)}
               </ul>}
             </div>
             <span className="novel-detail-rule" aria-hidden="true" />
-            <button className="novel-create-button" data-glow type="button" onClick={() => navigate(`/projects/${encodeURIComponent(currentProject.id)}/studio`)}>create</button>
+            <button className="novel-create-button" data-glow type="button" onClick={() => navigate(`/projects/${encodeURIComponent(currentProject.id)}/studio`)}>开始创作</button>
           </div>
         </div>
       </section>
@@ -670,12 +670,12 @@ export default function Dashboard() {
     <div className="dashboard-canvas" onPointerMove={trackGlow} onClickCapture={burstGlow} onAnimationEnd={(event) => {
       if (event.animationName === 'glow-burst') (event.target as HTMLElement).classList.remove('is-glow-burst')
     }}>
-      <img className="dashboard-settings" src={icon('setting')} alt="Settings" />
+      <button className="dashboard-settings" type="button" disabled aria-label="全局设置（暂未提供）" title="全局设置暂未提供"><img src={icon('setting')} alt="" /></button>
       <h1 id="route-title" className="dashboard-greeting">{greeting()}</h1>
       <div className="dashboard-main" aria-labelledby="route-title">
         {/* Recent Novels */}
         <section className="dashboard-section dashboard-recent" aria-labelledby="recent-title">
-          <h2 id="recent-title"><img src={icon('akar-icons_clock')} alt="" />recent</h2>
+          <h2 id="recent-title"><img src={icon('akar-icons_clock')} alt="" />最近创作</h2>
           <div className="dashboard-carousel">
             <div className="dashboard-row recent-row" ref={recentRow} onScroll={(event) => setRecentIndex(Math.round(event.currentTarget.scrollLeft / 295))}>
               {projects === null && !failed && Array.from({ length: 4 }, (_, index) => <div className="dashboard-skeleton recent-card" key={index} />)}
@@ -683,11 +683,11 @@ export default function Dashboard() {
                 <span className="recent-art"><img src={artwork(project)} alt="" /></span>
                 <span className="recent-info"><strong>{project.title}</strong><span><span>字数：{wordCount(project)}</span><time dateTime={project.updated_at}>{relativeTime(project.updated_at)}</time></span></span>
               </button>)}
-              {projects?.length === 0 && <p className="dashboard-empty">No projects yet. Create one to begin.</p>}
+              {projects?.length === 0 && <p className="dashboard-empty">还没有作品，新建一部开始创作。</p>}
             </div>
             {recent.length > 3 && <>
-              <button className="carousel-arrow carousel-previous" data-glow type="button" disabled={recentIndex === 0} onClick={() => moveCarousel(recentRow.current, -1, 295, recentMaxIndex, setRecentIndex)} aria-label="Show previous recent novels"><img src={icon('akar-icons_arrow-right')} alt="" /></button>
-              <button className="carousel-arrow carousel-next" data-glow type="button" disabled={recentIndex === recentMaxIndex} onClick={() => moveCarousel(recentRow.current, 1, 295, recentMaxIndex, setRecentIndex)} aria-label="Show more recent novels"><img src={icon('akar-icons_arrow-right')} alt="" /></button>
+              <button className="carousel-arrow carousel-previous" data-glow type="button" disabled={recentIndex === 0} onClick={() => moveCarousel(recentRow.current, -1, 295, recentMaxIndex, setRecentIndex)} aria-label="查看更早作品"><img src={icon('akar-icons_arrow-right')} alt="" /></button>
+              <button className="carousel-arrow carousel-next" data-glow type="button" disabled={recentIndex === recentMaxIndex} onClick={() => moveCarousel(recentRow.current, 1, 295, recentMaxIndex, setRecentIndex)} aria-label="查看更多最近作品"><img src={icon('akar-icons_arrow-right')} alt="" /></button>
             </>}
           </div>
         </section>
@@ -695,8 +695,8 @@ export default function Dashboard() {
         {/* Novels */}
         <section className="dashboard-section dashboard-novels" aria-labelledby="novels-title">
           <div className="dashboard-section-heading">
-            <h2 id="novels-title"><img src={icon('akar-icons_book')} alt="" />novels</h2>
-            <button className="novel-add" data-glow type="button" onClick={() => setCreating(true)} aria-label="Create novel"><img src={icon('bx_message-square-add')} alt="" /></button>
+            <h2 id="novels-title"><img src={icon('akar-icons_book')} alt="" />作品</h2>
+            <button className="novel-add" data-glow type="button" onClick={() => setCreating(true)} aria-label="新建作品"><img src={icon('bx_message-square-add')} alt="" /></button>
           </div>
           <div className="dashboard-carousel">
             <div className="dashboard-row novels-row" ref={novelsRow} onScroll={(event) => setNovelIndex(Math.round(event.currentTarget.scrollLeft / 171))}>
@@ -716,8 +716,8 @@ export default function Dashboard() {
         {/* Setting Collections */}
         <section className="dashboard-section dashboard-collections" aria-labelledby="collections-title">
           <div className="dashboard-section-heading">
-            <h2 id="collections-title"><img src={icon('setting')} alt="" />setting collections</h2>
-            <button className="collection-add" data-glow type="button" onClick={() => setCreatingCollection(true)} aria-label="Create setting collection"><img src={icon('bx_message-square-add')} alt="" /></button>
+            <h2 id="collections-title"><img src={icon('setting')} alt="" />设定集</h2>
+            <button className="collection-add" data-glow type="button" onClick={() => setCreatingCollection(true)} aria-label="新建设定集"><img src={icon('bx_message-square-add')} alt="" /></button>
           </div>
           <div className="dashboard-carousel">
             <div className="dashboard-row collections-row" ref={collectionsRow} onScroll={(event) => setCollectionIndex(Math.round(event.currentTarget.scrollLeft / 220))}>
@@ -747,7 +747,7 @@ export default function Dashboard() {
                   </button>
                 )
               })}
-              {collections?.length === 0 && <p className="dashboard-empty">No setting collections yet. Create one to begin.</p>}
+              {collections?.length === 0 && <p className="dashboard-empty">还没有设定集，可以新建或随作品自动创建。</p>}
             </div>
             {(collections?.length ?? 0) > 4 && <>
               <button className="carousel-arrow carousel-previous" data-glow type="button" disabled={collectionIndex === 0} onClick={() => moveCarousel(collectionsRow.current, -1, 220, collectionMaxIndex, setCollectionIndex)} aria-label="Show previous setting collections"><img src={icon('akar-icons_arrow-right')} alt="" /></button>
@@ -757,7 +757,7 @@ export default function Dashboard() {
         </section>
 
         {projects === null && !failed && <span className="dashboard-sr-only" role="status">Loading projects…</span>}
-        {failed && <p className="dashboard-load-error notice" role="alert">Projects could not be loaded. Try again.</p>}
+        {failed && <p className="dashboard-load-error notice" role="alert">作品加载失败，请检查网络后刷新。</p>}
 
         <div className={`dashboard-search${searching ? ' is-active' : ''}${searchHovered ? ' is-hovered' : ''}${searchLeaving ? ' is-leaving' : ''}${showResults ? ' has-results' : ''}`}
           onPointerEnter={() => { if (!searching) revealSearch() }}
@@ -775,7 +775,7 @@ export default function Dashboard() {
             else concealSearch()
           }
         }}>
-          {showResults && <div className="search-results" role="region" aria-label="Search results">
+          {showResults && <div className="search-results" role="region" aria-label="搜索结果">
             {matches.map((project) => <button data-glow type="button" key={project.id} onClick={() => setSelected(project)}>{project.title}</button>)}
             {collectionMatches.map((col) => (
               <button
@@ -794,7 +794,7 @@ export default function Dashboard() {
           <div className="search-shell" ref={searchShell} onAnimationEnd={(event) => {
             if (event.target === event.currentTarget && searchHovered && !searchShell.current?.matches(':hover')) setSearchHovered(false)
           }}>
-            <input type="search" value={query} onChange={(event) => setQuery(event.target.value)} aria-label="Search novels" />
+            <input type="search" value={query} onChange={(event) => setQuery(event.target.value)} aria-label="搜索作品" />
             <img src={icon('Vector')} alt="" />
           </div>
         </div>

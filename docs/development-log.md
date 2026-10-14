@@ -9,11 +9,28 @@ Dates use Asia/Tokyo. Target: v0.12.0 desktop personal trial.
 - Green: explicitly request identity encoding, matching the transport's accepted representation. Unexpected compression and oversized responses remain rejected; existing transport cases are retained.
 - Live read-only provider diagnostics confirmed identity negotiation is honored. Live model quality is a separate stage-acceptance item.
 
+## 2026-10-14 — #326 first-chapter review
+
+- Status: implementation and focused verification; PR/latest-head Actions/review pending.
+- Red: the real Docker author smoke and a PostgreSQL HTTP test returned 422 at first-chapter Editor review when no optional context documents existed. Existing tests had seeded those documents.
+- Green: optional review context may be empty while exact prose, approved outline, project/chapter scope and version validation remain mandatory. Empty bound collections preserve their own revision instead of using legacy fallback. The blank-project test now reaches COMPLETED local finalization; all 32 review-agent contract cases pass.
+- Updated the former mandatory-optional-context assertion to require empty context with intact prose/outline identity; cross-project, wrong-kind and evidence checks remain. No migration, version bump or real-model quality claim.
+
 ## 2026-10-14 — #320 remove Qodana
 
 - Status: reviewed and Squash merged through PR #321 at a1b05a0; no release or version bump.
 - Removed the Qodana workflow at the maintainer's explicit request. GitHub Actions ci.yml remains the canonical quality gate; no token or license update is needed.
 - Validation: diff review and Actions run 38515444409 passed, with unrelated product jobs skipped by path filtering. This configuration change does not claim behavioral TDD evidence.
+
+## 2026-10-14 — #309 author capability and status copy
+
+- Status: local implementation and focused verification; PR/latest-head Actions/review pending.
+- Red: no accessible unavailable-settings control, English creation stages, and unwired setting discussion presented as a real Agent. Three behavior tests failed before implementation.
+- Green: unavailable preferences and setting discussion have explicit disabled controls; examples stay in preview mode. Dashboard/forms and creation stages use Chinese author terms, review identities/severity are translated, and local finalization is distinct from an external publication.
+- Validation: 118 affected Dashboard/Studio/setting/navigation cases and the focused Chromium creation/keyboard case pass. Existing test selectors were updated for translated labels. Full gates run in Actions.
+- Docker interaction exposed a stale `stage=Draft` URL after submission. The explicit-route regression failed before the fix; progress now synchronizes the URL and stale route recovery does not display a misleading author warning. All 69 Studio/navigation cases and focused ESLint pass. Remaining review progress text is translated to Chinese.
+- Actions exposed an older Chromium scenario that generated a demo proposal in the formal setting discussion. Updated it to verify the accepted capability boundary: discussion/example actions are disabled, no preview proposal appears and no apply request occurs. The focused Chromium scenario passes; proposal application backend coverage remains independent of this unavailable UI.
+- README distinguishes the desktop delivery scope, future capabilities and deterministic Provider evidence. No model quality or release claim; version unchanged.
 
 ## 2026-10-14 — #306 author creation form
 

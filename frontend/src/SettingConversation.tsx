@@ -83,13 +83,13 @@ export default function SettingConversation({
     count.current = conversation.messages.length
   }, [visible, conversation.messages.length])
   return <section className="setting-conversation" aria-label="设定 Agent 会话" hidden={!visible}>
-    <header><div><h1>设定对话</h1><small>围绕整部作品，持续构思</small></div><button className="setting-example" disabled={disabled} onClick={onExample}>示例回复</button></header>
+    <header><div><h1>设定对话</h1><small>{preview ? '围绕整部作品，持续构思' : '讨论功能准备中'}</small></div><button className="setting-example" disabled={disabled || !preview} onClick={onExample}>示例回复</button></header>
     <div className="setting-conversation-history" ref={history} role="log" aria-label="设定对话记录" tabIndex={0} onScroll={event => {
       if (visible) { position.current = event.currentTarget.scrollTop; onScroll(position.current) }
     }}>
-      {!conversation.messages.length && <div className="setting-conversation-empty"><img src="/ui/studio/shark.svg" alt="" /><h2>从哪里开始？</h2><p>聊角色、地点和规则。确认后的条目会出现在左侧。</p><button disabled={disabled} onClick={onExample}>体验连续创建</button></div>}
+      {!conversation.messages.length && <div className="setting-conversation-empty"><img src="/ui/studio/shark.svg" alt="" /><h2>从哪里开始？</h2><p>{preview ? '聊角色、地点和规则。确认后的条目会出现在左侧。' : '设定讨论尚未接入。请通过左侧直接创建并编辑设定条目。'}</p><button disabled={disabled || !preview} onClick={onExample}>体验连续创建</button></div>}
       {conversation.messages.map(message => <article className={`setting-conversation-message is-${message.role}`} key={message.id}>
-        <small>{message.role === 'user' ? (preview ? '你 · 暂存本机，尚未发送' : '你') : (preview ? '设定 Agent · 示例回复' : '设定 Agent · 变更提案待确认')}</small>
+        <small>{message.role === 'user' ? (preview ? '你 · 暂存本机，尚未发送' : '历史消息 · 未发送') : (preview ? '设定 Agent · 示例回复' : '已有变更提案 · 待作者确认')}</small>
         {message.role === 'assistant' ? <StreamText text={message.text} startedAt={message.createdAt} delay={0} /> : <p>{message.text}</p>}
         {!!message.changes.length && <div className="setting-change-batch">
           <div className="setting-batch-heading"><small>{message.changes.filter(change => change.status === 'pending').length} 条待确认变更</small>{message.changes.some(change => change.status === 'pending') && <button disabled={disabled} onClick={() => onAccept(message.changes.filter(change => change.status === 'pending').map(change => change.id))}>接受本批</button>}</div>
@@ -97,7 +97,7 @@ export default function SettingConversation({
         </div>}
       </article>)}
     </div>
-    <form className="setting-conversation-composer" onSubmit={event => { event.preventDefault(); onSend() }}>
+    <form className="setting-conversation-composer" onSubmit={event => { event.preventDefault(); if (preview && !disabled && canSend) onSend() }}>
       {!!staged.length && <details ref={staging} className="setting-comment-staging" aria-label="暂存评论">
         <summary><span className="setting-staged-colors" aria-hidden="true">{staged.slice(0, 5).map(({ note, comment }) => <i key={`${note.id}:${comment.id}`} style={{ background: comment.color }} />)}</span><span>{staged.length} 条评论<small>待发送 · 可继续补充</small></span><img src="/ui/studio/ooui-collapse.svg" alt="" /></summary>
         <div className="setting-staged-list">{staged.map(({ note, comment }, index) => <div className="setting-staged-comment" key={`${note.id}:${comment.id}`}>
@@ -107,10 +107,10 @@ export default function SettingConversation({
         </div>)}</div>
       </details>}
       {context && <div className="setting-discussion-context"><button type="button" onClick={() => onOpen(context)}>正在讨论 · {context.title}</button><button type="button" aria-label="移除讨论条目" onClick={() => onPatch({ contextId: null })}>×</button></div>}
-      <textarea ref={input} rows={1} aria-label="给设定 Agent 的消息" aria-describedby="setting-chat-status" placeholder={context ? `想怎样完善「${context.title}」？` : '说说你的想法，或接着上次的话题…'} maxLength={6000} value={conversation.draft} disabled={disabled} onChange={event => onPatch({ draft: event.target.value })} onKeyDown={event => {
+      <textarea ref={input} rows={1} aria-label="给设定 Agent 的消息" aria-describedby="setting-chat-status" placeholder={context ? `想怎样完善「${context.title}」？` : '说说你的想法，或接着上次的话题…'} maxLength={6000} value={conversation.draft} disabled={disabled || !preview} onChange={event => onPatch({ draft: event.target.value })} onKeyDown={event => {
         if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing && event.nativeEvent.keyCode !== 229) { event.preventDefault(); onSend() }
       }} />
-      <div className="setting-composer-footer"><small id="setting-chat-status">{preview ? '交互预览 · Agent 尚未接入 · 消息与提案保存在本机' : '设定对话 · 提案需作者确认后方可应用到设定集'}</small><button type="submit" className="setting-chat-send" aria-label={preview ? '发送设定消息（仅预览）' : '发送设定消息'} disabled={disabled || !canSend}><img src="/ui/studio/send.svg" alt="" /></button></div>
+      <div className="setting-composer-footer"><small id="setting-chat-status">{preview ? '交互预览 · Agent 尚未接入 · 消息与提案保存在本机' : '设定讨论尚未接入 · 历史消息只读，不会调用模型'}</small><button type="submit" className="setting-chat-send" aria-label={preview ? '发送设定消息（仅预览）' : '设定讨论（尚未接入）'} disabled={disabled || !preview || !canSend}><img src="/ui/studio/send.svg" alt="" /></button></div>
     </form>
   </section>
 }

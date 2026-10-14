@@ -40,7 +40,8 @@ afterEach(() => { cleanup(); vi.useRealTimers(); vi.restoreAllMocks() })
 
 function openPreview() { return render(<MemoryRouter><Studio /></MemoryRouter>) }
 async function stage(name: string | RegExp) {
-  await act(async () => fireEvent.click(screen.getByRole('button', { name })))
+  const labels: Record<string, string> = { Outline: '大纲', Draft: '正文', Review: '审阅', Reader: '读者评审', Final: '定稿' }
+  await act(async () => fireEvent.click(screen.getByRole('button', { name: typeof name === 'string' ? labels[name] || name : name })))
 }
 
 describe('creation studio', () => {
@@ -48,7 +49,7 @@ describe('creation studio', () => {
     openPreview(); await stage('Draft'); await stage('提交审阅')
     act(() => vi.advanceTimersByTime(4100))
     await stage('Reader')
-    expect(screen.getByRole('button', { name: 'Review' })).toHaveAttribute('aria-current', 'step')
+    expect(screen.getByRole('button', { name: '审阅' })).toHaveAttribute('aria-current', 'step')
     expect(screen.getByText('审阅完成并处理 Block 问题后，才能进入下一阶段。')).toBeInTheDocument()
     act(() => vi.advanceTimersByTime(1800))
     await stage('Reader')
@@ -56,7 +57,7 @@ describe('creation studio', () => {
     expect(screen.getByText('审阅完成并处理 Block 问题后，才能进入下一阶段。')).toBeInTheDocument()
     act(() => vi.advanceTimersByTime(1800))
     expect(screen.queryByText('审阅完成并处理 Block 问题后，才能进入下一阶段。')).not.toBeInTheDocument()
-    expect(screen.getByRole('button', { name: 'Review' })).toHaveAttribute('aria-current', 'step')
+    expect(screen.getByRole('button', { name: '审阅' })).toHaveAttribute('aria-current', 'step')
   })
 
   it('navigates to setting collection via header setting button and preserves returnTo state', async () => {
@@ -253,7 +254,7 @@ describe('creation studio', () => {
       act(() => vi.advanceTimersByTime(4100))
       const groups = [...view.container.querySelectorAll<HTMLDetailsElement>('.studio-review-group')]
       expect(groups).toHaveLength(3)
-      expect(groups.map(group => group.querySelector('summary')?.textContent)).toEqual(['Editor ReviewerSuggestion', 'Chief ReviewerWarning', 'Lore ReviewerBlock'])
+      expect(groups.map(group => group.querySelector('summary')?.textContent)).toEqual(['编辑审阅建议', '主编审阅需确认', '设定一致性审阅需修改'])
       const lore = groups[2], editor = groups[0]
       const block = within(lore).getByRole('checkbox', { name: '交给 Agent 修改：时间线需要统一' })
       expect(block).toBeChecked(); expect(block).toBeDisabled()
@@ -266,8 +267,8 @@ describe('creation studio', () => {
       expect(lore.querySelector('[data-motion-control]')).toBeNull()
       await stage('修改所选 2 项并重新审阅')
       act(() => vi.advanceTimersByTime(4100))
-      expect(view.container.querySelector('.studio-review-group summary')).toHaveTextContent('Editor ReviewerPASS')
-      expect([...view.container.querySelectorAll('.studio-review-group summary')][2]).toHaveTextContent('Lore ReviewerWarning')
+      expect(view.container.querySelector('.studio-review-group summary')).toHaveTextContent('编辑审阅通过')
+      expect([...view.container.querySelectorAll('.studio-review-group summary')][2]).toHaveTextContent('设定一致性审阅需确认')
     } finally { previewIssues.pop() }
   })
   it('keeps chapter status independent from selection and removes trailing status text', async () => {
@@ -570,7 +571,7 @@ describe('creation studio', () => {
     await stage('Draft'); await stage('提交审阅')
     act(() => vi.advanceTimersByTime(1450))
     expect(screen.queryByLabelText('审阅报告')).not.toBeInTheDocument()
-    expect(screen.getByText('Editor Reviewer 完成审阅')).toBeInTheDocument()
+    expect(screen.getByText('编辑审阅 完成审阅')).toBeInTheDocument()
     fireEvent.click(screen.getByRole('button', { name: '展开章节侧边栏' }))
     await stage(/第9话.*重逢/)
     expect(screen.getByRole('textbox', { name: '章节正文' })).toHaveAttribute('readonly')
@@ -598,7 +599,7 @@ describe('creation studio', () => {
     expect(screen.getByRole('dialog')).toBeInTheDocument()
     await stage('确认发布')
     expect(screen.getByRole('textbox', { name: '章节正文' })).toHaveAttribute('readonly')
-    expect(screen.getByRole('button', { name: 'Draft' })).toBeDisabled()
+    expect(screen.getByRole('button', { name: '正文' })).toBeDisabled()
   })
 
   it('supports outline choices and author-observer reader invitations without chat input', async () => {

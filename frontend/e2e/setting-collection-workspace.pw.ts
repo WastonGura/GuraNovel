@@ -224,74 +224,22 @@ test.describe('Setting Collection Standalone Workspace Chromium E2E', () => {
     await expect(page.getByText('用户正在编辑的重要未保存设定。')).toBeVisible()
   })
 
-  test('P1 Proposal Loop: accepting proposal applies changes and blocks on conflict', async ({ page }) => {
-    let proposalApplied = false
-    let returnProposalConflict = false
-
+  test('formal discussion makes unavailable actions explicit and never offers preview proposals', async ({ page }) => {
+    let applied = false
     await page.route(`**/api/v1/setting-collections/${collectionId}`, route => json(route, mockCollection))
     await page.route(`**/api/v1/setting-collections/${collectionId}/projects`, route => json(route, mockProjects))
     await page.route(`**/api/v1/setting-collections/${collectionId}/documents`, route => json(route, mockDocs))
     await page.route(`**/api/v1/documents/${docId}/content`, route => json(route, {
-      document_id: docId,
-      version_id: versionId,
-      content: '海滨城港口。',
+      document_id: docId, version_id: versionId, content: '海滨城港口。',
     }))
-
     await page.route(`**/api/v1/setting-collections/${collectionId}/proposals/apply`, route => {
-      if (returnProposalConflict) {
-        return route.fulfill({
-          status: 409,
-          contentType: 'application/json',
-          body: JSON.stringify({ detail: 'Proposal conflict: base version outdated' }),
-        })
-      }
-      proposalApplied = true
-      return json(route, {
-        id: docId,
-        project_id: null,
-        setting_collection_id: collectionId,
-        chapter_id: null,
-        type: 'character_profile',
-        title: '海滨城',
-        path: 'setting/haibin.md',
-        current_version_id: 'v-applied-3333',
-        current_version: null,
-        metadata: { category: 'setting' },
-        created_at: '2026-09-18T00:00:00Z',
-        updated_at: '2026-09-18T00:00:00Z',
-      })
+      applied = true
+      return json(route, {})
     })
-
-    // Open workspace in chat mode
     await page.goto(`/setting-collections/${collectionId}?mode=chat`)
-
-    // Trigger example reply to generate a change proposal
-    const exampleBtn = page.locator('button.setting-example')
-    await expect(exampleBtn).toBeVisible()
-    await exampleBtn.click()
-
-    // Verify pending change batch heading appears
-    await expect(page.locator('.setting-batch-heading')).toBeVisible()
-
-    // Expand change card to see details
-    const changeCard = page.locator('.setting-change').first()
-    await expect(changeCard).toBeVisible()
-
-    // Test conflict first
-    returnProposalConflict = true
-    const acceptBtn = changeCard.getByRole('button', { name: '接受此条' })
-    await acceptBtn.click()
-
-    // Verify conflict banner appears
-    await expect(page.locator('.setting-conflict-banner')).toBeVisible()
-    expect(proposalApplied).toBe(false)
-
-    // Now allow proposal to succeed
-    returnProposalConflict = false
-    await acceptBtn.click()
-
-    // Verify apply endpoint was called and card changes to accepted
-    await expect(page.locator('.setting-change.is-accepted')).toBeVisible()
-    expect(proposalApplied).toBe(true)
+    await expect(page.locator('button.setting-example')).toBeDisabled()
+    await expect(page.locator('#setting-chat-status')).toContainText('设定讨论尚未接入')
+    await expect(page.locator('.setting-change')).toHaveCount(0)
+    expect(applied).toBe(false)
   })
 })

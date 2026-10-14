@@ -288,13 +288,12 @@ class SettingContextResolver:
             raise NotFoundError("Project not found.")
 
         if project.setting_collection_id is not None:
-            collection_bundle = await self.resolve_for_collection(
+            return await self.resolve_for_collection(
                 project.setting_collection_id, allowed_types=allowed_types
             )
-            if collection_bundle.documents:
-                return collection_bundle
 
-        # Legacy fallback when project has no setting_collection_id bound or collection has no documents
+        # A bound empty collection is authoritative, including its exact revision.
+        # Only projects without a collection use legacy project-owned documents.
         target_collection_id = project.setting_collection_id or project_id
         types_to_query = (
             [t.value if isinstance(t, DocumentType) else str(t) for t in allowed_types]
