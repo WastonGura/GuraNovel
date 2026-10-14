@@ -1,10 +1,12 @@
 """Exact finding selections shared by HTTP, provider input and recovery evidence."""
 
 import json
+
 from uuid import UUID
 
 from pydantic import Field, field_validator, model_validator
 
+from app.core.chapter_limits import MAX_CHAPTER_SEGMENTS
 from app.agents.chapter_writer_contracts import _StrictChapterModel, _canonical_uuid, SelectedReviewFinding
 from app.agents.chapter_review_contracts import ChapterReviewFinding
 from app.services.chapter_production_v2_contracts import ChapterProductionV2ValidationError
@@ -53,7 +55,7 @@ class ReviewRevisionIntent(_StrictChapterModel):
     checkpoint_id: UUID
     content_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
     report_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
-    target_segment_ids: tuple[UUID, ...] = Field(min_length=1, max_length=64)
+    target_segment_ids: tuple[UUID, ...] = Field(min_length=1, max_length=MAX_CHAPTER_SEGMENTS)
     result_version_id: UUID | None = None
 
     @field_validator("actor_user_id", "checkpoint_id", "result_version_id", mode="before")

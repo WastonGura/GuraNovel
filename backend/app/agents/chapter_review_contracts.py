@@ -24,6 +24,7 @@ from pydantic import (
     model_validator,
 )
 
+from app.core.chapter_limits import MAX_CHAPTER_SEGMENTS
 from app.llm.errors import ProviderInvalidOutputError
 
 
@@ -154,7 +155,7 @@ class ChapterReviewTarget(_StrictReviewModel):
     chapter_id: UUID
     document_id: UUID
     version_id: UUID
-    segments: tuple[ReviewSegmentSnapshot, ...] = Field(min_length=1, max_length=64)
+    segments: tuple[ReviewSegmentSnapshot, ...] = Field(min_length=1, max_length=MAX_CHAPTER_SEGMENTS)
 
     @model_validator(mode="after")
     def canonical_segments(self) -> Self:

@@ -6,6 +6,7 @@ from uuid import UUID
 from sqlalchemy import func, or_, select
 from sqlalchemy.orm import selectinload
 
+from app.core.chapter_limits import MAX_CHAPTER_SEGMENTS
 from app.models import (
     ActionRequest,
     ActionRequestStatus,
@@ -258,7 +259,7 @@ def _validate_persist_inputs(
         or any(not _valid_uuid(value) for value in plan.report_ids)
         or not _valid_hash(plan.report_input_hash)
         or type(plan.target_segment_ids) is not tuple
-        or not 1 <= len(plan.target_segment_ids) <= 64
+        or not 1 <= len(plan.target_segment_ids) <= MAX_CHAPTER_SEGMENTS
         or any(not _valid_uuid(value) for value in plan.target_segment_ids)
     ):
         raise _invalid() from None

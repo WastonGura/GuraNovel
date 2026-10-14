@@ -229,7 +229,7 @@ def test_provider_attempt_metadata_rejects_unbounded_or_malformed_identity() -> 
     malformed["source_version_id"] = "not-a-uuid"
     assert not ChapterProductionV2Service._attempt_metadata_is_valid(malformed)
     oversized = dict(valid)
-    oversized["target_segment_ids"] = [str(uuid4()) for _ in range(65)]
+    oversized["target_segment_ids"] = [str(uuid4()) for _ in range(1025)]
     assert not ChapterProductionV2Service._attempt_metadata_is_valid(oversized)
     wrong_shape = dict(valid)
     wrong_shape["unexpected"] = "secret"

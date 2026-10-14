@@ -16,6 +16,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
+from app.core.chapter_limits import MAX_CHAPTER_SEGMENTS
 from app.agents import CandidateChapterOutput, RevisionAgent, UserFeedbackRevisionRequest
 from app.documents.chapter_segments import ChapterSegmentMap
 from app.llm import ProviderInvalidOutputError, ProviderTimeoutError
@@ -432,7 +433,7 @@ class FeedbackRevisionHandoff:
             project_id, chapter_id, workflow_run_id, action_request_id, actor_user_id
         )
         target_segment_ids = self.service._validated_uuid_sequence(  # type: ignore[attr-defined]
-            target_segment_ids, maximum=64
+            target_segment_ids, maximum=MAX_CHAPTER_SEGMENTS
         )
         feedback = self.service._validated_feedback(feedback)  # type: ignore[attr-defined]
         scope = _Scope(

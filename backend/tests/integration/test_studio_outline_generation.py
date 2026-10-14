@@ -79,7 +79,8 @@ async def test_uncertain_outline_request_is_never_blindly_reinvoked(client, asyn
     assert len(calls) == 2
 
 
-async def test_generated_outline_starts_real_v2_pipeline_only_after_author_approval(v2_client, async_session, tmp_path):
+@pytest.mark.parametrize("long_revision", [False, True])
+async def test_generated_outline_starts_real_v2_pipeline_only_after_author_approval(v2_client, async_session, tmp_path, long_revision):
     from app.api.deps import get_project_workspace
     from app.workspace import ProjectWorkspace
     client = v2_client
@@ -111,7 +112,34 @@ async def test_generated_outline_starts_real_v2_pipeline_only_after_author_appro
     assert draft.status_code == 200
     assert draft.json()["content"].strip()
     run_url = f"{production}/{started.json()['workflow_run_id']}"
-    accepted = await client.post(f"{run_url}/actions/{started.json()['action_request_id']}/resolve", json={
+    action_id = started.json()['action_request_id']
+    if long_revision:
+        content = "\n\n".join(f"林澈核对第 {index} 份档案，留下能够追溯的证据。" for index in range(104)) + "\n"
+        saved = await client.put(base.removesuffix("/outline") + "/draft/content", json={
+            "content": content, "expected_current_version_id": draft.json()["version_id"]})
+        assert saved.status_code == 200, saved.text
+        version_id = saved.json()["id"]
+        feedback_url = base.removesuffix("/outline") + "/feedback/draft"
+        written = await client.put(feedback_url, json={"request_id": str(uuid4()),
+            "expected_current_version_id": version_id, "expected_revision": 0, "comments": [], "requirements": "逐段核对证据，保留所有段落。"})
+        assert written.status_code == 200, written.text
+        submission = await client.post(feedback_url + "/submissions", json={"request_id": str(uuid4()),
+            "expected_current_version_id": version_id, "expected_revision": written.json()["revision"], "comment_ids": []})
+        assert submission.status_code == 200, submission.text
+        payload = {"submission_id": submission.json()["id"], "document_id": started.json()["draft_document_id"],
+            "version_id": version_id, "action_request_id": action_id}
+        revised = await client.post(run_url + "/feedback-revisions", json=payload)
+        assert revised.status_code == 200, revised.text
+        assert (await client.post(run_url + "/feedback-revisions", json=payload)).json() == revised.json()
+        draft = await client.get(f"/api/v1/documents/{started.json()['draft_document_id']}/content")
+        assert draft.json()["version_id"] == revised.json()["draft_version_id"] != version_id
+        from app.services import DocumentService
+        segment_map = await DocumentService(async_session).derive_chapter_segment_map(
+            project_id=UUID(project.json()["id"]), chapter_id=UUID(chapter.json()["id"]),
+            document_id=UUID(started.json()["draft_document_id"]), version_id=UUID(draft.json()["version_id"]))
+        assert len(segment_map.segments) == 208
+        action_id = revised.json()["action_request_id"]
+    accepted = await client.post(f"{run_url}/actions/{action_id}/resolve", json={
         "decision": "accept", "expected_current_version_id": draft.json()["version_id"]})
     assert accepted.status_code == 200, accepted.text
     for _ in range(5):

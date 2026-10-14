@@ -20,6 +20,7 @@ from pydantic import (
     model_validator,
 )
 
+from app.core.chapter_limits import MAX_CHAPTER_SEGMENTS
 from app.llm.errors import ProviderInvalidOutputError
 from app.agents.chapter_review_contracts import ChapterReviewFinding
 
@@ -143,7 +144,7 @@ class SourceDraftReference(_StrictChapterModel):
     chapter_id: UUID
     document_id: UUID
     version_id: UUID
-    segments: tuple[SourceDraftSegment, ...] = Field(min_length=1, max_length=64)
+    segments: tuple[SourceDraftSegment, ...] = Field(min_length=1, max_length=MAX_CHAPTER_SEGMENTS)
 
     @model_validator(mode="after")
     def unique_ordered_segments(self) -> Self:
@@ -296,8 +297,9 @@ class SegmentDraftRequest(_DraftRequest):
 
 
 class _RevisionRequest(_DraftRequest):
+    allowed_segments: tuple[AllowedChapterSegment, ...] = Field(min_length=1, max_length=MAX_CHAPTER_SEGMENTS)
     source_draft: SourceDraftReference
-    target_segment_ids: tuple[UUID, ...] = Field(min_length=1, max_length=64)
+    target_segment_ids: tuple[UUID, ...] = Field(min_length=1, max_length=MAX_CHAPTER_SEGMENTS)
 
     @model_validator(mode="after")
     def valid_revision_bindings(self) -> Self:
@@ -450,7 +452,7 @@ class CandidateChapterOutput(_StrictChapterModel):
     source_draft_document_id: UUID | None = None
     source_draft_version_id: UUID | None = None
     complete_chapter: bool
-    segments: tuple[CandidateChapterSegment, ...] = Field(min_length=1, max_length=64)
+    segments: tuple[CandidateChapterSegment, ...] = Field(min_length=1, max_length=MAX_CHAPTER_SEGMENTS)
     summary: str = Field(min_length=1, max_length=4000)
     self_check: CandidateSelfCheck
     uncertainty_markers: tuple[str, ...] = Field(default=(), max_length=16)
