@@ -54,6 +54,58 @@ async def create_setting_collection(
 
 @pytest.mark.integration
 @pytest.mark.anyio
+async def test_setting_delete_undo_retains_identity_content_and_versions(
+    client: httpx.AsyncClient, async_session: AsyncSession, tmp_path: Path
+) -> None:
+    col = await create_setting_collection(async_session, tmp_path)
+    created = await client.post(f"/api/v1/setting-collections/{col.id}/documents", json={
+        "type": "world_overview", "title": "Keep history", "path": "world/undo.md",
+        "content": "original setting",
+    })
+    assert created.status_code == 201, created.text
+    document = created.json()
+    url = f"/api/v1/documents/{document['id']}"
+    versions = (await client.get(f"{url}/versions")).json()
+    assert (await client.delete(url)).status_code == 204
+    assert (await client.delete(url)).status_code == 204
+    assert (await client.get(url)).status_code == 404
+    assert (await client.put(f"{url}/content", json={"content": "must not write",
+        "expected_current_version_id": document["current_version_id"]})).status_code == 404
+    listed = (await client.get(f"/api/v1/setting-collections/{col.id}/documents")).json()
+    assert all(item["id"] != document["id"] for item in listed)
+    restored = await client.post(f"{url}/undelete")
+    assert restored.status_code == 200, restored.text
+    assert restored.json()["id"] == document["id"]
+    assert restored.json()["current_version_id"] == document["current_version_id"]
+    assert (await client.get(f"{url}/content")).json()["content"] == "original setting"
+    assert (await client.get(f"{url}/versions")).json() == versions
+    assert (await client.post(f"{url}/undelete")).status_code == 200
+
+
+@pytest.mark.integration
+@pytest.mark.anyio
+async def test_setting_restore_respects_owner_archive_and_trash_listing(
+    client: httpx.AsyncClient, async_session: AsyncSession, tmp_path: Path,
+) -> None:
+    owner = await create_test_user(async_session, "trash-owner")
+    other = await create_test_user(async_session, "trash-other")
+    col = await create_setting_collection(async_session, tmp_path, owner_id=owner.id)
+    headers = {"x-actor-user-id": str(owner.id)}
+    created = await client.post(f"/api/v1/setting-collections/{col.id}/documents",
+        headers=headers, json={"type": "world_overview", "title": "Trash",
+                              "path": "world/trash.md", "content": "kept"})
+    assert created.status_code == 201, created.text
+    url = f"/api/v1/documents/{created.json()['id']}"
+    assert (await client.delete(url, headers=headers)).status_code == 204
+    trash = (await client.get(f"/api/v1/setting-collections/{col.id}/documents?deleted=true", headers=headers)).json()
+    assert [item["id"] for item in trash] == [created.json()["id"]]
+    assert (await client.post(f"{url}/undelete", headers={"x-actor-user-id": str(other.id)})).status_code == 403
+    await client.post(f"/api/v1/setting-collections/{col.id}/archive", headers=headers)
+    assert (await client.post(f"{url}/undelete", headers=headers)).status_code == 409
+
+
+@pytest.mark.integration
+@pytest.mark.anyio
 async def test_patch_and_delete_setting_collection_document(
     client: httpx.AsyncClient, async_session: AsyncSession, tmp_path: Path
 ) -> None:

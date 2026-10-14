@@ -294,6 +294,7 @@ class Document(TimestampMixin, Base):
     title: Mapped[str | None] = mapped_column(Text)
     path: Mapped[str] = mapped_column(Text, nullable=False)
     current_version_id: Mapped[UUID | None] = mapped_column(PGUUID(as_uuid=True), ForeignKey("document_versions.id", name="fk_documents_current_version", ondelete="SET NULL", use_alter=True))
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     metadata_: Mapped[dict] = mapped_column("metadata", JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb"))
 
     project: Mapped[Project | None] = relationship(back_populates="documents")

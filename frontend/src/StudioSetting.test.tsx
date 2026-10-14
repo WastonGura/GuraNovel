@@ -23,6 +23,50 @@ function marquee(list: HTMLElement, first: number, last = first) {
 }
 
 describe('setting notes and graph', () => {
+  it('removes only server-confirmed items in a partially failed batch', async () => {
+    const notes = seed.map(note => ({ ...note, category: 'setting' as const }))
+    render(<StudioSetting preview={false} readOnly={false} backendNotes={notes}
+      onDeleteNotes={vi.fn().mockResolvedValue(['a'])} />)
+    const list = screen.getByLabelText('设定条目', { exact: true })
+    marquee(list, 0, 1)
+    fireEvent.contextMenu(within(list).getByRole('button', { name: '甲' }))
+    fireEvent.click(screen.getByRole('menuitem', { name: '删除 2 个条目' }))
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: '确认删除' })) })
+    expect(within(list).queryByRole('button', { name: '甲' })).not.toBeInTheDocument()
+    expect(within(list).getByRole('button', { name: '海滨城' })).toBeInTheDocument()
+    expect(screen.getByRole('alert')).toHaveTextContent('部分删除失败')
+  })
+
+  it('waits for server undo and keeps the undo action when restore fails', async () => {
+    const restore = vi.fn().mockResolvedValueOnce([]).mockResolvedValueOnce(['a'])
+    render(<StudioSetting preview={false} readOnly={false} backendNotes={seed}
+      onDeleteNotes={vi.fn().mockResolvedValue(['a'])} onRestoreNotes={restore} />)
+    const list = screen.getByLabelText('设定条目', { exact: true })
+    fireEvent.contextMenu(within(list).getByRole('button', { name: '甲' }))
+    fireEvent.click(screen.getByRole('menuitem', { name: '删除条目' }))
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: '确认删除' })) })
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: '撤销删除' })) })
+    expect(restore).toHaveBeenCalledWith(['a'])
+    expect(within(list).queryByRole('button', { name: '甲' })).not.toBeInTheDocument()
+    expect(screen.getByRole('alert')).toHaveTextContent('恢复失败')
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: '撤销删除' })) })
+    expect(within(list).getByRole('button', { name: '甲' })).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: '撤销删除' })).not.toBeInTheDocument()
+  })
+
+  it('retains server-backed notes when deletion fails instead of offering a false undo', async () => {
+    const onDeleteNotes = vi.fn().mockResolvedValue(false)
+    render(<StudioSetting preview={false} readOnly={false} backendNotes={seed} onDeleteNotes={onDeleteNotes} />)
+    const list = screen.getByLabelText('设定条目', { exact: true })
+    fireEvent.contextMenu(within(list).getByRole('button', { name: '甲' }))
+    fireEvent.click(screen.getByRole('menuitem', { name: '删除条目' }))
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: '确认删除' })) })
+    expect(onDeleteNotes).toHaveBeenCalledWith(['a'])
+    expect(within(list).getByRole('button', { name: '甲' })).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: '撤销删除' })).not.toBeInTheDocument()
+    expect(screen.getByRole('alert')).toHaveTextContent('删除失败')
+  })
+
   it('copies the context-menu target or selected names and reports clipboard failures without changing notes', async () => {
     const original = Object.getOwnPropertyDescriptor(navigator, 'clipboard'), writeText = vi.fn().mockResolvedValue(undefined)
     Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText } })

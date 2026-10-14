@@ -2,6 +2,14 @@
 
 Dates use Asia/Tokyo. Target: v0.12.0 desktop personal trial.
 
+## 2026-10-14 — #298 durable setting deletion and undo
+
+- Status: local implementation; review and latest-head Actions pending. New nullable document tombstone migration 0012 preserves content/version/reference identities; archived and foreign-owner restoration is rejected. A deleted-documents listing and idempotent undelete API support recovery after reload/restart.
+- Red: PostgreSQL test failed because a repeated delete returned 404; UI tests failed because failed deletions removed notes and undo never called the server.
+- Green: four targeted PostgreSQL cases pass; 42 affected setting component tests pass, including failed deletes, partial batch success, failed restore and retry. Python commands use uv against a disposable `_test` database.
+- Frontend waits for confirmed per-item results, flushes content before delete, retains failed items and keeps failed undo actions retryable. Immutable task version reads remain available; deleted documents are excluded from new setting context.
+- Full CI remains delegated to GitHub Actions. Qodana is currently blocked by the existing cloud license/token rejection; no merge bypass is authorized or performed. No version bump.
+
 ## 2026-10-14 — #305 unified frontend
 
 - Status: implemented locally; PR and latest-head Actions verification pending.
