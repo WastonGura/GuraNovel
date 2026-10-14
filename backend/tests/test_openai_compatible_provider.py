@@ -65,6 +65,21 @@ def raw_response(
 
 
 @pytest.mark.anyio
+async def test_transport_negotiates_uncompressed_output_with_compression_capable_provider() -> None:
+    payload = json.dumps({"choices": [{"message": {"content": '{"answer":"ok"}'}}]}).encode()
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        if request.headers.get("Accept-Encoding") == "identity":
+            return raw_response(payload)
+        return raw_response(gzip.compress(payload), headers={"Content-Encoding": "gzip"})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+        transport = OpenAICompatibleStructuredOutputTransport(base_url="https://provider.test/v1", api_key="fixture-key", client=client)
+        response = await transport.call(transport_request(max_output_bytes=1024))
+    assert response.payload == '{"answer":"ok"}'
+
+
+@pytest.mark.anyio
 async def test_owned_client_ignores_ambient_socks_proxy_configuration(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
