@@ -550,6 +550,10 @@ def validate_candidate_chapter_output(
         expected = allowed.get(segment.segment_id)
         if expected is None or (segment.index, segment.title) != (expected.index, expected.title):
             raise ProviderInvalidOutputError() from None
+    if isinstance(request, UserFeedbackRevisionRequest):
+        source = {item.segment_id: item.content for item in request.source_draft.segments}
+        if all(segment.content == source[segment.segment_id] for segment in result.segments):
+            raise ProviderInvalidOutputError() from None
     return result
 
 

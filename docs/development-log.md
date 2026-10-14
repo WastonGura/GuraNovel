@@ -2,6 +2,13 @@
 
 Dates use Asia/Tokyo. Target: v0.12.0 desktop personal trial.
 
+## 2026-10-14 — #336 reject unchanged feedback revisions
+
+- Status: implementation; PR/latest-head Actions/review and real quality revalidation pending.
+- Real-model evidence: deepseek-flash with reasoning_effort=none returned 104 unchanged paragraphs in 34.01 s (18731 input / 10305 output tokens), despite a valid new candidate identity. This sample failed revision quality and is retained as failure evidence.
+- Red: a PostgreSQL provider fixture returning all original targeted prose was incorrectly accepted with HTTP 200 and a new draft version. Green: unchanged user-feedback candidates are rejected as invalid provider output before persistence, leaving the original version and a retryable FAILED task. The same immutable submission can be retried, then replayed without a third provider call. Both timeout and unchanged-output integration cases pass.
+- Prompt profile user_feedback_revision advances from v2 to v3 and explicitly distinguishes preserving identity/unrequested prose from performing the requested edits. Text change alone is not a semantic quality guarantee; actual model revalidation remains required. No app version bump or migration.
+
 ## 2026-10-14 — #334 exact outline context and revision failure recovery
 
 - Status: implemented; PR/latest-head Actions/review pending. No migration or version bump.
