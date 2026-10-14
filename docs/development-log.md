@@ -43,6 +43,7 @@ Dates use Asia/Tokyo. Target: v0.12.0 desktop personal trial.
 - Status: CI implementation; PR/latest-head Actions pending. No version bump.
 - Version check Red: five independent manifest/API/lock mismatch injections were incorrectly accepted; Green: mismatches now fail and the six current version declarations agree. Focused stdlib tests pass using uv.
 - Added a Docker build/health/real-HTTP author workflow gate through the frontend proxy, including persisted ideas, exactly three candidates, replay identities, selection, approval, prose save, review and idempotent local finalization. Both new jobs feed All Checks Passed.
+- Branch pushes no longer duplicate their PR checks: pull requests and main pushes remain gated, with manual dispatch available. This reduces queue pressure during stacked PR delivery without skipping any PR's latest-head validation.
 - Local clean-checkout Docker build at 7e31742 passed; services became healthy. Actual API acceptance exposed a previously uncovered 422 when reviewing a blank project's first chapter. This is a product gap to fix separately, not a reason to weaken the smoke gate. Deterministic Provider evidence is separate from real-model quality.
 
 ## 2026-10-14 — #326 first-chapter review
