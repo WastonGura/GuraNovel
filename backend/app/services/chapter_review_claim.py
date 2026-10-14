@@ -465,8 +465,6 @@ async def review_context_snapshots(
                 content=content.strip(),
             )
         )
-    if not snapshots:
-        raise _invalid()
     return tuple(snapshots)
 
 

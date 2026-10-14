@@ -261,10 +261,12 @@ def test_requests_reject_cross_project_refs_duplicate_segments_and_wrong_context
 
 
 @pytest.mark.parametrize("factory", [editor_request, chief_request, lore_request])
-def test_requests_require_mode_specific_context(factory: object) -> None:
+def test_requests_allow_missing_optional_context_without_fabricating_documents(factory: object) -> None:
     request = factory()  # type: ignore[operator]
-    with pytest.raises(ValidationError):
-        type(request).model_validate({**request.model_dump(), "contexts": []})
+    validated = type(request).model_validate({**request.model_dump(), "contexts": []})
+    assert validated.contexts == ()
+    assert validated.target == request.target
+    assert validated.approved_outline == request.approved_outline
 
 
 def test_requests_reject_oversized_utf8_envelope_without_echoing_content() -> None:
