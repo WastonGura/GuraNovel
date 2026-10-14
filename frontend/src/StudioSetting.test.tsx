@@ -23,6 +23,11 @@ function marquee(list: HTMLElement, first: number, last = first) {
 }
 
 describe('setting notes and graph', () => {
+  it('does not present an unwired setting conversation as a real Agent', () => {
+    render(<StudioSetting preview={false} backendNotes={seed} readOnly={false} onSaveNoteContent={vi.fn()} initialView={{ mode: 'chat' }} />)
+    expect(screen.getByText('设定讨论尚未接入 · 历史消息只读，不会调用模型')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '设定讨论（尚未接入）' })).toBeDisabled()
+  })
   it('retains an orphaned comment when its quoted setting text is deleted', async () => {
     const comment = { id: 'c', start: 0, end: 1, quote: '住', text: '保留此意见', color: '#8d9bff' }
     const save = vi.fn().mockResolvedValue({ versionId: 'saved-v2' })

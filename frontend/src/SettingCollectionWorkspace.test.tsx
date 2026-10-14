@@ -357,7 +357,7 @@ describe('SettingCollectionWorkspace', () => {
     expect(screen.getByText('天穹纪元设定集')).toBeInTheDocument()
   })
 
-  it('handles applying proposals through applySettingProposal', async () => {
+  it('does not manufacture example proposals in the formal workspace', async () => {
     mockedApplySettingProposal.mockResolvedValueOnce({
       id: 'doc-char-1',
       project_id: null,
@@ -379,24 +379,13 @@ describe('SettingCollectionWorkspace', () => {
       expect(screen.getByText('天穹纪元设定集')).toBeInTheDocument()
     })
 
-    // Click example reply
     const exampleBtn = screen.getByRole('button', { name: '示例回复' })
+    expect(exampleBtn).toBeDisabled()
     await act(async () => {
       fireEvent.click(exampleBtn)
     })
-
-    // Accept change proposal
-    const acceptBtn = screen.getAllByRole('button', { name: '接受此条' })[0]
-    await act(async () => {
-      fireEvent.click(acceptBtn)
-    })
-
-    expect(mockedApplySettingProposal).toHaveBeenCalledWith(
-      'col-123',
-      expect.objectContaining({
-        setting_collection_id: 'col-123',
-        status: 'pending',
-      })
-    )
+    expect(screen.queryByRole('button', { name: '接受此条' })).not.toBeInTheDocument()
+    expect(mockedApplySettingProposal).not.toHaveBeenCalled()
+    expect(screen.getByText('设定讨论尚未接入 · 历史消息只读，不会调用模型')).toBeInTheDocument()
   })
 })

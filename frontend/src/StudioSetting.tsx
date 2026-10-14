@@ -746,7 +746,7 @@ export default function StudioSetting({
             return <button key={title} onClick={() => openTitle(title)}>{title}<small>{note ? categoryNames[note.category] : '未解析'}</small></button>
           })}</section>}
         </div>
-      </> : <div className="setting-empty"><h1>{categoryNames[category]}</h1><p>{preview ? '从一段对话开始，也可以直接新建条目。' : '作品设定正在接入，当前不会写入项目数据。'}</p><button disabled={readOnly} onClick={() => showMode('chat')}>新建内容</button></div>}
+      </> : <div className="setting-empty"><h1>{categoryNames[category]}</h1><p>{preview ? '从一段对话开始，也可以直接新建条目。' : '从左侧新建条目开始，编辑后自动保存到设定集。设定讨论将在后续版本提供。'}</p><button disabled={readOnly || !preview} onClick={() => showMode('chat')}>{preview ? '新建内容' : '设定讨论（尚未接入）'}</button></div>}
       {error && <p className="setting-error" role="alert">{error}</p>}
     </div>
   </div>
