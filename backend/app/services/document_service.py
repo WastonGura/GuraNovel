@@ -6,7 +6,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 import re
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -410,12 +410,15 @@ class DocumentService:
         workflow_run_id: UUID | None = None,
         change_summary: str | None = None,
         version_metadata: dict[str, object] | None = None,
+        setting_comments: list[dict] | None = None,
     ) -> DocumentVersion:
         version_metadata = self._validated_version_metadata(version_metadata)
         document = await self._locked_document(document_id)
         self._ensure_document_is_mutable(document)
         self._ensure_actor_permission(document, actor_user_id)
         self._ensure_expected_current_version(document, expected_current_version_id)
+        if setting_comments is not None and document.setting_collection_id is None:
+            raise ConflictError("Setting comments require a setting collection document.")
         setting_collection = getattr(document, "setting_collection", None)
         if setting_collection is not None:
             setting_collection.revision += 1
@@ -433,6 +436,12 @@ class DocumentService:
         )
         document.current_version = version
         self.session.add(version)
+        if setting_comments is not None:
+            if version.id is None:
+                version.id = uuid4()
+            document.metadata_ = {**(document.metadata_ or {}), "comments": setting_comments,
+                                  "comments_source_version_id": str(version.id)}
+            version.metadata_ = {**(version.metadata_ or {}), "setting_comments": setting_comments}
         await self._commit_with_file_writes(
             self._store_for(document), ((document.path, content), (version.snapshot_path, content))
         )

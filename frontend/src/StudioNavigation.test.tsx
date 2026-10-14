@@ -3,11 +3,11 @@ import { Link, MemoryRouter, Route, Routes, useLocation, useNavigate } from 'rea
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import Studio from './Studio'
 import { draftRecoveryCopies } from './useDraftAutosave'
-import { writeStudioDraft } from './api/client'
+import { writeStudioDraft, readChapterIdea, writeChapterIdea } from './api/client'
 import { ApiError, approveStudioOutline, createChapter, getProject, listChapters, readDocumentContent, readStudioFeedback, submitStudioFeedback, writeDocument, writeStudioFeedback, type Chapter, type Project, type StudioFeedback } from './api/client'
 import { getChapterProductionRun, getChapterProductionReviewReport, listChapterProductionRuns, resolveChapterProductionAction, triggerChapterReview, resumeChapterProduction, startChapterProductionV2, requestStudioFeedbackRevision, type ChapterProductionState, type ChapterProductionReviewReport } from './api/chapterProductionV2Client'
 
-vi.mock('./api/client', async original => ({ ...await original<typeof import('./api/client')>(), writeStudioDraft: vi.fn(), approveStudioOutline: vi.fn(), createChapter: vi.fn(), getProject: vi.fn(), listChapters: vi.fn(), readDocumentContent: vi.fn(), readStudioFeedback: vi.fn(), submitStudioFeedback: vi.fn(), writeDocument: vi.fn(), writeStudioFeedback: vi.fn() }))
+vi.mock('./api/client', async original => ({ ...await original<typeof import('./api/client')>(), readChapterIdea: vi.fn(), writeChapterIdea: vi.fn(), writeStudioDraft: vi.fn(), approveStudioOutline: vi.fn(), createChapter: vi.fn(), getProject: vi.fn(), listChapters: vi.fn(), readDocumentContent: vi.fn(), readStudioFeedback: vi.fn(), submitStudioFeedback: vi.fn(), writeDocument: vi.fn(), writeStudioFeedback: vi.fn() }))
 vi.mock('./api/chapterProductionV2Client', async original => ({ ...await original<typeof import('./api/chapterProductionV2Client')>(), getChapterProductionRun: vi.fn(), getChapterProductionReviewReport: vi.fn(), listChapterProductionRuns: vi.fn(), resolveChapterProductionAction: vi.fn(), triggerChapterReview: vi.fn(), resumeChapterProduction: vi.fn(), startChapterProductionV2: vi.fn(), requestStudioFeedbackRevision: vi.fn() }))
 const project = (id: string) => ({ id, title: `Novel ${id}`, setting_collection_id: `sc-${id}`, metadata: {} }) as Project
 const chapter = (id: string, number = 1) => ({ id, title: `Chapter ${id}`, chapter_number: number, metadata: {}, current_draft_document_id: `doc-${id}` }) as Chapter
@@ -18,6 +18,7 @@ function Navigation() {
 function open(path: string) { return render(<MemoryRouter initialEntries={[path]}><Navigation /><Routes><Route path="/projects/:projectId/studio" element={<Studio />} /><Route path="/projects/:projectId/studio/:chapterId" element={<Studio />} /><Route path="/setting-collections/:settingCollectionId" element={<div>Setting Collection</div>} /><Route path="/" element={<div>Dashboard</div>} /></Routes></MemoryRouter>) }
 beforeEach(() => {
   vi.resetAllMocks(); localStorage.clear(); sessionStorage.clear(); draftRecoveryCopies.clear()
+  vi.mocked(readChapterIdea).mockImplementation(async (project_id, chapter_id) => ({ project_id, chapter_id, text: '', revision: 0, read_only: false }))
   vi.mocked(listChapterProductionRuns).mockResolvedValue([])
   vi.mocked(writeStudioDraft).mockImplementation((_project, chapterId, payload) => writeDocument(`doc-${chapterId}`, payload))
   vi.mocked(getProject).mockImplementation(async id => project(id))
@@ -49,6 +50,54 @@ beforeEach(() => {
   })
 })
 afterEach(() => { cleanup(); vi.restoreAllMocks() })
+
+it('loads saved chapter ideas and flushes edits before navigating to settings', async () => {
+  vi.mocked(listChapters).mockResolvedValue([{ ...chapter('a'), current_draft_document_id: null }])
+  vi.mocked(readChapterIdea).mockResolvedValue({ project_id: 'p', chapter_id: 'a', text: '服务端已有思路', revision: 3, read_only: false })
+  vi.mocked(writeChapterIdea).mockImplementation(async (_p, _c, payload) => ({ project_id: 'p', chapter_id: 'a', text: payload.text, revision: 4, read_only: false }))
+  open('/projects/p/studio/a')
+  const idea = await screen.findByRole('textbox', { name: '大纲思路' })
+  await waitFor(() => expect(idea).toHaveValue('服务端已有思路'))
+  fireEvent.change(idea, { target: { value: '离开前的最新思路' } })
+  fireEvent.click(screen.getByRole('button', { name: '设置' }))
+  await screen.findByText('Setting Collection')
+  expect(writeChapterIdea).toHaveBeenCalledWith('p', 'a', expect.objectContaining({ text: '离开前的最新思路', expected_revision: 3 }))
+})
+
+it('retains conflicted idea drafts until the author explicitly accepts the server version', async () => {
+  vi.mocked(listChapters).mockResolvedValue([{ ...chapter('a'), current_draft_document_id: null }])
+  sessionStorage.setItem('guranovel:chapter-idea:p:a', JSON.stringify({ text: '本地未保存思路', revision: 1, pending: null }))
+  vi.mocked(readChapterIdea).mockResolvedValue({ project_id: 'p', chapter_id: 'a', text: '另一标签的新思路', revision: 2, read_only: false })
+  const confirm = vi.spyOn(window, 'confirm').mockReturnValueOnce(false).mockReturnValueOnce(true)
+  open('/projects/p/studio/a')
+  const idea = await screen.findByRole('textbox', { name: '大纲思路' })
+  await screen.findByText(/思路版本冲突/)
+  expect(idea).toHaveValue('本地未保存思路')
+  fireEvent.click(screen.getByRole('button', { name: '使用服务器思路' }))
+  expect(idea).toHaveValue('本地未保存思路')
+  fireEvent.click(screen.getByRole('button', { name: '使用服务器思路' }))
+  await waitFor(() => expect(idea).toHaveValue('另一标签的新思路'))
+  expect(confirm).toHaveBeenCalledTimes(2)
+  expect(writeChapterIdea).not.toHaveBeenCalled()
+})
+
+it('retries a lost idea-save response using the original request identity', async () => {
+  vi.mocked(listChapters).mockResolvedValue([{ ...chapter('a'), current_draft_document_id: null }])
+  vi.mocked(writeChapterIdea).mockRejectedValueOnce(new Error('response lost')).mockImplementation(async (_p, _c, payload) => ({
+    project_id: 'p', chapter_id: 'a', text: payload.text, revision: payload.expected_revision + 1, read_only: false,
+  }))
+  open('/projects/p/studio/a')
+  const idea = await screen.findByRole('textbox', { name: '大纲思路' })
+  await waitFor(() => expect(idea).not.toHaveAttribute('readonly'))
+  fireEvent.change(idea, { target: { value: '重试必须保留原请求' } })
+  fireEvent.click(screen.getByRole('button', { name: '设置' }))
+  const retry = await screen.findByRole('button', { name: '重试保存思路' })
+  expect(idea).toHaveValue('重试必须保留原请求')
+  fireEvent.click(retry)
+  await screen.findByText('思路已保存')
+  expect(vi.mocked(writeChapterIdea).mock.calls[1][2]).toEqual(vi.mocked(writeChapterIdea).mock.calls[0][2])
+  expect(sessionStorage.getItem('guranovel:chapter-idea:p:a')).toBeNull()
+})
 
 it('keeps legacy chapter content visible while disabling writes and V2 task actions', async () => {
   vi.mocked(listChapters).mockResolvedValue([chapter('a')])

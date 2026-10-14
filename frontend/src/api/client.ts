@@ -280,6 +280,7 @@ export interface WriteDocumentRequest {
   agent_role?: string | null
   workflow_run_id?: string | null
   change_summary?: string | null
+  setting_comments?: StudioComment[]
 }
 
 export interface RestoreDocumentRequest {
@@ -805,6 +806,28 @@ export interface RestorePointRequest { request_id: string; expected_current_vers
 export type FeedbackRegion = 'outline' | 'draft'
 export interface StudioComment {
   id: string; start: number; end: number; quote: string; text: string; color: string; submitted?: boolean; orphaned?: boolean
+}
+
+export interface ChapterIdea { project_id: string; chapter_id: string; text: string; revision: number; read_only: boolean }
+export interface ChapterIdeaWrite { text: string; expected_revision: number; request_id: string }
+function decodeChapterIdea(value: unknown): ChapterIdea {
+  const data = object(value)
+  const revision = integer(data.revision)
+  if (revision < 0) throw invalidResponse()
+  return { project_id: string(data.project_id), chapter_id: string(data.chapter_id), text: string(data.text), revision, read_only: boolean(data.read_only) }
+}
+function chapterIdeaDecoder(projectId: string, chapterId: string) {
+  return (value: unknown) => {
+    const idea = decodeChapterIdea(value)
+    if (idea.project_id !== projectId || idea.chapter_id !== chapterId) throw invalidResponse()
+    return idea
+  }
+}
+export function readChapterIdea(projectId: string, chapterId: string): Promise<ChapterIdea> {
+  return request('GET', () => apiPath('projects', projectId, 'chapters', chapterId, 'outline', 'idea'), chapterIdeaDecoder(projectId, chapterId))
+}
+export function writeChapterIdea(projectId: string, chapterId: string, payload: ChapterIdeaWrite): Promise<ChapterIdea> {
+  return request('PUT', () => apiPath('projects', projectId, 'chapters', chapterId, 'outline', 'idea'), chapterIdeaDecoder(projectId, chapterId), payload)
 }
 export interface StudioFeedback {
   chapter_id: string; region: FeedbackRegion; document_id: string | null; source_version_id: string | null

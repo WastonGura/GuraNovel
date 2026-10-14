@@ -3,7 +3,9 @@
 from datetime import datetime
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
+
+from app.api.schemas_studio import StudioComment
 
 from app.models import DocumentSource, DocumentType
 
@@ -73,6 +75,24 @@ class WriteDocumentRequest(BaseModel):
     agent_role: str | None = None
     workflow_run_id: UUID | None = None
     change_summary: str | None = None
+    setting_comments: list["StudioComment"] | None = Field(default=None, max_length=1024)
+
+    @model_validator(mode="after")
+    def valid_setting_anchors(self):
+        if self.setting_comments is not None:
+            if len({comment.id for comment in self.setting_comments}) != len(self.setting_comments):
+                raise ValueError("Duplicate comment identity")
+            encoded = self.content.encode("utf-16-le")
+            for comment in self.setting_comments:
+                if comment.orphaned:
+                    continue
+                try:
+                    quote = encoded[comment.start * 2:comment.end * 2].decode("utf-16-le")
+                except UnicodeDecodeError:
+                    raise ValueError("Invalid comment anchor") from None
+                if comment.end * 2 > len(encoded) or quote != comment.quote:
+                    raise ValueError("Comment anchor does not match content")
+        return self
 
 
 class RestoreDocumentRequest(BaseModel):

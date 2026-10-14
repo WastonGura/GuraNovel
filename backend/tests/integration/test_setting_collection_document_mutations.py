@@ -54,6 +54,31 @@ async def create_setting_collection(
 
 @pytest.mark.integration
 @pytest.mark.anyio
+async def test_setting_comments_roundtrip_atomically_with_content_version(
+    client: httpx.AsyncClient, async_session: AsyncSession, tmp_path: Path,
+) -> None:
+    col = await create_setting_collection(async_session, tmp_path)
+    created = await client.post(f"/api/v1/setting-collections/{col.id}/documents", json={
+        "type": "world_overview", "title": "Comments", "path": "world/comments.md", "content": "world lore",
+    })
+    doc = created.json()
+    url = f"/api/v1/documents/{doc['id']}"
+    comment = {"id": str(uuid4()), "start": 0, "end": 5, "quote": "world", "text": "expand",
+               "color": "#8d9bff", "submitted": True, "orphaned": False}
+    saved = await client.put(f"{url}/content", json={"content": "world lore revised",
+        "expected_current_version_id": doc["current_version_id"], "setting_comments": [comment]})
+    assert saved.status_code == 200, saved.text
+    metadata = (await client.get(url)).json()["metadata"]
+    assert metadata["comments"] == [comment]
+    assert metadata["comments_source_version_id"] == saved.json()["id"]
+    stale = await client.put(f"{url}/content", json={"content": "stale",
+        "expected_current_version_id": doc["current_version_id"], "setting_comments": []})
+    assert stale.status_code == 409
+    assert (await client.get(url)).json()["metadata"] == metadata
+
+
+@pytest.mark.integration
+@pytest.mark.anyio
 async def test_setting_delete_undo_retains_identity_content_and_versions(
     client: httpx.AsyncClient, async_session: AsyncSession, tmp_path: Path
 ) -> None:

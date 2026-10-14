@@ -128,6 +128,8 @@ async def write_document(
     session: AsyncSession = Depends(get_db_session),
 ) -> DocumentVersion:
     data = payload.model_dump()
+    if payload.setting_comments is not None:
+        data["setting_comments"] = [comment.model_dump(mode="json") for comment in payload.setting_comments]
     if actor_id is not None and data.get("actor_user_id") is None:
         data["actor_user_id"] = actor_id
     version = await DocumentService(session).write_document(
