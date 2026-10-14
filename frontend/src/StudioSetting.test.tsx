@@ -5,7 +5,7 @@ import { MemoryRouter, useNavigate } from 'react-router-dom'
 import StudioSetting from './StudioSetting'
 import { applySettingChanges, buildNoteGraph, emptySettingConversation, noteLinks, readSettingNotes, readSettingWorkspace, settingExampleReply, settingStorageKey, type SettingNote } from './settingNotes'
 
-beforeEach(() => { localStorage.clear(); vi.useFakeTimers(); HTMLDialogElement.prototype.showModal = function () { this.setAttribute('open', '') } })
+beforeEach(() => { localStorage.clear(); sessionStorage.clear(); vi.useFakeTimers(); HTMLDialogElement.prototype.showModal = function () { this.setAttribute('open', '') } })
 afterEach(() => { cleanup(); vi.useRealTimers(); vi.restoreAllMocks() })
 const seed: SettingNote[] = [
   { id: 'a', title: '甲', body: '住在 [[海滨城]]，路过 [[旧街]]。再次 [[海滨城]]。', category: 'setting' },
@@ -23,6 +23,37 @@ function marquee(list: HTMLElement, first: number, last = first) {
 }
 
 describe('setting notes and graph', () => {
+  it('retains an orphaned comment when its quoted setting text is deleted', async () => {
+    const comment = { id: 'c', start: 0, end: 1, quote: '住', text: '保留此意见', color: '#8d9bff' }
+    const save = vi.fn().mockResolvedValue({ versionId: 'saved-v2' })
+    const ref = createRef<{ flush: () => Promise<boolean> }>()
+    render(<StudioSetting preview={false} ref={ref} backendNotes={[{ ...seed[0], versionId: 'v1', comments: [comment] }]} onSaveNoteContent={save} />)
+    fireEvent.click(screen.getByRole('button', { name: '编辑' }))
+    fireEvent.change(screen.getByLabelText('设定正文'), { target: { value: seed[0].body.slice(1) } })
+    await act(async () => { await ref.current!.flush() })
+    expect(save).toHaveBeenCalledWith('a', seed[0].body.slice(1), 'v1', [expect.objectContaining({ text: '保留此意见', quote: '住', orphaned: true })])
+  })
+
+  it('restores comment drafts and their original version after a failed save and reload', () => {
+    sessionStorage.setItem('guranovel:setting-feedback-recovery:a', JSON.stringify({
+      body: '恢复的设定正文', versionId: 'old-v1', comments: [{ id: 'c', start: 0, end: 2, quote: '恢复', text: '尚未保存的评论', color: '#8d9bff' }],
+    }))
+    render(<StudioSetting preview={false} backendNotes={[{ ...seed[0], versionId: 'server-v2' }]} />)
+    expect(screen.getByLabelText('作品设定')).toHaveTextContent('恢复的设定正文')
+    sessionStorage.removeItem('guranovel:setting-feedback-recovery:a')
+  })
+
+  it('flushes comment content and anchors alongside the exact source text and version', async () => {
+    const comments = [{ id: 'c', start: 0, end: 1, quote: '住', text: '补充细节', color: '#8d9bff' }]
+    const save = vi.fn().mockResolvedValue({ versionId: 'saved-v2' })
+    const ref = createRef<{ flush: () => Promise<boolean> }>()
+    render(<StudioSetting preview={false} ref={ref} backendNotes={[{ ...seed[0], versionId: 'v1', comments }]} onSaveNoteContent={save} />)
+    fireEvent.click(screen.getByRole('button', { name: '编辑' }))
+    fireEvent.change(screen.getByLabelText('设定正文'), { target: { value: seed[0].body + '新增' } })
+    await act(async () => { expect(await ref.current!.flush()).toBe(true) })
+    expect(save).toHaveBeenCalledWith('a', seed[0].body + '新增', 'v1', comments)
+  })
+
   it('removes only server-confirmed items in a partially failed batch', async () => {
     const notes = seed.map(note => ({ ...note, category: 'setting' as const }))
     render(<StudioSetting preview={false} readOnly={false} backendNotes={notes}

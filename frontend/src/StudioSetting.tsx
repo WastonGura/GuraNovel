@@ -4,7 +4,7 @@ import { flushSync } from 'react-dom'
 import { MotionFrame } from './StudioMotion'
 import OutlineEditor from './OutlineEditor'
 import { useCommentDrag } from './useCommentDrag'
-import { reanchorComments, type OutlineComment } from './studioPreview'
+import { reanchorComments, reanchorFeedbackComments, restoreOutlineComments, type OutlineComment } from './studioPreview'
 import SettingGraph from './SettingGraph'
 import SettingConversation from './SettingConversation'
 import SettingNoteList from './SettingNoteList'
@@ -25,7 +25,7 @@ export interface StudioSettingProps {
   backendNotes?: SettingNote[]
   readOnly?: boolean
   referencingProjects?: { id: string; title: string }[]
-  onSaveNoteContent?: (noteId: string, content: string, expectedVersionId?: string) => Promise<{ versionId: string } | 'conflict' | false>
+  onSaveNoteContent?: (noteId: string, content: string, expectedVersionId?: string, comments?: OutlineComment[]) => Promise<{ versionId: string } | 'conflict' | false>
   onApplyProposal?: (proposal: SettingChangeProposal) => Promise<{ versionId: string; documentId: string } | 'conflict' | false>
   onRenameNote?: (noteId: string, newTitle: string) => Promise<boolean>
   onCreateNote?: (category: SettingCategory, title: string, tempId: string) => Promise<SettingNote | null>
@@ -94,6 +94,11 @@ export default function StudioSetting({
     if (backendNotes) {
       const restored = backendNotes.map(n => {
         try {
+          const feedback = JSON.parse(sessionStorage.getItem(`guranovel:setting-feedback-recovery:${n.id}`) || 'null')
+          if (feedback && typeof feedback.body === 'string' && typeof feedback.versionId === 'string') {
+            return { ...n, body: feedback.body, versionId: feedback.versionId,
+              comments: restoreOutlineComments(feedback.comments, feedback.body) }
+          }
           const draft = sessionStorage.getItem(`guranovel:setting-draft-recovery:${n.id}`)
           if (draft !== null && draft !== n.body) {
             return { ...n, body: draft }
@@ -235,9 +240,11 @@ export default function StudioSetting({
     }
     const note = currentNotes.current.find(n => n.id === id)
     if (!note) return true
-    if (q.lastSavedBody === note.body) {
+    const snapshot = JSON.stringify([note.body, note.comments || []])
+    if (q.lastSavedBody === snapshot) {
       try {
         sessionStorage.removeItem(`guranovel:setting-draft-recovery:${id}`)
+        sessionStorage.removeItem(`guranovel:setting-feedback-recovery:${id}`)
       } catch (_err: unknown) {
         void _err
       }
@@ -249,7 +256,8 @@ export default function StudioSetting({
     const expectedVersion = note.versionId
 
     try {
-      const res = await onSaveNoteContent(id, bodyToSave, expectedVersion)
+      const res = note.comments === undefined ? await onSaveNoteContent(id, bodyToSave, expectedVersion)
+        : await onSaveNoteContent(id, bodyToSave, expectedVersion, note.comments)
       if (res === 'conflict') {
         setSaved(false)
         q.inFlight = false
@@ -258,18 +266,19 @@ export default function StudioSetting({
         w.forEach(resolve => resolve(false))
         return false
       } else if (res && typeof res === 'object' && res.versionId) {
-        q.lastSavedBody = bodyToSave
+        q.lastSavedBody = snapshot
         const updated = currentNotes.current.map(n => n.id === id ? { ...n, versionId: res.versionId } : n)
         currentNotes.current = updated
         setNotes(updated)
         q.inFlight = false
 
         const latestNote = currentNotes.current.find(n => n.id === id)
-        if (latestNote && latestNote.body !== bodyToSave) {
+        if (latestNote && JSON.stringify([latestNote.body, latestNote.comments || []]) !== snapshot) {
           return runSave(id)
         } else {
           try {
             sessionStorage.removeItem(`guranovel:setting-draft-recovery:${id}`)
+            sessionStorage.removeItem(`guranovel:setting-feedback-recovery:${id}`)
           } catch (_err: unknown) {
             void _err
           }
@@ -299,6 +308,7 @@ export default function StudioSetting({
   }
 
   function enqueueSave(id: string, debounceMs = 400) {
+    setSaved(false)
     let q = saveQueues.current.get(id)
     if (!q) {
       q = { timer: null, inFlight: false, lastSavedBody: null, waiters: [] }
@@ -318,18 +328,23 @@ export default function StudioSetting({
     if (readOnly) return false
     let stored = false
     if (onSaveNoteContent) {
+      const previous = currentNotes.current
       currentNotes.current = next
       currentConversation.current = chat
       setNotes(next)
       setConversation(chat)
-      const activeChanged = next.find(n => n.id === active?.id)
-      if (activeChanged && active && (activeChanged.body !== active.body || activeChanged.comments !== active.comments)) {
+      for (const changed of next) {
+        const before = previous.find(note => note.id === changed.id)
+        if (!before || before.body === changed.body && before.comments === changed.comments) continue
         try {
-          sessionStorage.setItem(`guranovel:setting-draft-recovery:${activeChanged.id}`, activeChanged.body)
+          sessionStorage.setItem(`guranovel:setting-draft-recovery:${changed.id}`, changed.body)
+          sessionStorage.setItem(`guranovel:setting-feedback-recovery:${changed.id}`, JSON.stringify({
+            body: changed.body, comments: changed.comments || [], versionId: changed.versionId,
+          }))
         } catch (_err: unknown) {
           void _err
         }
-        enqueueSave(activeChanged.id, 400)
+        enqueueSave(changed.id, 400)
       }
       return true
     }
@@ -630,6 +645,7 @@ export default function StudioSetting({
   }
   function updateNoteComments(comments: OutlineComment[], body?: string) {
     if (!active || readOnly) return
+    if (body !== undefined && body !== active.body) comments = reanchorFeedbackComments(active.comments || [], active.body, body)
     persist(currentNotes.current.map(note => note.id === active.id ? { ...note, body: body ?? note.body, comments } : note),
       { ...currentConversation.current, stagedComments: currentConversation.current.stagedComments?.filter(item => item.noteId !== active.id || comments.some(comment => comment.id === item.commentId)) })
   }
@@ -659,7 +675,7 @@ export default function StudioSetting({
     ...(active?.comments || []).filter(comment => !submitted.some(item => item.id === comment.id)), ...ids.map(id => submitted.find(comment => comment.id === id)!),
   ]))
   useImperativeHandle(ref, () => ({ flush: async () => {
-    if (editing) return titleCommit()
+    if (editing && !titleCommit()) return false
     if (readOnly) return true
     if (onSaveNoteContent) {
       const ids = Array.from(saveQueues.current.keys())

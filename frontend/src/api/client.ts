@@ -280,6 +280,7 @@ export interface WriteDocumentRequest {
   agent_role?: string | null
   workflow_run_id?: string | null
   change_summary?: string | null
+  setting_comments?: StudioComment[]
 }
 
 export interface RestoreDocumentRequest {

@@ -24,7 +24,7 @@ import {
   type SettingCategory,
   type SettingNote,
 } from './settingNotes'
-import { type OutlineComment } from './studioPreview'
+import { restoreOutlineComments, type OutlineComment } from './studioPreview'
 import './studioSetting.css'
 
 interface ConflictState {
@@ -47,7 +47,7 @@ function categoryFromDocument(doc: Document): SettingCategory {
 
 function documentToSettingNote(doc: Document, content: string): SettingNote {
   const category = categoryFromDocument(doc)
-  const comments = Array.isArray(doc.metadata?.comments) ? (doc.metadata.comments as unknown as OutlineComment[]) : []
+  const comments = restoreOutlineComments(doc.metadata?.comments, content)
   return {
     id: doc.id,
     documentId: doc.id,
@@ -154,7 +154,8 @@ export default function SettingCollectionWorkspace() {
   async function handleSaveNoteContent(
     noteId: string,
     content: string,
-    expectedVersionId?: string
+    expectedVersionId?: string,
+    comments?: OutlineComment[],
   ): Promise<{ versionId: string } | 'conflict' | false> {
     if (isArchived) return false
     if (isPreview) return { versionId: 'preview-ver' }
@@ -168,11 +169,12 @@ export default function SettingCollectionWorkspace() {
       const newVersion = await writeDocument(noteId, {
         content,
         expected_current_version_id: versionToExpect,
+        setting_comments: comments ?? currentNote.comments ?? [],
       })
       if (!newVersion) return false
       setCollection((prev) => (prev ? { ...prev, revision: prev.revision + 1 } : prev))
       setNotes((prev) =>
-        prev.map((n) => (n.id === noteId ? { ...n, body: content, versionId: newVersion.id } : n))
+        prev.map((n) => (n.id === noteId ? { ...n, body: content, comments: comments ?? n.comments, versionId: newVersion.id } : n))
       )
       setSaveStatus('saved')
       setConflict(null)
