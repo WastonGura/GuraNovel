@@ -2,18 +2,18 @@
 
 Dates use Asia/Tokyo. Target: v0.12.0 desktop personal trial.
 
-## 2026-10-16 — #340 Reader genre context
+## 2026-10-16 — #345 frontend dependency advisory maintenance
 
-- Red: cold-reading request tests for missing and empty project genre observed fantasy, an unsupported assumption. An explicitly supplied Chinese realistic-fiction genre already passed.
-- Green: absent genre is now unspecified, explicit genres remain unchanged, and the genre-experienced profile advances v1 → v2 with instructions to apply only conventions supported by the manuscript or explicit genre. No project metadata or frozen Reader session is rewritten.
-- Validation: 136 focused service, profile-registry and production-provider cases pass. This corrects context delivery; it does not guarantee the model follows the instruction. PR/Actions and final acceptance pending. No migration or application version bump.
+- The candidate Docker build reported 11 npm audit entries (7 high, 4 moderate), including development/transitive and unused server/RSC paths; this is not proof of exploitability in the static desktop app.
+- npm updated react-router-dom 7.18.1 → 7.18.4 and vitest 4.1.10 → 4.1.12, then resolved compatible transitive patches without --force. npm audit reports zero known vulnerabilities at verification time. Product version remains 0.11.0 in this independent maintenance PR.
+- Existing author-route tests and latest-head frontend lint/unit/types/build/design/Chromium and Docker checks remain required in Actions. Dependency maintenance uses regression verification, not a fabricated new TDD Red. Release preparation will incorporate these locks while retaining its own 0.12.0 version update.
 
 ## 2026-10-16 — #338 Reader budget settlement and live result
 
 - Actions exposed a deterministic full-lifecycle regression: a standard four-reader/two-issue discussion lost one reader because successful calls kept charging the full enlarged output reservation. The local PostgreSQL reproduction returned six final ballots instead of eight.
 - Red: the new three-call case completed only two readers despite small valid outputs; the two-call case charged 8192 instead of the observed 1187 UTF-8 bytes. Green: successful validated output settles its reservation to serialized UTF-8 bytes in the same locked transaction. In-flight, unknown and failed attempts retain the full reservation. These counters are conservative charges, not reported model token usage. Per-call and total bounds remain unchanged.
 - Validation: all 112 service unit tests and 18 PostgreSQL Reader integration cases pass, including concurrent full lifecycle, oversize rejection, failure recovery and real-adapter route fixtures. Existing exact-call-budget assertions now check settled bytes while retaining the two-call limit; this is an explicit accounting behavior change.
-- The isolated real-model long sample completed two-reader cold reading, discussion, final ballots and handoff at backend 7f8db09; simulated=false and server model deepseek-flash were verified. It then reached COMPLETED local finalization. Reader advice raised pacing/motivation issues; this does not imply literary quality approval. Its earlier input/output budget failures remain recorded. Latest settlement code still requires latest-head Actions.
+- The isolated real-model long sample completed two-reader cold reading, discussion, final ballots and handoff at backend 7f8db09; simulated=false and server model deepseek-flash were verified. It then reached COMPLETED local finalization. Reader advice raised pacing/motivation issues; this does not imply literary quality approval. Its earlier input/output budget failures remain recorded. Latest settlement code still requires latest-head Actions. Added a retained-total-budget regression: after one small success settles, a second call is still refused if a full reservation cannot fit; oversize/unknown-attempt checks remain intact. Six affected boundary/recovery cases pass.
 
 ## 2026-10-16 — #338 output reservation verification
 
@@ -165,3 +165,9 @@ Dates use Asia/Tokyo. Target: v0.12.0 desktop personal trial.
 - Existing changes receive regression verification; this entry does not claim retrospective Red/Green development.
 - Tests: setting workspace/unit regression and Chromium geometry, read failure, draft recovery and proposal scenarios. Full quality gates run in GitHub Actions.
 - Limitations: mobile layout, durable comment metadata, delete recovery and Agent conversations remain separate issues. No version bump or release.
+
+## 2026-10-16 — #340 Reader genre context
+
+- Red: cold-reading request tests for missing and empty project genre observed fantasy, an unsupported assumption. An explicitly supplied Chinese realistic-fiction genre already passed.
+- Green: absent genre is now unspecified, explicit genres remain unchanged, and the genre-experienced profile advances v1 → v2 with instructions to apply only conventions supported by the manuscript or explicit genre. No project metadata or frozen Reader session is rewritten.
+- Validation: 136 focused service, profile-registry and production-provider cases pass. This corrects context delivery; it does not guarantee the model follows the instruction. PR/Actions and final acceptance pending. No migration or application version bump.
