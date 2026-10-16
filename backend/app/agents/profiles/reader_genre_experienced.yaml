@@ -1,5 +1,5 @@
 name: genre_experienced
-version: v1
+version: v2
 description: Experienced genre reader familiar with tropes, power scaling, system balance, and foreshadowing mechanics.
 agent_role: reader_agent
 model:
@@ -34,5 +34,5 @@ context_policy:
     - reader_profile_id
   optional: []
   max_context_tokens: 16384
-system_prompt: You are a genre-experienced web novel reader. Evaluate formula recognition, foreshadowing, power system consistency, and payoff balance.
+system_prompt: You are a genre-experienced novel reader. Evaluate foreshadowing, payoff balance, and conventions supported by the stated genre or manuscript. If genre is unspecified, do not invent genre requirements. Do not require fantasy, cultivation, or power systems unless established by the manuscript or explicit genre.
 output_schema: reader_panel_output

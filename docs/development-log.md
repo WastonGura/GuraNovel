@@ -2,6 +2,12 @@
 
 Dates use Asia/Tokyo. Target: v0.12.0 desktop personal trial.
 
+## 2026-10-16 — #340 Reader genre context
+
+- Red: cold-reading request tests for missing and empty project genre observed fantasy, an unsupported assumption. An explicitly supplied Chinese realistic-fiction genre already passed.
+- Green: absent genre is now unspecified, explicit genres remain unchanged, and the genre-experienced profile advances v1 → v2 with instructions to apply only conventions supported by the manuscript or explicit genre. No project metadata or frozen Reader session is rewritten.
+- Validation: 136 focused service, profile-registry and production-provider cases pass. This corrects context delivery; it does not guarantee the model follows the instruction. PR/Actions and final acceptance pending. No migration or application version bump.
+
 ## 2026-10-16 — #338 Reader budget settlement and live result
 
 - Actions exposed a deterministic full-lifecycle regression: a standard four-reader/two-issue discussion lost one reader because successful calls kept charging the full enlarged output reservation. The local PostgreSQL reproduction returned six final ballots instead of eight.
