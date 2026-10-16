@@ -2,6 +2,13 @@
 
 Dates use Asia/Tokyo. Target: v0.12.0 desktop personal trial.
 
+## 2026-10-16 — #338 Reader budget settlement and live result
+
+- Actions exposed a deterministic full-lifecycle regression: a standard four-reader/two-issue discussion lost one reader because successful calls kept charging the full enlarged output reservation. The local PostgreSQL reproduction returned six final ballots instead of eight.
+- Red: the new three-call case completed only two readers despite small valid outputs; the two-call case charged 8192 instead of the observed 1187 UTF-8 bytes. Green: successful validated output settles its reservation to serialized UTF-8 bytes in the same locked transaction. In-flight, unknown and failed attempts retain the full reservation. These counters are conservative charges, not reported model token usage. Per-call and total bounds remain unchanged.
+- Validation: all 112 service unit tests and 18 PostgreSQL Reader integration cases pass, including concurrent full lifecycle, oversize rejection, failure recovery and real-adapter route fixtures. Existing exact-call-budget assertions now check settled bytes while retaining the two-call limit; this is an explicit accounting behavior change.
+- The isolated real-model long sample completed two-reader cold reading, discussion, final ballots and handoff at backend 7f8db09; simulated=false and server model deepseek-flash were verified. It then reached COMPLETED local finalization. Reader advice raised pacing/motivation issues; this does not imply literary quality approval. Its earlier input/output budget failures remain recorded. Latest settlement code still requires latest-head Actions.
+
 ## 2026-10-16 — #338 output reservation verification
 
 - The Chinese multi-finding output test now passes with a 32768-byte per-call reservation; the other long-input and provider-provenance cases also pass. All 111 service unit cases pass, including explicit budget exhaustion.

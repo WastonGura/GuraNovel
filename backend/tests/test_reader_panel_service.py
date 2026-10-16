@@ -1486,8 +1486,10 @@ class TestReaderPanelColdReadingCollection:
         assert attempt.status == "cancelled"
         assert attempt.error_code == "cancelled"
 
+    @pytest.mark.parametrize("call_limit", [2, 3])
     async def test_exact_call_budget_completes_minimum_sample_then_degrades(
         self,
+        call_limit: int,
         fake_db_session: FakeAsyncSession,
         test_project_id: UUID,
         test_chapter_id: UUID,
@@ -1513,8 +1515,8 @@ class TestReaderPanelColdReadingCollection:
             max_discussion_issues=0,
             max_rounds_per_issue=0,
             min_valid_readers=2,
-            max_total_model_calls=2,
-            max_model_calls_per_phase=2,
+            max_total_model_calls=call_limit,
+            max_model_calls_per_phase=call_limit,
             max_total_output_tokens=8192,
             max_output_tokens_per_call=4096,
         )
@@ -1529,20 +1531,28 @@ class TestReaderPanelColdReadingCollection:
         panel.reader_runs = list(fake_db_session.storage[ReaderRun].values())
         panel.document = await fake_db_session.get(Document, test_document_id)
 
+        outputs = []
+
+        class RecordingProvider(DeterministicReaderPanelProvider):
+            def generate_initial_reading(self, request):
+                output = super().generate_initial_reading(request)
+                outputs.append(output)
+                return output
+
         result = await service.collect_initial_reports(
             session_id=init.session_id,
-            provider=DeterministicReaderPanelProvider(scenario=ReaderPanelFakeScenario.CLEAN),
+            provider=RecordingProvider(scenario=ReaderPanelFakeScenario.CLEAN),
         )
 
-        assert result.completed_readers == 2
-        assert result.degradation_reason == "reader_sample_degraded"
-        assert len(fake_db_session.storage[ReaderPanelInvocation]) == 2
+        assert result.completed_readers == call_limit
+        assert result.degradation_reason == ("reader_sample_degraded" if call_limit == 2 else None)
+        assert len(fake_db_session.storage[ReaderPanelInvocation]) == call_limit
         assert (
             sum(
                 item.output_tokens
                 for item in fake_db_session.storage[ReaderPanelInvocation].values()
             )
-            == 8192
+            == sum(len(output.model_dump_json().encode("utf-8")) for output in outputs)
         )
 
     async def test_unknown_output_usage_is_reserved_and_oversize_fails_closed(

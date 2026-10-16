@@ -800,6 +800,9 @@ class ReaderPanelService:
                 fresh_attempt.completed_at = datetime.now(timezone.utc)
                 await self._db.commit()
                 raise ReaderPanelBudgetExhaustedError()
+            # Pending/failed calls retain the full reservation. A validated result
+            # settles to its UTF-8 size, a conservative charge rather than model tokens.
+            fresh_attempt.output_tokens = output_charge
             fresh_attempt.status = ReaderPanelInvocationStatus.SUCCEEDED.value
             fresh_attempt.completed_at = datetime.now(timezone.utc)
             return output
