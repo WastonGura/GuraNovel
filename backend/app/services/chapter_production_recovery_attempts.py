@@ -46,7 +46,8 @@ async def fail_provider(
 ) -> bool:
     await service._rollback()
     run = await service.session.scalar(
-        select(WorkflowRun).where(WorkflowRun.id == workflow_run_id).with_for_update()
+        select(WorkflowRun).where(WorkflowRun.id == workflow_run_id)
+        .execution_options(populate_existing=True).with_for_update()
     )
     if run is None:
         return False

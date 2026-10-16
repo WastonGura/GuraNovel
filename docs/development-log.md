@@ -7,6 +7,13 @@ Dates use Asia/Tokyo. Target: v0.12.0 desktop personal trial.
 - Actions found an old review-saga limit test still expecting 65 targets to overflow. Updated its fixture to 1025, preserving rejection above the new shared 1024-locator bound. This is maintenance of an existing boundary assertion, not a new TDD Red.
 - PR #333 remains pending latest-head Actions and review; no release or version change is claimed.
 
+## 2026-10-14 — #334 exact outline context and revision failure recovery
+
+- Status: implemented; PR/latest-head Actions/review pending. No migration or version bump.
+- Red: a PostgreSQL Studio revision with the real context assembler returned 422 before model invocation; the author-phase snapshot omitted approved outline content, and recording provider failure saw an old run projection. Earlier deterministic-provider tests did not enforce this context requirement.
+- Green: the author phase reloads and validates the exact approved outline, then includes its version content in the pure provider request. Failure recording reloads the committed run projection. The new HTTP test verifies a provider timeout becomes FAILED, keeps the original draft, retries the same immutable submission successfully and replays without another provider call.
+- Focused recovery integration and 20 handoff/facade/architecture tests pass. Real-model quality remains in #313 acceptance.
+
 ## 2026-10-14 — #332 long chapter revision and review
 
 - Status: implementation and focused verification; PR/latest-head Actions/review pending. No version bump or migration.
