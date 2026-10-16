@@ -1520,10 +1520,11 @@ class TestReaderPanelColdReadingCollection:
         assert attempt.status == "cancelled"
         assert attempt.error_code == "cancelled"
 
-    @pytest.mark.parametrize("call_limit", [2, 3])
+    @pytest.mark.parametrize("call_limit, output_limit", [(2, 8192), (3, 8192), (3, 4096)])
     async def test_exact_call_budget_completes_minimum_sample_then_degrades(
         self,
         call_limit: int,
+        output_limit: int,
         fake_db_session: FakeAsyncSession,
         test_project_id: UUID,
         test_chapter_id: UUID,
@@ -1551,7 +1552,7 @@ class TestReaderPanelColdReadingCollection:
             min_valid_readers=2,
             max_total_model_calls=call_limit,
             max_model_calls_per_phase=call_limit,
-            max_total_output_tokens=8192,
+            max_total_output_tokens=output_limit,
             max_output_tokens_per_call=4096,
         )
         service = ReaderPanelService(fake_db_session)  # type: ignore[arg-type]
@@ -1573,14 +1574,18 @@ class TestReaderPanelColdReadingCollection:
                 outputs.append(output)
                 return output
 
-        result = await service.collect_initial_reports(
-            session_id=init.session_id,
-            provider=RecordingProvider(scenario=ReaderPanelFakeScenario.CLEAN),
-        )
-
-        assert result.completed_readers == call_limit
-        assert result.degradation_reason == ("reader_sample_degraded" if call_limit == 2 else None)
-        assert len(fake_db_session.storage[ReaderPanelInvocation]) == call_limit
+        provider = RecordingProvider(scenario=ReaderPanelFakeScenario.CLEAN)
+        if output_limit == 4096:
+            with pytest.raises(ReaderPanelQuorumError):
+                await service.collect_initial_reports(session_id=init.session_id, provider=provider)
+            # One small result settles, but another full reservation cannot fit.
+            assert len(outputs) == 1
+            assert panel.status == ReaderPanelStatus.FAILED.value
+        else:
+            result = await service.collect_initial_reports(session_id=init.session_id, provider=provider)
+            assert result.completed_readers == call_limit
+            assert result.degradation_reason == ("reader_sample_degraded" if call_limit == 2 else None)
+        assert len(fake_db_session.storage[ReaderPanelInvocation]) == len(outputs)
         assert (
             sum(
                 item.output_tokens
