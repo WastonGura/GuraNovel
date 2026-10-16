@@ -7,6 +7,7 @@ independent of provider or persistence authority.
 
 from __future__ import annotations
 
+from app.core.chapter_limits import MAX_CHAPTER_SEGMENTS
 from app.core.errors import ConflictError
 
 import asyncio
@@ -217,7 +218,7 @@ def merge_segment_replacements(
     if (
         type(source) is not str
         or type(replacements) is not dict
-        or not 1 <= len(replacements) <= 64
+        or not 1 <= len(replacements) <= MAX_CHAPTER_SEGMENTS
     ):
         raise _invalid() from None
     try:
@@ -464,7 +465,7 @@ class ChapterProductionV2Service:
             action_request_id,
             actor_user_id,
         )
-        target_segment_ids = self._validated_uuid_sequence(target_segment_ids, maximum=64)
+        target_segment_ids = self._validated_uuid_sequence(target_segment_ids, maximum=MAX_CHAPTER_SEGMENTS)
         if type(feedback) is not str or len(feedback) > 8000:
             raise _invalid() from None
         try:
@@ -542,7 +543,7 @@ class ChapterProductionV2Service:
 
         self._validated_ids(project_id, chapter_id, workflow_run_id, actor_user_id)
         report_ids = self._validated_uuid_sequence(report_ids, maximum=16)
-        target_segment_ids = self._validated_uuid_sequence(target_segment_ids, maximum=64)
+        target_segment_ids = self._validated_uuid_sequence(target_segment_ids, maximum=MAX_CHAPTER_SEGMENTS)
         plan = await self._review_handoff.execute(
             project_id=project_id,
             chapter_id=chapter_id,
@@ -874,11 +875,11 @@ class ChapterProductionV2Service:
             raise _invalid()
         known_order = {item.segment_id: item.ordinal for item in context.segment_map.segments}
         if (
-            not 1 <= len(selected) <= 64
+            not 1 <= len(selected) <= MAX_CHAPTER_SEGMENTS
             or len(selected) != len(set(selected))
             or any(type(item) is not UUID or item not in known_order for item in selected)
             or selected != tuple(sorted(selected, key=known_order.__getitem__))
-            or len(context.segment_map.segments) > 64
+            or len(context.segment_map.segments) > MAX_CHAPTER_SEGMENTS
         ):
             raise _invalid()
         metadata = self._run_metadata(context.run)
@@ -1266,11 +1267,11 @@ class ChapterProductionV2Service:
         selected = tuple(target_segment_ids)
         known_order = {item.segment_id: item.ordinal for item in segment_map.segments}
         if (
-            not 1 <= len(selected) <= 64
+            not 1 <= len(selected) <= MAX_CHAPTER_SEGMENTS
             or len(selected) != len(set(selected))
             or any(type(item) is not UUID or item not in known_order for item in selected)
             or selected != tuple(sorted(selected, key=known_order.__getitem__))
-            or len(segment_map.segments) > 64
+            or len(segment_map.segments) > MAX_CHAPTER_SEGMENTS
         ):
             raise _invalid()
         run_metadata = self._run_metadata(context.run)
@@ -1709,7 +1710,7 @@ class ChapterProductionV2Service:
             or value.get("status") not in {_ATTEMPT_STATUS_CLAIMED, _ATTEMPT_STATUS_FAILED}
             or type(value.get("target_segment_ids")) is not list
             or type(value.get("report_ids")) is not list
-            or len(value["target_segment_ids"]) > 64
+            or len(value["target_segment_ids"]) > MAX_CHAPTER_SEGMENTS
             or len(value["report_ids"]) > 16
         ):
             return False

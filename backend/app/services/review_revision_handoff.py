@@ -12,6 +12,7 @@ import asyncio
 from dataclasses import dataclass, field
 from uuid import UUID, uuid4
 
+from app.core.chapter_limits import MAX_CHAPTER_SEGMENTS
 from app.agents import CandidateChapterOutput, ReviewDrivenRevisionRequest, RevisionAgent
 from app.documents.chapter_segments import ChapterSegmentMap
 from app.llm import ProviderInvalidOutputError, ProviderTimeoutError
@@ -136,7 +137,7 @@ class ReviewRevisionHandoff:
         report_ids = self.service._validated_uuid_sequence(  # type: ignore[attr-defined]
             report_ids, maximum=16)
         target_segment_ids = self.service._validated_uuid_sequence(  # type: ignore[attr-defined]
-            target_segment_ids, maximum=64)
+            target_segment_ids, maximum=MAX_CHAPTER_SEGMENTS)
         scope = _Scope(
             project_id, chapter_id, workflow_run_id, actor_user_id,
             report_ids, target_segment_ids)

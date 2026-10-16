@@ -16,6 +16,7 @@ from typing import Final
 import unicodedata
 from uuid import UUID, uuid5
 
+from app.core.chapter_limits import MAX_CHAPTER_SEGMENTS
 from app.workspace.hashing import sha256_content
 
 
@@ -24,7 +25,6 @@ CURRENT_CHAPTER_SEGMENTER_VERSION: Final = MARKDOWN_V1_SEGMENTER_VERSION
 MAX_CHAPTER_CONTENT_BYTES = 2 * 1024 * 1024
 MAX_CHAPTER_LINES = 32_768
 MAX_CHAPTER_SEGMENT_BYTES = 16 * 1024
-MAX_CHAPTER_SEGMENTS = 1024
 MAX_REVIEW_SEGMENTS_PER_BATCH = 64
 
 _ATX_HEADING = re.compile(r"^ {0,3}(#{1,6})(?:[ \t]+|$)")

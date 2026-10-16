@@ -9,6 +9,7 @@ from uuid import UUID
 from sqlalchemy import select
 from sqlalchemy.orm import selectinload
 
+from app.core.chapter_limits import MAX_CHAPTER_SEGMENTS
 from app.agents import (
     ApprovedOutlineSnapshot,
     ChapterReviewTarget,
@@ -349,7 +350,7 @@ async def build_review_context_locked(
         document_id=document.id,
         version_id=version.id,
     )
-    if len(segment_map.segments) > 64 or segment_map.map_hash != segment_map.map_hash.lower():
+    if len(segment_map.segments) > MAX_CHAPTER_SEGMENTS or segment_map.map_hash != segment_map.map_hash.lower():
         raise _invalid()
     outline, outline_version = await service._outline_for_chapter(
         chapter, project_id, lock=True

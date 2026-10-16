@@ -8,6 +8,7 @@ from enum import Enum
 from typing import Self
 from uuid import UUID, uuid4
 
+from app.core.chapter_limits import MAX_CHAPTER_SEGMENTS
 from app.services.chapter_production_v2_contracts import (
     ChapterProductionV2ValidationError,
 )
@@ -127,7 +128,7 @@ class ProviderAttempt:
         if not (
             _nonzero_uuid(self.source_document_id)
             and _nonzero_uuid(self.source_version_id)
-            and _valid_references(self.target_segment_ids, limit=64)
+            and _valid_references(self.target_segment_ids, limit=MAX_CHAPTER_SEGMENTS)
         ):
             return False
         if self.kind is ProviderAttemptKind.FEEDBACK:
@@ -263,7 +264,7 @@ class ProviderAttempt:
             attempt_id = _uuid(payload.get("attempt_id"))
             kind = ProviderAttemptKind(payload.get("kind"))
             status = ProviderAttemptStatus(payload.get("status"))
-            targets = _uuid_tuple(payload.get("target_segment_ids"), limit=64)
+            targets = _uuid_tuple(payload.get("target_segment_ids"), limit=MAX_CHAPTER_SEGMENTS)
             reports = _uuid_tuple(payload.get("report_ids"), limit=16)
             optional_values = tuple(
                 payload.get(field)
@@ -374,7 +375,7 @@ def feedback_operation_key(
             _nonzero_uuid(value)
             for value in (workflow_run_id, action_request_id, source_version_id)
         )
-        or not _valid_references(target_segment_ids, limit=64)
+        or not _valid_references(target_segment_ids, limit=MAX_CHAPTER_SEGMENTS)
         or not _valid_hash(feedback_hash)
     ):
         raise _invalid() from None
@@ -404,7 +405,7 @@ def corrective_revision_operation_key(
     if (
         not all(_nonzero_uuid(value) for value in (workflow_run_id, source_version_id))
         or not _valid_references(report_ids, limit=16)
-        or not _valid_references(target_segment_ids, limit=64)
+        or not _valid_references(target_segment_ids, limit=MAX_CHAPTER_SEGMENTS)
         or not _valid_hash(report_input_hash)
     ):
         raise _invalid() from None

@@ -1,12 +1,14 @@
 """Execute an immutable Studio submission through the existing feedback saga."""
 
 import json
+
 from dataclasses import replace
 from uuid import UUID
 
 from pydantic import Field, field_validator
 from sqlalchemy import func, select
 
+from app.core.chapter_limits import MAX_CHAPTER_SEGMENTS
 from app.agents.chapter_writer_contracts import _StrictChapterModel, _canonical_uuid
 from app.core.errors import ConflictError
 from app.models import ActionRequest, ActionRequestStatus, Document, DocumentVersion, StudioFeedbackSubmission
@@ -34,7 +36,7 @@ class StudioFeedbackRevisionIntent(_StrictChapterModel):
     request: StudioFeedbackRevisionRequest
     actor_user_id: UUID
     feedback_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
-    target_segment_ids: tuple[UUID, ...] = Field(min_length=1, max_length=64)
+    target_segment_ids: tuple[UUID, ...] = Field(min_length=1, max_length=MAX_CHAPTER_SEGMENTS)
     result_version_id: UUID | None = None
 
     @field_validator("actor_user_id", "result_version_id", mode="before")
@@ -141,6 +143,9 @@ async def request_studio_feedback_revision(service, project_id, chapter_id, run_
                 feedback_hash=sha256_content(feedback), target_segment_ids=targets)
             run.metadata_ = {**run.metadata_, "studio_feedback_revision": intent.model_dump(mode="json")}
             await service._commit()
+        # The handoff uses fresh phase sessions. Do not let this request's earlier
+        # author-gate reads mask their committed state during candidate persistence.
+        service.session.expire_all()
         return await service.request_user_feedback_revision(project_id, chapter_id, run_id,
             request.action_request_id, actor_user_id=actor_id, feedback=feedback, target_segment_ids=targets)
     except Exception:
