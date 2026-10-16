@@ -2,6 +2,14 @@
 
 Dates use Asia/Tokyo. Target: v0.12.0 desktop personal trial.
 
+## 2026-10-16 — #313 desktop acceptance consolidation
+
+- M0–M2 are Squash merged: #314/#315 (single UI/desktop settings), #316 (delete/undo), #317 (comments), #318 (ideas), #319 (three outlines), #322 (creation form), #324 (copy/navigation). Baseline work that predated this plan is labeled regression coverage.
+- Additional merged work: #321 removes Qodana, #325 adds Docker/version Actions gates, #327 enables blank-project first review, #329 negotiates identity transport, #331 configures server reasoning policy, #333 supports bounded long-chapter revision/review, #335 binds exact revision context, #337 rejects unchanged revisions, #346 patches audited frontend dependencies. Reader PRs are still pending; merged does not mean released. Product versions remain 0.11.0.
+- Two synthetic real-model samples reached COMPLETED local finalization. The long sample also completed real Reader. Model quality is partial: requested edits can be applied, but omissions, length overruns, continuity blind spots and invalid reports remain. No literary-quality guarantee or retrospective full TDD claim.
+- Added docs/acceptance/v0.12.0-desktop.md and a sanitized, deduplicated 60-call usage ledger with model/input/version lineage, elapsed times, reported tokens and failures. Raw credentials/novel workspaces remain outside Git. The final release-commit Docker/UI verification is pending, distinct from earlier model runtimes.
+- This PR relates to #313 and does not close it: broader setting/mobile/legacy/export acceptance is deferred per the accepted plan. Release preparation will update all version declarations and upgrade notes in its own PR.
+
 ## 2026-10-16 — #345 frontend dependency advisory maintenance
 
 - The candidate Docker build reported 11 npm audit entries (7 high, 4 moderate), including development/transitive and unused server/RSC paths; this is not proof of exploitability in the static desktop app.
