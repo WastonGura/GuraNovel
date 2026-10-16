@@ -76,6 +76,11 @@ class OpenAICompatibleReaderPanelProvider:
         """Close underlying HTTP transport resources."""
         await self._transport.aclose()
 
+    @property
+    def model_snapshot(self) -> dict[str, str]:
+        """Server-owned configuration provenance, without credentials or endpoints."""
+        return {"provider": "openai_compatible", "model": self._model or "profile_default"}
+
     def _get_gateway(
         self,
         profile: AgentProfile,

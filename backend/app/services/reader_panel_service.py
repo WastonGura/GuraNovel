@@ -188,6 +188,14 @@ class ReaderPanelService:
         self._db = db
         self._provider = provider
 
+    def _model_snapshot(self) -> dict[str, str]:
+        if self._provider is None or isinstance(self._provider, DeterministicReaderPanelProvider):
+            return {"provider": "fake", "model": "deterministic-reader-panel-v1"}
+        snapshot = getattr(self._provider, "model_snapshot", None)
+        if isinstance(snapshot, dict) and snapshot.get("provider") == "openai_compatible" and isinstance(snapshot.get("model"), str):
+            return {"provider": snapshot["provider"], "model": snapshot["model"]}
+        return {"provider": "unknown"}
+
     async def _manuscript_segments(self, panel, version):
         if version is None or version.content_hash != panel.source_hash:
             raise ReaderPanelInvalidStateError()
@@ -792,6 +800,9 @@ class ReaderPanelService:
                 fresh_attempt.completed_at = datetime.now(timezone.utc)
                 await self._db.commit()
                 raise ReaderPanelBudgetExhaustedError()
+            # Pending/failed calls retain the full reservation. A validated result
+            # settles to its UTF-8 size, a conservative charge rather than model tokens.
+            fresh_attempt.output_tokens = output_charge
             fresh_attempt.status = ReaderPanelInvocationStatus.SUCCEEDED.value
             fresh_attempt.completed_at = datetime.now(timezone.utc)
             return output
@@ -1418,7 +1429,7 @@ class ReaderPanelService:
             status=ReaderPanelStatus.INDEPENDENT_READING.value,
             stale=doc.current_version_id != doc_version.id,
             config_snapshot=dict(config_snapshot),
-            model_snapshot={"provider": "fake", "model": "deterministic-reader-panel-v1"},
+            model_snapshot=self._model_snapshot(),
             prompt_snapshot={"version": "v1"},
             target_audience=list(final_target_audience),
             test_goals=list(final_test_goals),
@@ -1639,7 +1650,7 @@ class ReaderPanelService:
             "document_version_id": panel.document_version_id,
             "source_hash": panel.source_hash,
             "reader_profile_ids": list(panel.config_snapshot["reader_profile_ids"]),
-            "simulated": True if panel.model_snapshot.get("provider") == "fake" else None,
+            "simulated": {"fake": True, "openai_compatible": False}.get(panel.model_snapshot.get("provider")),
             "mode": panel.mode,
             "status": panel.status,
             "is_noop": False,

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 from collections.abc import AsyncIterator
 from pathlib import Path
 from uuid import UUID, uuid4
@@ -94,6 +95,56 @@ def _start(document: Document, version: DocumentVersion, key: str, **extra: obje
         "idempotency_key": key,
         **extra,
     }
+
+
+@pytest.mark.parametrize("check", ["budget", "output_budget", "provenance"])
+async def test_real_reader_accepts_desktop_chapter_and_records_its_provider(
+    reader_panel_client, async_session, tmp_path, check,
+):
+    from app.agents.reader_panel_providers import OpenAICompatibleReaderPanelProvider
+    project, chapter, document, version = await _seed_chapter(async_session, tmp_path)
+    prose = "林澈核对航海日志，保留证据并记录缺页。" * 300
+    version.metadata_ = {"segments": {"S001": prose}}
+    version.content_hash = hashlib.sha256(prose.encode()).hexdigest()
+    version.byte_size = len(prose.encode())
+    await async_session.commit()
+    calls = []
+
+    class ResponseStream(httpx.AsyncByteStream):
+        def __init__(self, payload):
+            self.payload = payload
+
+        async def __aiter__(self):
+            yield self.payload
+
+    async def response(request):
+        calls.append(json.loads(request.content))
+        output = {"overall_reaction": "证据链清晰，愿意继续阅读。", "continue_reading": "yes", "confidence": "high",
+            "strengths": [], "reactions": [], "concerns": []}
+        if check == "output_budget":
+            output["strengths"] = [{"summary": "证据链值得继续追踪。" * 15,
+                "evidence": [{"segment_ids": ["S001"], "note": "档案证据"}]} for _ in range(6)]
+            output["reactions"] = [{"segment_ids": ["S001"], "reaction": "证据链值得继续追踪。" * 15,
+                "emotion": "投入"} for _ in range(6)]
+        envelope = {"choices": [{"message": {"content": json.dumps(output)}, "finish_reason": "stop"}]}
+        return httpx.Response(200, headers={"content-type": "application/json"}, stream=ResponseStream(json.dumps(envelope).encode()))
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(response)) as model_client:
+        provider = OpenAICompatibleReaderPanelProvider("https://model.invalid", "test-only", model="reader-test", client=model_client)
+        reader_panel_client._transport.app.dependency_overrides[get_reader_panel_service] = lambda: ReaderPanelService(async_session, provider)
+        base = _url(project.id, chapter.id)
+        started = await reader_panel_client.post(base, json=_start(document, version, "long-reader", reader_profile_ids=["studio_plot", "studio_world"]))
+        assert started.status_code == 201, started.text
+        if check == "provenance":
+            assert started.json().get("simulated") is False
+            row = await async_session.get(ReaderPanelSession, UUID(started.json()["session_id"]))
+            assert row.model_snapshot == {"provider": "openai_compatible", "model": "reader-test"}
+        else:
+            advanced = await reader_panel_client.post(f"{base}/{started.json()['session_id']}/resume", json={})
+            assert advanced.status_code == 200, advanced.text
+            assert advanced.json()["status"] == "initial_reports_locked"
+            assert len(calls) == 2 and all(prose in call["messages"][1]["content"] for call in calls)
+        await provider.aclose()
 
 
 async def test_individual_invitations_bind_replay_and_report_identity(
