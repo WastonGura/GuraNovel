@@ -2,6 +2,13 @@
 
 Dates use Asia/Tokyo. Target: v0.12.0 desktop personal trial.
 
+## 2026-10-16 — #343 final application and upgrade verification
+
+- Application code is merged at c326494, with all six product versions at 0.12.0. Rebuilding from the exact checkout and force-recreating disposable containers confirmed the running image digests match this build. Health/version, migration 0012, actual proxy author workflow and retained old final prose/read-only UI passed. Machine-readable evidence and a synthetic UI screenshot are included.
+- Main full Actions 38853233647 passed on exact application commit c326494. Tag and GitHub Release have not been created; final publication is tracked by #343.
+- Comparing the published v0.11.0 tag revealed both 0011 and 0012 are new for an actual release upgrade. Documented 0011 current-setting copies, retained original histories/references, reused workspace paths, and destructive downgrade boundaries. No existing migration was changed. Also clarified Vite's actual Node minimum (20.19+/22.12+).
+- This follow-up changes documentation/evidence only. Latest-head documentation gates and byte-identical runtime-code verification are required before merging and tagging; the full code CI result remains separate from the intentionally skipped runtime jobs of a docs-only change.
+
 ## 2026-10-16 — #313 desktop acceptance consolidation
 
 - M0–M2 are Squash merged: #314/#315 (single UI/desktop settings), #316 (delete/undo), #317 (comments), #318 (ideas), #319 (three outlines), #322 (creation form), #324 (copy/navigation). Baseline work that predated this plan is labeled regression coverage.

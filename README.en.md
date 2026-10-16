@@ -68,7 +68,7 @@ When supported, optionally set `OPENAI_COMPATIBLE_REASONING_EFFORT=none|low|medi
 
 ## Local development
 
-Use Linux/macOS/WSL, Python 3.11+, uv, reachable PostgreSQL 16, and Node.js 20+/npm. Configure `backend/.env` with a writable POSIX `WORKSPACE_BASE_DIR` and local `DATABASE_URL`. Default Compose does not expose its database to the host, so prepare a separate reachable database.
+Use Linux/macOS/WSL, Python 3.11+, uv, reachable PostgreSQL 16, and Node.js 20.19+ or 22.12+/npm (Docker/CI uses Node 22). Configure `backend/.env` with a writable POSIX `WORKSPACE_BASE_DIR` and local `DATABASE_URL`. Default Compose does not expose its database to the host, so prepare a separate reachable database.
 
 ```bash
 cd backend

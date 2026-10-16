@@ -1,0 +1,40 @@
+{
+  "source_commit": "c326494fecf01fdf70cf055e6f457d2e34a9dc6b",
+  "verified_at_utc": "2026-10-16T04:58:42.419638+00:00",
+  "health": {
+    "15283": {
+      "status": "ok",
+      "version": "0.12.0"
+    },
+    "18213": {
+      "status": "ok",
+      "version": "0.12.0"
+    }
+  },
+  "images": {
+    "backend": "sha256:0014158cdd5f5c9218b5107af7b7d984986f0dea9d4550151df311e42f5ea156",
+    "frontend": "sha256:792bc691bfb5633221f3f6c426d9934ead97da65f904c52833ec80b46826017a"
+  },
+  "migration": "0012_setting_document_trash (head)",
+  "docker_author_http_smoke": {
+    "project_id": "efab2539-06bc-4080-a51c-8f89b9fc460f",
+    "chapter_id": "a5940d55-7766-4bb2-8281-cd55571e5f7c",
+    "generation_id": "144d44fc-e652-4382-a736-5dd49284322d",
+    "workflow_run_id": "1f6099ff-9eda-405e-af82-278fe948ec1b",
+    "final_version_id": "ff99fba1-aa66-456c-8a6d-0640f06e7030",
+    "provider": "fake",
+    "status": "COMPLETED"
+  },
+  "main_ci_run": 38853233647,
+  "main_ci_conclusion": "success",
+  "publication": "pending",
+  "ui": {
+    "old_project_id": "1325a29d-cee2-4f41-a36a-43e3a8685f31",
+    "old_chapter_id": "b09b8b23-cabd-4b3c-a3b2-f3996419c866",
+    "status": "local_final_readonly",
+    "body_preserved": true,
+    "screenshot": "release-local-final.png",
+    "provider": "fake"
+  },
+  "main_ci_url": "https://github.com/WastonGura/GuraNovel/actions/runs/38853233647"
+}
