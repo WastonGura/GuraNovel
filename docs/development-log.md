@@ -2,6 +2,12 @@
 
 Dates use Asia/Tokyo. Target: v0.12.0 desktop personal trial.
 
+## 2026-10-16 — #345 frontend dependency advisory maintenance
+
+- The candidate Docker build reported 11 npm audit entries (7 high, 4 moderate), including development/transitive and unused server/RSC paths; this is not proof of exploitability in the static desktop app.
+- npm updated react-router-dom 7.18.1 → 7.18.4 and vitest 4.1.10 → 4.1.12, then resolved compatible transitive patches without --force. npm audit reports zero known vulnerabilities at verification time. Product version remains 0.11.0 in this independent maintenance PR.
+- Existing author-route tests and latest-head frontend lint/unit/types/build/design/Chromium and Docker checks remain required in Actions. Dependency maintenance uses regression verification, not a fabricated new TDD Red. Release preparation will incorporate these locks while retaining its own 0.12.0 version update.
+
 ## 2026-10-16 — #332 latest-head CI follow-up
 
 - Actions found an old review-saga limit test still expecting 65 targets to overflow. Updated its fixture to 1025, preserving rejection above the new shared 1024-locator bound. This is maintenance of an existing boundary assertion, not a new TDD Red.
