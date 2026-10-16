@@ -18,6 +18,11 @@ Dates use Asia/Tokyo. Target: v0.12.0 desktop personal trial.
 - Existing sessions retain their immutable original configuration/source snapshot. A failed disposable live sample is retained; a new invitation is required to use the revised budget. Actual model quality remains separate from the streamed fixture evidence.
 - Live cold reading then produced two structurally valid reports (10.66/16.44 s; 7674/7661 input and 1664/2898 output tokens), but the old 4096-byte output reservation rejected them after invocation. A new Chinese multi-finding response test reproduced that failure. Default per-call output reservation is now 32768, preserving the 1000000 total reservation and provider output bounds. Actual tokens and reserved bytes remain distinct in acceptance records.
 
+## 2026-10-16 — #332 latest-head CI follow-up
+
+- Actions found an old review-saga limit test still expecting 65 targets to overflow. Updated its fixture to 1025, preserving rejection above the new shared 1024-locator bound. This is maintenance of an existing boundary assertion, not a new TDD Red.
+- PR #333 remains pending latest-head Actions and review; no release or version change is claimed.
+
 ## 2026-10-14 — #336 reject unchanged feedback revisions
 
 - Status: implementation; PR/latest-head Actions/review and real quality revalidation pending.
@@ -61,6 +66,13 @@ Dates use Asia/Tokyo. Target: v0.12.0 desktop personal trial.
 - Added a Docker build/health/real-HTTP author workflow gate through the frontend proxy, including persisted ideas, exactly three candidates, replay identities, selection, approval, prose save, review and idempotent local finalization. Both new jobs feed All Checks Passed.
 - Branch pushes no longer duplicate their PR checks: pull requests and main pushes remain gated, with manual dispatch available. This reduces queue pressure during stacked PR delivery without skipping any PR's latest-head validation.
 - Local clean-checkout Docker build at 7e31742 passed; services became healthy. Actual API acceptance exposed a previously uncovered 422 when reviewing a blank project's first chapter. This is a product gap to fix separately, not a reason to weaken the smoke gate. Deterministic Provider evidence is separate from real-model quality.
+
+## 2026-10-14 — #328 bounded model transport negotiation
+
+- Status: implemented; PR/latest-head Actions/review pending. No version bump.
+- Red: a compression-capable mock service returned valid gzip after the client's default compression negotiation, which the bounded raw transport correctly rejected.
+- Green: explicitly request identity encoding, matching the transport's accepted representation. Unexpected compression and oversized responses remain rejected; existing transport cases are retained.
+- Live read-only provider diagnostics confirmed identity negotiation is honored. Live model quality is a separate stage-acceptance item.
 
 ## 2026-10-14 — #326 first-chapter review
 
