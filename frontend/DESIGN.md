@@ -139,6 +139,12 @@ Use only the 4, 8, 12, 16, 24, and 32 pixel spacing tokens. Larger page breathin
 
 Prefer thin slate-blue-gray dividers, small corner radii, and dense but legible document rows over decorative cards.
 
+## Bookshelf and creation dialogs
+
+The bookshelf follows the existing monochrome author interface: a white canvas, black text, subdued gray metadata, rounded book covers and a soft blue interaction glow. These surfaces are an explicit exception to the older blue application-shell styling described above. Keep the greeting centered above a content column of at most 1000px, with generous top breathing room on large desktops. Use content flow and vertical scrolling; never reserve full empty shelves with fixed coordinates or clip controls in short windows. Keep card carousels horizontal, including their edge fade and keyboard access.
+
+Creation dialogs use the same white paper and restrained ink, with 32px corners, a soft blurred backdrop and a width of at most 600px. Labels use a medium 13px weight, inputs use regular 14px text, and the 26px title establishes hierarchy. Keep ordinary creation short: title, collection and introduction for a novel; title and description for a setting collection. Place optional metadata and internal identifiers in disclosures. Use a quiet cancel action and a compact dark primary action, with visible blue keyboard focus. Allow the body to scroll and keep footer actions reachable in short windows. Native modal behavior must isolate background controls, focus the title field, return focus on cancellation and prevent accidental dismissal during submission.
+
 ## Components
 
 Make the active item unmistakable through text, position, and a subtle surface change; do not rely on a colored mark alone. Use a prominent page title, modest section headings, and 14–16 pixel body text with comfortable line height.

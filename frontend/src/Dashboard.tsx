@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState, type FormEvent, type MouseEvent, type PointerEvent } from 'react'
 import { useLocation, useNavigate, useSearchParams } from 'react-router-dom'
+import CreationDialog from './CreationDialog'
 import {
   createProject,
   createSettingCollection,
@@ -61,22 +62,8 @@ function ProjectForm({
   const [pending, setPending] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [slugSuffix] = useState(() => crypto.randomUUID().slice(0, 8))
-  const [returnFocus] = useState(() => document.activeElement as HTMLElement | null)
-  const dialogRef = useRef<HTMLDialogElement>(null)
-  const titleRef = useRef<HTMLInputElement>(null)
   const errorRef = useRef<HTMLParagraphElement>(null)
   const submitting = useRef(false)
-
-  useEffect(() => {
-    const dialog = dialogRef.current!
-    if (typeof dialog.showModal === 'function') dialog.showModal()
-    else dialog.setAttribute('open', '')
-    titleRef.current?.focus()
-    return () => {
-      if (typeof dialog.close === 'function') dialog.close()
-      returnFocus?.focus()
-    }
-  }, [returnFocus])
 
   useEffect(() => { if (error) errorRef.current?.focus() }, [error])
 
@@ -130,78 +117,44 @@ function ProjectForm({
   }
 
   return (
-    <div className="dashboard-dialog-backdrop" role="presentation" onMouseDown={(event) => {
-      if (event.target === event.currentTarget && !submitting.current) onClose()
-    }}>
-      <dialog ref={dialogRef} className="dashboard-create-dialog novel-create-dialog" aria-labelledby="create-project-title" onCancel={(event) => {
-        event.preventDefault()
-        if (!submitting.current) onClose()
-      }} onKeyDown={(event) => {
-        if (event.key !== 'Tab') return
-        const controls = Array.from(event.currentTarget.querySelectorAll<HTMLElement>('button:not(:disabled), input:not(:disabled), select:not(:disabled), textarea:not(:disabled), summary, a[href], [tabindex="0"]'))
-          .filter(control => control.getClientRects().length > 0)
-        const target = event.shiftKey ? controls.at(-1) : controls[0]
-        const boundary = event.shiftKey ? controls[0] : controls.at(-1)
-        if (document.activeElement === boundary && target) { event.preventDefault(); target.focus() }
-      }}>
-        <button className="dashboard-dialog-close" data-glow type="button" onClick={onClose} disabled={pending} aria-label="关闭创建作品">×</button>
-        <form className="workspace-form novel-create-form" onSubmit={submit} aria-label="创建作品">
+    <CreationDialog titleId="create-project-title" closeLabel="关闭创建作品" busy={pending} onClose={() => { if (!submitting.current) onClose() }}>
+      <form className="creation-form" onSubmit={submit} aria-label="创建作品">
+        <header className="creation-header">
+          <span className="creation-kicker">让故事开始</span>
           <h2 id="create-project-title">创建作品</h2>
-          <div className="form-grid">
-            <label className="form-field-full">标题<input ref={titleRef} value={title} onChange={(event) => setTitle(event.target.value)} required aria-describedby={error ? 'create-project-error' : undefined} /></label>
-            <label>题材（可选）<input value={genre} onChange={(event) => setGenre(event.target.value)} /></label>
-            <label>目标平台（可选）<input value={platform} onChange={(event) => setPlatform(event.target.value)} /></label>
-            <label className="form-field-full">
-              设定集
-              <select
-                value={selectedCollectionId}
-                onChange={(event) => setSelectedCollectionId(event.target.value)}
-                aria-label="设定集"
-              >
-                <option value="new">同时创建空白设定集 (默认)</option>
-                {collections.map((col) => (
-                  <option key={col.id} value={col.id}>
-                    {col.title} (r{col.revision})
-                  </option>
-                ))}
-              </select>
-            </label>
-            <label className="form-field-full">
-              简介（可选）
-              <textarea
-                value={introduction}
-                onChange={(event) => setIntroduction(event.target.value)}
-                rows={3}
-                placeholder="作品简介…"
-              />
-            </label>
-            <label>
-              标签（可选）
-              <input
-                value={labels}
-                onChange={(event) => setLabels(event.target.value)}
-                placeholder="标签，用逗号分隔"
-              />
-            </label>
-            <label>
-              封面地址或预设（可选）
-              <input
-                value={cover}
-                onChange={(event) => setCover(event.target.value)}
-                placeholder="cover-1.jpg 或图片地址"
-              />
-            </label>
-          </div>
-          <details className="novel-create-advanced">
-            <summary>高级选项：作品标识</summary>
-            <p id="slug-help">自动生成内部标识。需要固定链接时可自行填写。</p>
-            <label>Slug<input value={slug} onChange={(event) => setSlug(event.target.value)} aria-describedby="slug-help create-project-error" /></label>
+          <p>给新故事取个名字，其余的可以慢慢补充。</p>
+        </header>
+        <fieldset className="creation-fields" disabled={pending}>
+          <label>标题<input value={title} onChange={event => setTitle(event.target.value)} required placeholder="你的故事叫什么？" aria-describedby={error ? 'create-project-error' : undefined} /></label>
+          <label>设定集<select value={selectedCollectionId} onChange={event => setSelectedCollectionId(event.target.value)} aria-label="设定集">
+            <option value="new">同时创建空白设定集 (默认)</option>
+            {collections.map(col => <option key={col.id} value={col.id}>{col.title} (r{col.revision})</option>)}
+          </select><span className="creation-field-hint">为这部作品新建，或沿用已有世界。</span></label>
+          <label>简介（可选）<textarea value={introduction} onChange={event => setIntroduction(event.target.value)} rows={3} placeholder="一句话，记下这个故事的起点…" /></label>
+          <details className="creation-disclosure">
+            <summary>更多作品信息</summary>
+            <div className="creation-field-pair">
+              <label>题材（可选）<input value={genre} onChange={event => setGenre(event.target.value)} placeholder="如：日常、悬疑、幻想" /></label>
+              <label>目标平台（可选）<input value={platform} onChange={event => setPlatform(event.target.value)} placeholder="准备在哪里连载" /></label>
+            </div>
+            <div className="creation-field-pair">
+              <label>标签（可选）<input value={labels} onChange={event => setLabels(event.target.value)} placeholder="标签，用逗号分隔" /></label>
+              <label>封面地址或预设（可选）<input value={cover} onChange={event => setCover(event.target.value)} placeholder="cover-1.jpg 或图片地址" /></label>
+            </div>
           </details>
-          {error && <p ref={errorRef} id="create-project-error" className="notice" role="alert" tabIndex={-1}>{error}</p>}
-          <button data-glow type="submit" disabled={pending}>{pending ? '正在创建作品…' : '创建作品'}</button>
-        </form>
-      </dialog>
-    </div>
+          <details className="creation-disclosure">
+            <summary>高级选项：作品标识</summary>
+            <p id="slug-help" className="creation-field-hint">自动生成内部标识。需要固定链接时可自行填写。</p>
+            <label>Slug<input value={slug} onChange={event => setSlug(event.target.value)} aria-describedby="slug-help" /></label>
+          </details>
+        </fieldset>
+        {error && <p ref={errorRef} id="create-project-error" className="creation-error" role="alert" tabIndex={-1}>{error}</p>}
+        <footer className="creation-footer">
+          <button className="creation-cancel" type="button" onClick={onClose} disabled={pending}>取消</button>
+          <button className="creation-submit" data-glow type="submit" disabled={pending}>{pending ? '正在创建作品…' : '创建作品'}<span aria-hidden="true">↗</span></button>
+        </footer>
+      </form>
+    </CreationDialog>
   )
 }
 
@@ -219,19 +172,18 @@ function SettingCollectionForm({
   const [pending, setPending] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
-  useEffect(() => {
-    const closeOnEscape = (event: globalThis.KeyboardEvent) => { if (event.key === 'Escape') onClose() }
-    window.addEventListener('keydown', closeOnEscape)
-    return () => window.removeEventListener('keydown', closeOnEscape)
-  }, [onClose])
+  const submitting = useRef(false)
+  const errorRef = useRef<HTMLParagraphElement>(null)
+  useEffect(() => { if (error) errorRef.current?.focus() }, [error])
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
-    if (pending) return
+    if (submitting.current) return
     if (!title.trim()) {
       setError('请填写标题。')
       return
     }
+    submitting.current = true
     setPending(true)
     setError(null)
     try {
@@ -244,33 +196,38 @@ function SettingCollectionForm({
       onClose()
       navigate(`/setting-collections/${encodeURIComponent(collection.id)}`)
     } catch {
-      setError('设定集创建失败，已保留内容，请检查网络后重试。')
+      setError('设定集创建失败，已保留内容，请检查网络后重试。如响应丢失，请先关闭弹窗核对设定集列表。')
     } finally {
+      submitting.current = false
       setPending(false)
     }
   }
 
   return (
-    <div className="dashboard-dialog-backdrop" role="presentation" onMouseDown={(event) => {
-      if (event.target === event.currentTarget) onClose()
-    }}>
-      <div className="dashboard-create-dialog" role="dialog" aria-modal="true" aria-labelledby="create-collection-title">
-        <button className="dashboard-dialog-close" data-glow type="button" onClick={onClose} aria-label="关闭新建设定集">×</button>
-        <form className="workspace-form" onSubmit={submit} aria-label="新建设定集">
+    <CreationDialog titleId="create-collection-title" closeLabel="关闭新建设定集" busy={pending} onClose={() => { if (!submitting.current) onClose() }}>
+      <form className="creation-form" onSubmit={submit} aria-label="新建设定集">
+        <header className="creation-header">
+          <span className="creation-kicker">收好一个世界</span>
           <h2 id="create-collection-title">新建设定集</h2>
-          <div className="form-grid">
-            <label>标题<input autoFocus value={title} onChange={(event) => setTitle(event.target.value)} required /></label>
-            <label>Slug (optional)<input value={slug} onChange={(event) => setSlug(event.target.value)} placeholder="留空自动生成" /></label>
-            <label className="form-field-full">
-              说明（可选）
-              <textarea value={description} onChange={(event) => setDescription(event.target.value)} rows={2} placeholder="设定集说明…" />
-            </label>
-          </div>
-          {error && <p className="notice" role="alert">{error}</p>}
-          <button data-glow type="submit" disabled={pending}>{pending ? '正在创建设定集…' : '新建设定集'}</button>
-        </form>
-      </div>
-    </div>
+          <p>人物、地点与世界规则，放在一起慢慢生长。</p>
+        </header>
+        <fieldset className="creation-fields" disabled={pending}>
+          <label>标题<input value={title} onChange={event => setTitle(event.target.value)} required placeholder="给这个世界取个名字" /></label>
+          <label>说明（可选）<textarea value={description} onChange={event => setDescription(event.target.value)} rows={4} placeholder="这个世界是什么样的？" /></label>
+          <p className="creation-field-hint">设定集可关联多部作品，创建后可继续添加和编辑设定。</p>
+          <details className="creation-disclosure">
+            <summary>高级选项：设定集标识</summary>
+            <p id="collection-slug-help" className="creation-field-hint">留空自动生成；仅在需要固定标识时填写。</p>
+            <label>设定集标识<input value={slug} onChange={event => setSlug(event.target.value)} aria-describedby="collection-slug-help" placeholder="留空自动生成" /></label>
+          </details>
+        </fieldset>
+        {error && <p ref={errorRef} className="creation-error" role="alert" tabIndex={-1}>{error}</p>}
+        <footer className="creation-footer">
+          <button className="creation-cancel" type="button" onClick={onClose} disabled={pending}>取消</button>
+          <button className="creation-submit" data-glow type="submit" disabled={pending}>{pending ? '正在创建设定集…' : '新建设定集'}<span aria-hidden="true">↗</span></button>
+        </footer>
+      </form>
+    </CreationDialog>
   )
 }
 
@@ -677,7 +634,7 @@ export default function Dashboard() {
         <section className="dashboard-section dashboard-recent" aria-labelledby="recent-title">
           <h2 id="recent-title"><img src={icon('akar-icons_clock')} alt="" />最近创作</h2>
           <div className="dashboard-carousel">
-            <div className="dashboard-row recent-row" ref={recentRow} onScroll={(event) => setRecentIndex(Math.round(event.currentTarget.scrollLeft / 295))}>
+            <div className={`dashboard-row recent-row${projects?.length === 0 ? ' is-empty' : ''}`} ref={recentRow} onScroll={(event) => setRecentIndex(Math.round(event.currentTarget.scrollLeft / 295))}>
               {projects === null && !failed && Array.from({ length: 4 }, (_, index) => <div className="dashboard-skeleton recent-card" key={index} />)}
               {recent.map((project) => <button className="recent-card project-card" data-glow type="button" key={project.id} onClick={() => setSelected(project)} aria-label={`Open ${project.title}`}>
                 <span className="recent-art"><img src={artwork(project)} alt="" /></span>
@@ -699,8 +656,13 @@ export default function Dashboard() {
             <button className="novel-add" data-glow type="button" onClick={() => setCreating(true)} aria-label="新建作品"><img src={icon('bx_message-square-add')} alt="" /></button>
           </div>
           <div className="dashboard-carousel">
-            <div className="dashboard-row novels-row" ref={novelsRow} onScroll={(event) => setNovelIndex(Math.round(event.currentTarget.scrollLeft / 171))}>
+            <div className={`dashboard-row novels-row${projects?.length === 0 ? ' is-empty' : ''}`} ref={novelsRow} onScroll={(event) => setNovelIndex(Math.round(event.currentTarget.scrollLeft / 171))}>
               {projects === null && !failed && Array.from({ length: 6 }, (_, index) => <div className="dashboard-skeleton novel-card" key={index} />)}
+              {projects?.length === 0 && <button className="dashboard-empty-create" data-glow type="button" onClick={() => setCreating(true)} aria-label="创建第一部作品">
+                <span className="empty-create-icon" aria-hidden="true">+</span>
+                <span><strong>写下你的第一部作品</strong><span>从一个名字、一个念头开始。</span></span>
+                <span className="empty-create-arrow" aria-hidden="true">↗</span>
+              </button>}
               {projects?.map((project) => <button className="novel-card project-card" data-glow type="button" key={project.id} onClick={() => setSelected(project)} aria-label={`Open ${project.title}`}>
                 <span className="novel-art"><img src={artwork(project)} alt="" /></span>
                 <span className="novel-info"><strong>{project.title}</strong><span>字数：{wordCount(project)}</span><time dateTime={project.updated_at}>{relativeTime(project.updated_at)}</time></span>
@@ -720,7 +682,7 @@ export default function Dashboard() {
             <button className="collection-add" data-glow type="button" onClick={() => setCreatingCollection(true)} aria-label="新建设定集"><img src={icon('bx_message-square-add')} alt="" /></button>
           </div>
           <div className="dashboard-carousel">
-            <div className="dashboard-row collections-row" ref={collectionsRow} onScroll={(event) => setCollectionIndex(Math.round(event.currentTarget.scrollLeft / 220))}>
+            <div className={`dashboard-row collections-row${collections?.length === 0 ? ' is-empty' : ''}`} ref={collectionsRow} onScroll={(event) => setCollectionIndex(Math.round(event.currentTarget.scrollLeft / 220))}>
               {collections === null && !collectionsFailed && Array.from({ length: 4 }, (_, index) => <div className="dashboard-skeleton collection-card" key={index} />)}
               {collections?.map((col) => {
                 const refCount = projects?.filter((p) => p.setting_collection_id === col.id).length ?? 0
