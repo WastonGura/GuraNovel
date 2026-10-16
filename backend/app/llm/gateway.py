@@ -324,9 +324,12 @@ class StructuredOutputProfile(Generic[OutputT]):
     temperature: float | None = None
     top_p: float | None = None
     max_tokens: int | None = None
+    reasoning_effort: Literal["none", "low", "medium", "high", "max"] | None = None
 
     def __post_init__(self) -> None:
         _validate_machine_identifier(self.profile_id)
+        if self.reasoning_effort not in (None, "none", "low", "medium", "high", "max"):
+            raise ValueError("unsupported server reasoning budget")
         StructuredOutputProvenance(
             self.provider_kind, self.model_identifier, self.prompt_template_version
         )
@@ -405,6 +408,7 @@ class StructuredTransportRequest:
     temperature: float | None = None
     top_p: float | None = None
     max_tokens: int | None = None
+    reasoning_effort: Literal["none", "low", "medium", "high", "max"] | None = None
 
 
 @dataclass(frozen=True)
@@ -502,6 +506,7 @@ class StructuredOutputGateway(Generic[OutputT]):
             temperature=self.__profile.temperature,
             top_p=self.__profile.top_p,
             max_tokens=self.__profile.max_tokens,
+            reasoning_effort=self.__profile.reasoning_effort,
         )
         provider_error: Exception | None = None
         try:

@@ -2,6 +2,19 @@
 
 Dates use Asia/Tokyo. Target: v0.12.0 desktop personal trial.
 
+## 2026-10-14 — #330 server reasoning budget
+
+- Status: implementation and focused verification; PR/latest-head Actions/review pending.
+- Red: the compatible-provider behavioral fixture rejected calls because the requested server budget never reached the HTTP body. Green: validated optional profile policy propagates to the transport; omission retains provider defaults. 80 gateway/transport/outline cases pass.
+- Server configuration supports none/low/medium/high/max for initial outlines, V2 writer/revision/review and Reader; clients cannot override it through author APIs. Strict output, lineage, size and timeout policies remain intact.
+- Live outline sampling succeeded with deepseek-flash (860 input / 4366 output tokens, 31.22 s). High-default reasoning on the longer prose call remained unsuccessful; subsequent quality sampling explicitly records none and a 120 s bound. No claim that real prose/revision quality has passed yet. No version bump.
+
+## 2026-10-14 — #328 bounded model transport negotiation
+
+- Status: implemented; PR #329/latest-head Actions/review pending. No version bump.
+- Red: a compression-capable mock service returned valid gzip after default compression negotiation, which the bounded raw transport rejected. Green: explicitly request identity; all 20 transport cases pass, retaining unexpected-compression and size-limit rejection.
+- Live read-only provider diagnostics confirmed identity negotiation is honored. Model quality remains a separate acceptance item.
+
 ## 2026-10-14 — #323 release CI gates
 
 - Status: CI implementation; PR/latest-head Actions pending. No version bump.
