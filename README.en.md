@@ -1,318 +1,92 @@
 # GuraNovel
 
-<p align="center">
-  <a href="README.md">简体中文</a> | <b>English</b>
-</p>
+[简体中文](README.md) · [GitHub Actions](https://github.com/WastonGura/GuraNovel/actions/workflows/ci.yml) · [GPLv3](LICENSE)
 
-<p align="center">
-  <a href="https://github.com/WastonGura/GuraNovel/actions/workflows/ci.yml"><img src="https://github.com/WastonGura/GuraNovel/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
-  <a href="LICENSE"><img src="https://img.shields.io/badge/License-GPLv3-blue.svg" alt="License: GPL v3"></a>
-  <a href="https://www.python.org/"><img src="https://img.shields.io/badge/Python-3.11%2B-blue.svg" alt="Python"></a>
-  <a href="https://fastapi.tiangolo.com/"><img src="https://img.shields.io/badge/FastAPI-0.115%2B-009688.svg" alt="FastAPI"></a>
-  <a href="https://react.dev/"><img src="https://img.shields.io/badge/React-19-61DAFB.svg" alt="React"></a>
-  <a href="https://github.com/langchain-ai/langgraph"><img src="https://img.shields.io/badge/LangGraph-1.2.11-FF6F00.svg" alt="LangGraph"></a>
-</p>
+GuraNovel is an AI writing workbench for individual novel authors. **v0.12.0 targets a desktop personal trial**. Check [GitHub Releases](https://github.com/WastonGura/GuraNovel/releases) for publication status.
 
-**GuraNovel** is a modular, high-reliability **AI-assisted long-form novel creation and review platform**.
+## Delivered workflow
 
-Long-form novel authoring differs fundamentally from short-form text generation. It is prone to world-lore contradictions, plot holes, stylistic drift, and ungrounded "AI hallucination". GuraNovel is engineered specifically to ensure long-term plot continuity and rigorous multi-stage review. It unifies **Concept Ideation**, **Setting Evolution**, a **Chapter Production Pipeline (Outline - Drafting - Multi-Stage Review - Revision Loops)**, and a **Reader Panel Multi-Agent Critique System**, enabling authors to maintain full creative authority while benefiting from structured human-in-the-loop AI collaboration.
+Create a novel → save chapter ideas → generate three outline alternatives → compare, select, edit and approve an exact version → draft and revise prose → editorial review → optional Reader → finalize locally.
 
----
+The bookshelf, Studio and setting collections are the official interface. Old links redirect; legacy V1 tasks remain read-only. Ideas and comments persist with revision/version checks and local recovery copies. Unmatched comment anchors are explicitly marked. Outline batches and context versions are retained; selecting creates an independent editable outline, and prose generation locks its approved version. Setting documents support editing, soft deletion and restoration with identity/history preserved.
 
-## End-to-End Novel Workflow
+Editor, Chief Editor and Lore provide staged reviews. Optional Reader advice never rewrites prose. Local finalization saves within this service and does not publish externally. Models can omit edits, miss contradictions, overrun length targets or return invalid structured output; multiple reviewers do not guarantee correctness. See the [desktop acceptance record](docs/acceptance/v0.12.0-desktop.md) for actual calls, failures and limitations. The default **fake Provider** produces deterministic workflow examples, not evidence of model quality.
 
-GuraNovel covers the entire lifecycle of long-form novel creation from initial concept ideation to ongoing serialized chapter reviews:
+Setting discussions, new concept/maintenance interfaces, legacy continuation, full historical recovery, mobile support, cover/introduction fixes, volumes, assistant consistency, exports/EPUB, collaboration and public deployment are deferred. See the [plan](docs/development-plan-2026-10.md), [interface notes](docs/frontend-interface.md) and [#313](https://github.com/WastonGura/GuraNovel/issues/313).
 
-```text
-┌────────────────────────┐     ┌──────────────────────┐     ┌────────────────────────┐     ┌───────────────────────┐
-│ 1. Concept Selection   │ ──> │ 2. Lore & Setting    │ ──> │ 3. Chapter Production  │ ──> │ 4. Multi-Agent Reader │
-│    & Multi-Ideation    │     │    Consistency Maint.│     │    Outline/Draft/Review│     │    Panel 6-Persona MVP│
-└────────────────────────┘     └──────────────────────┘     └────────────────────────┘     └───────────────────────┘
-```
+## Docker quickstart
 
-### 1. Concept Selection & Ideation
-- **Multi-Direction Parallel Brainstorming**: Automatically generates diverse thematic and stylistic concept proposals based on core story ideas;
-- **Multi-Dimensional Comparison**: Evaluates and compares proposals across story appeal, long-form expandability, and setting feasibility;
-- **Dedicated Project Workspace**: Instantly creates an isolated project workspace protected by POSIX filesystem permissions upon concept selection.
-
-### 2. World-Building & Lore Maintenance
-- **Structured Lore Management**: Character dossiers, factions, magic/power systems, world rules, and the master plot outline are centrally tracked;
-- **Project Maintenance Mode**: When settings evolve or expand during serialization, the system automatically runs **impact blast-radius analysis** and **coordinated consistency confirmation** to prevent lore contradictions.
-
-### 3. Chapter Production Pipeline (Chapter Production V2)
-- **Chapter Outline Planning**: Automatically drafts chapter outlines grounded in previous chapter events and world lore, supporting online author editing and confirmation;
-- **Manuscript Drafting**: Generates chapter prose strictly bound to the locked outline and lore constraints;
-- **Multi-Stage In-Depth Review**: Automatically triggers structural integrity checks, stylistic pacing analysis, and world-lore consistency verification;
-- **Collaborative Revision Loops**:
-  - **Revision Feedback**: Authors can provide concrete correction directives;
-  - **Manual Edit Integration**: Authors can directly edit the draft online and persist new version snapshots;
-  - **Non-Blocking Warning Proceed (`accept_warning`)**: Acknowledges minor stylistic suggestions without blocking the pipeline;
-  - **Blocking Revision Request (`request_revision`)**: Triggers targeted rewrites and iterative version evolution for critical narrative flaws.
-
-### 4. Reader Panel Multi-Agent Critique System (v0.11.0)
-- **6 Diverse Simulated Reader Personas**:
-  - `general_immersive` (Everyday immersive reader: focuses on emotional resonance and pacing);
-  - `low_patience` (Low-patience reader: focuses on opening hooks and pacing drags);
-  - `genre_experienced` (Genre veteran: identifies cliches, tropes, and novel twists);
-  - `character_emotion` (Character enthusiast: evaluates character motivations and emotional arcs);
-  - `style_sensitive` (Prose critic: scrutinizes phrasing, rhythm, and descriptive texture);
-  - `newcomer` (Genre newcomer: spots cognitive overload and world-building barriers).
-- **Cold-Reading Isolation**: Reader agents only read manuscript segments in complete isolation from peer identities or outputs to avoid echo-chamber bias;
-- **Normalized Issue Extraction & Blind Ballots**: The Moderator agent extracts normalized reading concerns; initial voting masks originator identities;
-- **Bounded Discussion Turns**: Readers engage in multi-round, segment-bound discussions with code-owned termination to reach clear consensus;
-- **Minority-Risk Preservation**: Retains independent high-risk alerts (`minority_high_risk`) and separately presents all-reader vs. target-audience voting distributions;
-- **Non-Mutation & Editor Handoff**: The Reader Panel acts strictly as a diagnostic lens—it generates a structured read-only Review Report for editorial decision-making and **never alters manuscript prose**.
-
----
-
-## Key Highlights
-
-- 🎯 **Guaranteed Long-Form Continuity**: World lore, master outlines, and chapter draft hashes are strictly coupled, eliminating plot holes and power-scaling collapses.
-- ✍️ **Author in Creative Control (Human-in-the-Loop)**: AI serves as an assistant and virtual reader panel; all critical outlines, revisions, and final approvals remain firmly in the author's hands.
-- 👥 **Realistic Reader-Perspective Diagnostics**: Moves beyond generic, sycophantic LLM polishing to deliver candid, multi-perspective feedback across engagement, pacing, plot twists, and accessibility.
-- 🛡️ **Version Snapshots & Ephemeral Crash Recovery**: Every generation, review, and edit produces an immutable version snapshot with monotonic event sequencing and single-step crash recovery.
-
----
-
-## System Requirements & Constraints
-
-Before deploying or running GuraNovel, please ensure your environment meets the following criteria:
-
-1. **Operating System (POSIX Environment Required)**:
-   - Project workspaces require POSIX `0700` filesystem permission boundaries;
-   - **The backend must run on Linux, macOS, or WSL2**;
-   - *Windows native filesystem paths (e.g. `D:\...`) do not support POSIX permission boundaries and must be run inside WSL2.*
-2. **Database Requirement**:
-   - **PostgreSQL 16+** with the `pgcrypto` extension enabled (for `gen_random_uuid()`).
-3. **Language Toolchains (for local execution)**:
-   - **Python**: `>= 3.11` with [`uv`](https://github.com/astral-sh/uv);
-   - **Node.js**: `>= 20` and `npm` (for the frontend);
-   - **Docker**: Docker & Docker Compose (for containerized deployment).
-
----
-
-## Quickstart & Deployment
-
-The frontend uses one interface: the bookshelf, Studio, and standalone setting collections. Retired workbench links redirect to these pages. Ideation and maintenance controls are not yet available in the new interface; existing backend tasks and data remain intact. See [frontend routes and compatibility notes](docs/frontend-interface.md).
-
-GuraNovel offers three deployment pathways. We recommend **One-Click Full-Stack Docker Compose** or the **Local Startup Script**.
-
-### Option 1: One-Click Full-Stack Docker Compose (Recommended)
-
-Ideal for launching PostgreSQL, the FastAPI backend, and the Nginx frontend in a unified containerized setup:
+Install Docker Engine/Desktop and Compose. On Windows use Docker Desktop Linux containers; the backend relies on POSIX workspace permissions.
 
 ```bash
-# 1. Clone the repository
 git clone https://github.com/WastonGura/GuraNovel.git
 cd GuraNovel
-
-# 2. Build and launch all services, waiting for database and backend health checks
+git rev-parse HEAD
 docker compose up -d --build --wait
+docker compose ps
 ```
 
-The first build downloads base images and installs dependencies, so it can take several minutes. Later builds reuse the Docker cache. After the command succeeds, verify the deployment with the following commands. The health checks explicitly bypass `HTTP_PROXY`/`ALL_PROXY` so a local proxy cannot intercept loopback requests and return `502`:
+After release, check out `v0.12.0` to pin the version. Record the tested commit. No API key is needed for the default examples; Reader is off. Open the [workbench](http://127.0.0.1:5173) or [API docs](http://127.0.0.1:8000/docs).
 
 ```bash
-docker compose ps
 curl --noproxy '*' -fsS http://127.0.0.1:8000/api/v1/health
 curl --noproxy '*' -fsS http://127.0.0.1:5173/api/v1/health
 ```
 
-- **Frontend Workbench**: Open [http://localhost:5173](http://localhost:5173) in your browser.
-- **Backend API Docs**: Open [http://localhost:8000/docs](http://localhost:8000/docs).
-
-The frontend and backend listen only on host address `127.0.0.1` by default, and PostgreSQL is not exposed on a host port. If `5173` or `8000` are already in use, override the public ports when starting the stack:
-
-```bash
-GURANOVEL_FRONTEND_PORT=15173 GURANOVEL_BACKEND_PORT=18000 \
-  docker compose up -d --build --wait
-```
-
-If LAN or remote server access is required, explicitly change the bind address:
-
-```bash
-GURANOVEL_BIND_ADDRESS=0.0.0.0 docker compose up -d --build --wait
-```
-
-> [!WARNING]
-> Binding to `0.0.0.0` exposes the frontend and backend ports to external networks. Configure a firewall and serve the application through a TLS-enabled reverse proxy on servers.
-
-Inspect startup or runtime logs with:
+Use `curl.exe` in PowerShell. Ports bind to loopback and PostgreSQL is not published. `GURANOVEL_BIND_ADDRESS=0.0.0.0` exposes application ports to other hosts; keep the default loopback binding for this trial. Public deployment is not covered by acceptance. Set `GURANOVEL_FRONTEND_PORT` / `GURANOVEL_BACKEND_PORT` in the root `.env` if occupied. That file configures Compose interpolation; model settings use the separate `backend/.env`.
 
 ```bash
 docker compose logs --tail=100 backend frontend db
-```
-
-Stop the containers while preserving database and workspace data:
-
-```bash
 docker compose down
 ```
 
-> [!WARNING]
-> `docker compose down -v` permanently deletes the Compose-managed PostgreSQL data and project workspace volumes. Use it only when you intend to erase all application data.
+`docker compose down` retains volumes; `docker compose down -v` permanently deletes the database and workspaces. Never use it for upgrades. If Docker is unavailable, check Docker Desktop Linux/WSL integration or the Linux Docker service.
 
-> [!TIP]
-> **Docker Troubleshooting**:
-> If you encounter `failed to connect to the docker API at unix:///var/run/docker.sock`:
-> - **Windows WSL2 Users**: Open **Docker Desktop** on Windows and check `Settings -> Resources -> WSL Integration` to ensure your Linux distro is enabled.
-> - **Linux Native Users**: Run `sudo service docker start` in your terminal to start the Docker daemon.
-> If Docker reports `address already in use`, stop the process using that port or restart with the port override variables above.
+## Real models
 
----
-
-### Option 2: One-Click Local Startup Script (Development)
-
-Ideal for local developers with Python 3.11+ and Node.js 20+ installed:
+Copy `backend/.env.example` to `backend/.env` and configure your service. This file is excluded from Git and Docker build contexts. Base Compose does not forward it automatically; use:
 
 ```bash
-# Make executable and run the startup script
-./scripts/start-local.sh
+docker compose -f docker-compose.yml -f docker-compose.models.example.yml up -d --build --wait
 ```
 
-This script automatically:
-1. Starts the PostgreSQL 16 container via Docker (or verifies local port 5432);
-2. Installs Python dependencies and runs database migrations (`alembic upgrade head`);
-3. Installs Node dependencies and concurrently launches FastAPI (`8000`) and the Vite dev server (`5173`).
+Configure in `backend/.env`:
 
----
-
-### Option 3: Production Bare Metal / VM Deployment (Zero Docker)
-
-For manual deployment on a dedicated Linux server:
-
-#### 1. Install & Configure PostgreSQL 16
-```bash
-sudo apt update && sudo apt install -y postgresql-16
-sudo -u postgres psql -c "CREATE DATABASE guranovel;"
-sudo -u postgres psql -c "CREATE USER postgres WITH ENCRYPTED PASSWORD 'your_secure_password';"
-sudo -u postgres psql -c "GRANT ALL PRIVILEGES ON DATABASE guranovel TO postgres;"
+```dotenv
+CHAPTER_GENERATION_PROVIDER=openai_compatible
+CHAPTER_PRODUCTION_PROVIDER=openai_compatible
+READER_PANEL_PROVIDER=openai_compatible
+OPENAI_COMPATIBLE_BASE_URL=https://your-provider.example/v1
+OPENAI_COMPATIBLE_API_KEY=replace-with-your-private-key
+OPENAI_COMPATIBLE_MODEL=your-supported-model
+OPENAI_COMPATIBLE_TIMEOUT_SECONDS=120
 ```
 
-#### 2. Configure and Run Backend
+The override enables quick Reader; change its `READER_PANEL_MODE` to `off` to disable it. Container database/workspace settings still take precedence over sample host paths. Never commit credentials.
+
+When supported, optionally set `OPENAI_COMPATIBLE_REASONING_EFFORT=none|low|medium|high|max`; otherwise it is omitted. Sampling used `deepseek-flash`, `none`, 120 seconds; other models may differ. See [DeepSeek thinking mode](https://api-docs.deepseek.com/guides/thinking_mode/). After a lost/timeout response, inspect the original task before recovery instead of creating duplicate model work.
+
+## Local development
+
+Use Linux/macOS/WSL, Python 3.11+, uv, reachable PostgreSQL 16, and Node.js 20+/npm. Configure `backend/.env` with a writable POSIX `WORKSPACE_BASE_DIR` and local `DATABASE_URL`. Default Compose does not expose its database to the host, so prepare a separate reachable database.
+
 ```bash
 cd backend
-cp .env.example .env
-
-# Edit .env with your production database credentials and workspace path:
-# DATABASE_URL=postgresql+asyncpg://postgres:your_secure_password@localhost:5432/guranovel
-# WORKSPACE_BASE_DIR=/var/lib/guranovel/workspaces
-
-# Install dependencies and apply migrations
-uv sync --frozen --no-dev
+uv sync --frozen --all-groups
 uv run alembic upgrade head
-
-# Run uvicorn via systemd or supervisor
-uv run uvicorn app.main:app --host 127.0.0.1 --port 8000 --workers 4
+uv run uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
 ```
 
-#### 3. Build and Serve Frontend via Nginx
-```bash
-cd ../frontend
-npm ci
-npm run build
-```
-Configure Nginx (`/etc/nginx/sites-available/guranovel`):
-```nginx
-server {
-    listen 80;
-    server_name your-novel-domain.com;
+In another terminal:
 
-    location / {
-        root /path/to/GuraNovel/frontend/dist;
-        index index.html;
-        try_files $uri $uri/ /index.html;
-    }
-
-    location /api/v1/ {
-        proxy_pass http://127.0.0.1:8000/api/v1/;
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
-    }
-}
-```
-
----
-
-## Technical Architecture & Under the Hood
-
-```mermaid
-graph TD
-    UI[Frontend Workbench<br/>React 19 + TypeScript + Vite] -->|Fail-Closed REST API| API[FastAPI HTTP Routing Layer]
-    API --> SVC[Domain Services Layer]
-    SVC --> LG[LangGraph Orchestrator<br/>11-Node State Graph]
-    SVC --> RP[Reader Panel Engine<br/>Multi-Agent Focus Group]
-    LG --> DB[(PostgreSQL 16<br/>SQLAlchemy + Asyncpg)]
-    RP --> DB
-    SVC --> FS[Project Workspaces<br/>POSIX 0700 Directories]
-    LG --> LLM[Model Provider Boundary<br/>Fake / OpenAI-Compatible]
-    RP --> LLM
-```
-
-- **Backend Architecture**:
-  - **State Graph Orchestration**: Built on **LangGraph 1.2.11** featuring an 11-node state graph with transactional boundary isolation and monotonic event sequencing (`WorkflowEvent.event_sequence`).
-  - **Asynchronous Persistence**: Powered by **SQLAlchemy 2.0 (Asyncpg)** connection pooling with strict version-bound snapshots and SHA-256 hash checks.
-  - **Model Abstraction Boundary**: Supports deterministic Mock/Fake providers for fast test suites and standard OpenAI-Compatible LLM endpoints.
-- **Frontend Architecture**:
-  - **Stack**: React 19, TypeScript, Vite, React Router 7.
-  - **Design System**: Fully compliant with WAI-ARIA accessibility standards, verified by `@google/design.md`.
-  - **Fail-Closed Contracts**: Strict client-side decoders ensuring automatic redaction of internal stack traces, private paths, and raw novel text.
-
----
-
-## Verification & Testing
-
-### Backend Gates
-```bash
-cd backend
-
-# Code linting & formatting
-uv run ruff check .
-
-# Fast non-integration unit tests (1800+ tests)
-uv run pytest -m "not integration"
-
-# Alembic migration upgrade & rollback tests
-uv run pytest tests/test_alembic.py
-
-# PostgreSQL integration suite
-TEST_DATABASE_URL=postgresql+asyncpg://postgres:postgres@127.0.0.1:5432/guranovel_test \
-  uv run pytest -m integration
-```
-
-### Frontend Gates
 ```bash
 cd frontend
-
-# Code linting
-npm run lint
-
-# TypeScript check & production build
-npm run build
-
-# Design system guideline validation
-npx --no-install @google/design.md lint DESIGN.md
-
-# Vitest component & route tests
-npm run test -- --run
-
-# Playwright browser end-to-end tests
-npm run test:e2e
+npm ci
+npm run dev
 ```
 
----
+Use Red → Green → Refactor for new behaviors. Existing implementations receive regression coverage, not retrospective TDD claims. Run focused checks locally using uv; GitHub Actions runs Ruff, architecture/unit, PostgreSQL integration/migrations, frontend lint/unit/types/build/design/Chromium, version consistency and Docker author workflow gates.
 
-## Documentation Navigation
+Use issue branches → PR → review → squash merge; never push main directly. See [CONTRIBUTING.md](CONTRIBUTING.md), the [development log](docs/development-log.md) and [release/upgrade notes](docs/releases/v0.12.0.md). Database and workspace data must be backed up/restored together.
 
-- [System Architecture](docs/architecture.md): Detailed component relationships, data flows, and concurrency models.
-- [Reader Panel Verification Matrix](docs/reader-panel-verification.md): Acceptance criteria mapping (AC-01 through AC-14) and automated test evidence.
-- [Backend & Database Setup](backend/README.md): Local PostgreSQL setup, project workspaces, and database migrations.
-- [Contributing Guidelines](CONTRIBUTING.md): Code review policies, release verification gates, and repository conventions.
-
----
-
-## License
-
-This project is licensed under the GNU General Public License v3.0 ([GPL-3.0](LICENSE)).
+Backend: FastAPI, SQLAlchemy, PostgreSQL and versioned workspaces. Frontend: React, TypeScript and Vite. Licensed under [GPLv3](LICENSE).

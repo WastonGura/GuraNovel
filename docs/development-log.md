@@ -108,6 +108,14 @@ Dates use Asia/Tokyo. Target: v0.12.0 desktop personal trial.
 - Removed the Qodana workflow at the maintainer's explicit request. GitHub Actions ci.yml remains the canonical quality gate; no token or license update is needed.
 - Validation: diff review and Actions run 38515444409 passed, with unrelated product jobs skipped by path filtering. This configuration change does not claim behavioral TDD evidence.
 
+## 2026-10-16 — #343 v0.12.0 release preparation
+
+- Dependencies #335/#337/#339/#341/#342/#346 are now Squash merged. Initial release Actions rejected omitted README lifecycle instructions for explicit network binding and destructive down -v. Both language READMEs now retain those literal commands with their effects; focused deployment documentation and health tests pass. This is a documentation regression correction, not a new TDD feature. Latest-head release Actions must pass before merge.
+- Status: release preparation only, not a published tag/release. Feature versions remained 0.11.0; this dedicated branch synchronizes backend pyproject/uv.lock/API and frontend package/npm lock to 0.12.0. Updated the health contract expectation accordingly.
+- uv regenerated the lock without dependency upgrades; lock revision becomes 5. The CI-pinned uv 0.11.21 accepts frozen all-groups synchronization. npm version --no-git-tag-version --ignore-scripts updated only package/root versions. The version checker and both mismatch-detection tests pass. These are release checks, not a new behavioral TDD claim.
+- Replaced obsolete README capability guarantees and deployment claims with the verified desktop scope, uv development workflow, failure/model limits and exact Compose model configuration. The example override forwards the ignored backend/.env and explicitly overrides base Reader=off; Compose config validation passed without resolving secrets.
+- Added release/paired database-workspace backup and additive migration 0012 upgrade notes. Existing published migrations remain unchanged. Latest-head Actions, independent release diff review, final merged-commit Docker/UI and immutable tag/Release are still pending.
+
 ## 2026-10-14 — #309 author capability and status copy
 
 - Status: local implementation and focused verification; PR/latest-head Actions/review pending.

@@ -1,0 +1,9 @@
+# Copy backend/.env.example to backend/.env, then set real provider credentials there.
+# docker compose -f docker-compose.yml -f docker-compose.models.example.yml up -d --build --wait
+services:
+  backend:
+    env_file:
+      - ./backend/.env
+    environment:
+      # The base Compose file explicitly disables Reader; override it here.
+      READER_PANEL_MODE: quick

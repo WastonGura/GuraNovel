@@ -1,328 +1,96 @@
 # GuraNovel
 
-<p align="center">
-  <b>简体中文</b> | <a href="README.en.md">English</a>
-</p>
+[English](README.en.md) · [GitHub Actions](https://github.com/WastonGura/GuraNovel/actions/workflows/ci.yml) · [GPLv3](LICENSE)
 
-<p align="center">
-  <a href="https://github.com/WastonGura/GuraNovel/actions/workflows/ci.yml"><img src="https://github.com/WastonGura/GuraNovel/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
-  <a href="LICENSE"><img src="https://img.shields.io/badge/License-GPLv3-blue.svg" alt="License: GPL v3"></a>
-  <a href="https://www.python.org/"><img src="https://img.shields.io/badge/Python-3.11%2B-blue.svg" alt="Python"></a>
-  <a href="https://fastapi.tiangolo.com/"><img src="https://img.shields.io/badge/FastAPI-0.115%2B-009688.svg" alt="FastAPI"></a>
-  <a href="https://react.dev/"><img src="https://img.shields.io/badge/React-19-61DAFB.svg" alt="React"></a>
-  <a href="https://github.com/langchain-ai/langgraph"><img src="https://img.shields.io/badge/LangGraph-1.2.11-FF6F00.svg" alt="LangGraph"></a>
-</p>
+GuraNovel 是供个人作者使用的 AI 小说创作工作台。**v0.12.0 的交付范围是桌面个人试写**；发布状态以 [GitHub Releases](https://github.com/WastonGura/GuraNovel/releases) 为准。
 
-**GuraNovel** 是一款模块化、高可靠的 **AI 辅助长篇小说创作与审阅工作台平台**。
+## 当前可以做什么
 
-长篇小说创作不同于单篇短文生成，极易出现设定前后矛盾、剧情断层、文风飘忽以及“AI 自嗨”等问题。GuraNovel 专为解决长篇创作的连贯性与深度审阅而设计，将**立项构思**、**世界观演进**、**章节生产流水线（大纲-起草-多维审阅-修改反馈）**与**读者剧场（Reader Panel）多 Agent 模拟评审**深度整合，让创作者能够牢牢把控长篇故事脉络，实现高质量、确定性的人机协同创作。
+创建作品 → 保存章节思路 → 生成三个大纲方案 → 比较、选择、编辑并确认 → 生成与修订正文 → 审阅 → 可选 Reader → 本地定稿。
 
----
+- 正式入口为书架、Studio 和独立设定集。旧工作台链接兼容跳转，历史 V1 任务暂时只读。
+- 思路与评论保存到服务端，使用修订/版本校验处理冲突；本地副本用于失败恢复。正文变化后无法匹配的评论会明确标记。
+- 每批三个大纲保留任务、输入和上下文版本；“换一组”保留历史批次。选中的大纲独立保存，确认绑定准确版本，起草后锁定。
+- 设定文档支持直接编辑、软删除和恢复，保留身份与历史。批量操作逐项反馈。
+- 正文可编辑、提交修订并经 Editor、Chief Editor、Lore 审阅；可选 Reader 提供只读诊断，不改写正文。本地定稿保存在当前服务中，不会外部发布。
 
-## 当前桌面交付范围
+模型仍可能漏改、漏检矛盾、超出长度目标或返回无效结构。多角色审阅不保证正确，作者需要检查内容。两个人工小说样本的实际用量、耗时和失败见[桌面验收记录](docs/acceptance/v0.12.0-desktop.md)。默认 **fake Provider** 只返回确定性示例，用于体验流程，不代表实际模型质量。
 
-v0.12.0 开发以书架、Studio 和独立设定集为正式入口：创建作品、保存章节思路、每批生成三个大纲方案、比较与选择、编辑并确认准确版本，然后进入正文修订、审阅及本地定稿。Reader 为可选分支，需要服务端启用。功能是否已交付以对应 PR 合并及阶段验收记录为准；当前包版本仍为 v0.11.0，发布准备 PR 统一升级。
+设定讨论、新构思/维护界面、旧任务续办、完整历史恢复入口、手机适配、封面/简介修复、分卷、助手统一、导出/EPUB、多人协作和公开部署留待后续版本。未接入的界面能力会禁用或说明限制。见[开发计划](docs/development-plan-2026-10.md)、[前端入口说明](docs/frontend-interface.md)和 [#313](https://github.com/WastonGura/GuraNovel/issues/313)。
 
-设定条目支持直接编辑；设定讨论、历史恢复入口、构思与维护的新界面、旧 V1 任务续办、导出和完整手机适配留待后续版本。全局设置入口明确禁用；Studio 的设定按钮打开作品关联设定集。本地定稿仅保存在本机服务，不会外部发布。
+## Docker 启动（推荐）
 
-默认 fake Provider 返回确定性示例，只用于流程验证。真实模型调用需要配置 `CHAPTER_GENERATION_PROVIDER`、`CHAPTER_PRODUCTION_PROVIDER` 和 `OPENAI_COMPATIBLE_*`，质量验收单独记录，不能由测试替身结果推断。以下完整流程介绍包含后端能力与后续产品方向。
-
-兼容模型可选设置 `OPENAI_COMPATIBLE_REASONING_EFFORT=none|low|medium|high|max`，作用于三个大纲方案、V2 写作/修订/审阅及 Reader。省略时不发送此参数；仅在服务商支持时设置。桌面抽测使用 `deepseek-flash`、`none` 与 120 秒超时，以实际用量和耗时为准。[DeepSeek 思考模式说明](https://api-docs.deepseek.com/guides/thinking_mode/)介绍了该参数与默认行为。
-
-## 完整创作工作流
-
-GuraNovel 覆盖长篇小说从创意立项到多章节连载审阅的全生命周期：
-
-```text
-┌─────────────────┐     ┌──────────────────┐     ┌────────────────────────┐     ┌──────────────────────┐
-│  1. 立项与概念   │ ──> │  2. 世界观与设定  │ ──> │  3. 章节生产流水线     │ ──> │  4. 读者剧场多维评审  │
-│     多方案比选   │     │     一致性维护   │     │  大纲/起草/审阅/修改反馈│     │   6角色模拟诊断/报告 │
-└─────────────────┘     └──────────────────┘     └────────────────────────┘     └──────────────────────┘
-```
-
-### 1. 立项与概念筛选（Concept Selection & Ideation）
-- **多方向并行构思**：根据核心灵感自动拓展不同风格与题材的立项概念方案；
-- **多维度对比评估**：从故事吸引力、长篇延展性、设定可行性等维度综合打分对比；
-- **独立项目工作区**：选定方案后一键立项，自动在文件系统中创建具备 POSIX 权限隔离的专属项目工作区。
-
-### 2. 世界观与设定演进（World-Building & Lore Maintenance）
-- **结构化设定管理**：角色档案、势力阵营、能力体系、世界观规则及全书大纲统一归档；
-- **项目维护模式（Project Maintenance）**：长篇连载中发生设定扩充或微调时，系统自动进行**波及范围影响分析**与**一致性协同确认**，确保故事演进不“吃设定”。
-
-### 3. 章节生产流水线（Chapter Production V2）
-- **章节大纲规划**：结合前序章节剧情与世界观设定，自动生成章节细纲，支持创作者在线调整确认；
-- **正文草稿起草**：严格依据已锁定大纲与设定约束起草正文；
-- **多阶段深度审阅**：正文起草后自动触发多维审查（剧情结构、文风节奏、世界观一致性）；
-- **人机协同修改循环**：
-  - **修改建议反馈**：创作者可针对审阅意见提出具体修改要求；
-  - **手动编辑融合**：创作者可随时直接在线修改正文并保存新版本；
-  - **非阻塞警告放行（`accept_warning`）**：对轻微风格建议可确认放行；
-  - **阻塞项强制修订（`request_revision`）**：针对关键逻辑漏洞触发定向重写与版本迭代。
-
-### 4. 读者剧场多角色模拟评审（Reader Panel MVP）
-- **6 种预设模拟读者画像**：
-  - `general_immersive`（普通沉浸读者：关注代入感与情绪流）
-  - `low_patience`（低耐心读者：关注开篇钩子与节奏拖沓点）
-  - `genre_experienced`（资深类型读者：关注老套套路与设定新意）
-  - `character_emotion`（角色关注读者：关注角色动机与情感弧光）
-  - `style_sensitive`（文风敏感读者：关注语言表达与描写质感）
-  - `newcomer`（新手读者：关注信息过载与理解门槛）
-- **盲读隔离**：读者 Agent 仅能读取正文切片，完全隔离其他读者身份与评语，避免先入为主；
-- **规范化议题提取与盲投**：由主持人 Agent 规范化归纳核心阅读关切，初始投票隐藏提议者信息；
-- **有界多轮讨论**：针对争议切片展开深入讨论，由代码统一控制终止轮次与收敛结论；
-- **少数派高危风险预警**：独立留存少数派高危警示（`minority_high_risk`），分别呈现全员原始分布与目标受众分布；
-- **只读诊断与非篡改原则**：读者剧场仅作为辅助诊断工具，生成单份只读的编辑交接报告供创作者决策，**绝不直接擅自修改小说正文**。
-
----
-
-## 核心特色与亮点
-
-- 🎯 **长篇一致性保障**：从世界观设定、全书大纲到章节正文版本哈希严格绑定，彻底告别长篇小说“前后打架”、“战力崩溃”。
-- ✍️ **创作者牢牢主导（Human-in-the-Loop）**：AI 扮演助手与读者群，关键大纲确认、修改建议输入、版本定稿等关键节点完全由创作者掌控。
-- 👥 **真实读者视角诊断**：跳出单一大模型“过度迎合”的泛泛润色，通过多读者画像从阅读快感、节奏、毒点、理解门槛等多角度出具直言不讳的诊断报告。
-- 🛡️ **严格的版本快照与防崩溃恢复**：每一次生成、审阅与修改均具备精确的版本哈希与事务快照，支持随时回滚与故障状态单步恢复。
-
----
-
-## 环境要求与运行约束
-
-在部署与运行 GuraNovel 之前，请确认满足以下环境条件：
-
-1. **操作系统（必须为 POSIX 环境）**：
-   - 本系统项目工作区依赖 POSIX `0700` 文件权限隔离机制；
-   - **后端必须运行在 Linux / macOS / WSL2 环境**；
-   - *Windows 原生路径（如 `D:\...`）不支持权限隔离边界，请在 WSL2 中运行。*
-2. **数据库支持**：
-   - 必须使用 **PostgreSQL 16+**（需具备 `pgcrypto` 扩展支持 `gen_random_uuid()`）。
-3. **语言与工具链（本地原生运行时）**：
-   - **Python**：`>= 3.11`，使用 [`uv`](https://github.com/astral-sh/uv) 管理依赖；
-   - **Node.js**：`>= 20` 及 `npm`（若在本地运行前端）；
-   - **Docker**：Docker & Docker Compose（用于一键容器化部署）。
-
----
-
-## 快速开始与一键部署
-
-前端统一使用书架、Studio 创作区和独立设定集。旧工作台链接自动跳转到新版；尚未接入的构思、项目维护操作会明确提示，已有后端任务和数据保留。详见[前端入口与兼容说明](docs/frontend-interface.md)。
-
-GuraNovel 提供三种部署方式，推荐使用 **Docker Compose 全栈一键启动** 或 **本地一键启动脚本**。
-
-### 方式一：Docker Compose 全栈一键部署（推荐）
-
-适合希望一键拉起数据库、后端与前端完整环境的用户：
+需要 Docker Engine/Desktop 与 Compose。Windows 使用 Docker Desktop 的 Linux 容器；后端工作区依赖 POSIX 权限，原生 Windows 不作为服务部署环境。
 
 ```bash
-# 1. 克隆代码仓库
 git clone https://github.com/WastonGura/GuraNovel.git
 cd GuraNovel
-
-# 2. 构建并启动全部服务，等待数据库和后端通过健康检查
+git rev-parse HEAD
 docker compose up -d --build --wait
+docker compose ps
 ```
 
-首次构建需要下载基础镜像并安装依赖，可能耗时数分钟；后续构建会复用 Docker 缓存。命令成功返回后，可通过以下方式确认服务状态。健康检查显式绕过 `HTTP_PROXY`/`ALL_PROXY`，避免本机代理截获回环请求并返回 `502`：
+发布后可先切到 `v0.12.0` 标签固定版本；验收时请记录实际提交。默认无需模型密钥，Reader 关闭。打开 [工作台](http://127.0.0.1:5173) 或 [API 文档](http://127.0.0.1:8000/docs)。
 
 ```bash
-docker compose ps
 curl --noproxy '*' -fsS http://127.0.0.1:8000/api/v1/health
 curl --noproxy '*' -fsS http://127.0.0.1:5173/api/v1/health
 ```
 
-- **前端工作台**：打开浏览器访问 [http://localhost:5173](http://localhost:5173)
-- **后端 API 文档**：访问 [http://localhost:8000/docs](http://localhost:8000/docs)
-
-前后端端口默认仅监听宿主机的 `127.0.0.1`，PostgreSQL 端口不会暴露到宿主机。如 `5173` 或 `8000` 已被占用，可在启动时覆盖公开端口：
-
-```bash
-GURANOVEL_FRONTEND_PORT=15173 GURANOVEL_BACKEND_PORT=18000 \
-  docker compose up -d --build --wait
-```
-
-如确需允许局域网或服务器外部访问，可显式修改监听地址：
-
-```bash
-GURANOVEL_BIND_ADDRESS=0.0.0.0 docker compose up -d --build --wait
-```
-
-> [!WARNING]
-> 监听 `0.0.0.0` 会向外部网络开放前后端端口。服务器部署时应配置防火墙，并通过带 TLS 的反向代理对外提供服务。
-
-查看启动或运行日志：
+PowerShell 可用 `curl.exe`。前后端仅绑定 `127.0.0.1`；PostgreSQL 不向宿主机开放端口。`GURANOVEL_BIND_ADDRESS=0.0.0.0` 会向其他主机开放前后端端口；本版默认保持 loopback，不验收公开部署。端口占用时，在根目录 `.env` 中设置 `GURANOVEL_FRONTEND_PORT` 和 `GURANOVEL_BACKEND_PORT` 后重新启动。这个根目录文件用于 Compose 参数；模型配置位于另一个文件 `backend/.env`。
 
 ```bash
 docker compose logs --tail=100 backend frontend db
-```
-
-停止容器但保留数据库和工作区数据：
-
-```bash
 docker compose down
 ```
 
-> [!WARNING]
-> `docker compose down -v` 会永久删除 Compose 管理的 PostgreSQL 数据和项目工作区卷，仅在确实需要清空所有数据时使用。
+`docker compose down` 保留数据卷；`docker compose down -v` 会永久删除数据库和正文工作区，升级时不要使用。Windows 无法连接 Docker 时，先启动 Docker Desktop 并检查 Linux/WSL Integration；Linux 检查 Docker 服务状态。
 
-> [!TIP]
-> **Docker 常见问题排查**：
-> 若执行出现 `failed to connect to the docker API at unix:///var/run/docker.sock`：
-> - **Windows WSL2 用户**：请打开 Windows 上的 **Docker Desktop**，并在 `Settings -> Resources -> WSL Integration` 中勾选开启当前 WSL 发行版。
-> - **Linux 原生用户**：请在终端执行 `sudo service docker start` 启动 Docker 服务。
-> 若提示 `address already in use`，请停止占用端口的程序，或使用上方的端口覆盖变量重新启动。
+## 使用真实模型
 
----
-
-### 方式二：本地一键极速启动脚本（开发环境推荐）
-
-适合本地已安装 Python 3.11+ 和 Node.js 20+ 的开发者：
+先复制 `backend/.env.example` 为 `backend/.env`，填写服务商配置；该文件被 Git 和 Docker 构建上下文忽略。普通 Compose 不会自动转发这个文件，使用随仓库提供的覆盖文件：
 
 ```bash
-# 赋予执行权限并直接运行一键脚本
-./scripts/start-local.sh
+docker compose -f docker-compose.yml -f docker-compose.models.example.yml up -d --build --wait
 ```
 
-该脚本将全自动处理以下步骤：
-1. 自动启动 PostgreSQL 16 数据库容器（或检测本地 5432 端口）；
-2. 自动安装后端 Python 依赖并执行数据库迁移（`alembic upgrade head`）；
-3. 自动安装前端 Node 依赖并并行拉起 FastAPI（`8000` 端口）与 Vite 前端热重载服务（`5173` 端口）。
+在 `backend/.env` 中设置：
 
----
-
-### 方式三：生产环境裸机 / 虚拟机部署（零 Docker 原生部署）
-
-适合在专属 Linux 云服务器上进行生产化托管：
-
-#### 1. 安装与配置 PostgreSQL 16
-```bash
-sudo apt update && sudo apt install -y postgresql-16
-sudo -u postgres psql -c "CREATE DATABASE guranovel;"
-sudo -u postgres psql -c "CREATE USER postgres WITH ENCRYPTED PASSWORD 'your_secure_password';"
-sudo -u postgres psql -c "GRANT ALL PRIVILEGES ON DATABASE guranovel TO postgres;"
+```dotenv
+CHAPTER_GENERATION_PROVIDER=openai_compatible
+CHAPTER_PRODUCTION_PROVIDER=openai_compatible
+READER_PANEL_PROVIDER=openai_compatible
+OPENAI_COMPATIBLE_BASE_URL=https://your-provider.example/v1
+OPENAI_COMPATIBLE_API_KEY=replace-with-your-private-key
+OPENAI_COMPATIBLE_MODEL=your-supported-model
+OPENAI_COMPATIBLE_TIMEOUT_SECONDS=120
 ```
 
-#### 2. 配置并运行后端服务
+覆盖文件启用 `quick` Reader；不需要时将其 `READER_PANEL_MODE` 改为 `off`。Compose 仍使用容器数据库和工作区，不采用示例 `.env` 的宿主机数据库路径。不要提交实际密钥。
+
+服务商支持时可设置 `OPENAI_COMPATIBLE_REASONING_EFFORT=none|low|medium|high|max`；省略则不发送该参数。抽测使用 `deepseek-flash`、`none` 和 120 秒，不能推断其他模型也有相同延迟或质量。[DeepSeek 思考模式文档](https://api-docs.deepseek.com/guides/thinking_mode/)说明其参数。长调用遇到连接超时后，应先查看原任务状态，再按原身份恢复；不要直接创建重复生成任务。
+
+## 本地开发与检查
+
+本地后端服务使用 Linux/macOS/WSL、Python 3.11+、uv 和可访问的 PostgreSQL 16；前端使用 Node.js 20+ 与 npm。准备 `backend/.env`，配置可写的 POSIX `WORKSPACE_BASE_DIR` 和本地 `DATABASE_URL`。Compose 默认数据库没有宿主机端口，本地服务需要单独准备数据库。
+
 ```bash
 cd backend
-cp .env.example .env
-
-# 编辑 .env，配置生产数据库连接与工作区目录：
-# DATABASE_URL=postgresql+asyncpg://postgres:your_secure_password@localhost:5432/guranovel
-# WORKSPACE_BASE_DIR=/var/lib/guranovel/workspaces
-
-# 安装依赖并应用迁移
-uv sync --frozen --no-dev
+uv sync --frozen --all-groups
 uv run alembic upgrade head
-
-# 使用生产进程管理器（如 systemd / supervisor / pm2）启动 uvicorn：
-uv run uvicorn app.main:app --host 127.0.0.1 --port 8000 --workers 4
+uv run uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
 ```
 
-#### 3. 构建并配置前端 Nginx 托管
-```bash
-cd ../frontend
-npm ci
-npm run build
-```
-在 `/etc/nginx/sites-available/guranovel` 中配置 Nginx：
-```nginx
-server {
-    listen 80;
-    server_name your-novel-domain.com;
+另一个终端：
 
-    location / {
-        root /path/to/GuraNovel/frontend/dist;
-        index index.html;
-        try_files $uri $uri/ /index.html;
-    }
-
-    location /api/v1/ {
-        proxy_pass http://127.0.0.1:8000/api/v1/;
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
-    }
-}
-```
-
----
-
-## 技术架构与底层实现
-
-```mermaid
-graph TD
-    UI[前端工作台<br/>React 19 + TypeScript + Vite] -->|Fail-Closed REST API| API[FastAPI HTTP 路由层]
-    API --> SVC[领域服务层 Domain Services]
-    SVC --> LG[LangGraph 编排引擎<br/>11 节点状态图]
-    SVC --> RP[读者剧场引擎 Reader Panel<br/>多角色模拟评测]
-    LG --> DB[(PostgreSQL 16<br/>SQLAlchemy + Asyncpg)]
-    RP --> DB
-    SVC --> FS[项目工作区 Workspaces<br/>POSIX 0700 权限隔离]
-    LG --> LLM[模型接入边界<br/>Fake / OpenAI-Compatible]
-    RP --> LLM
-```
-
-- **后端架构**：
-  - **状态图编排引擎**：基于 **LangGraph 1.2.11** 搭建的 11 节点状态图，具备节点级事务边界隔离与单调递增事件序列（`WorkflowEvent.event_sequence`）。
-  - **高并发持久化**：采用 **SQLAlchemy 2.0 (Asyncpg)** 异步连接池，严格执行数据版本与哈希一致性校验。
-  - **模型接入抽象**：统一支持 Mock/Fake（用于确定性自动化测试）与标准 OpenAI Compatible 协议。
-- **前端架构**：
-  - **技术栈**：React 19、TypeScript、Vite、React Router 7。
-  - **设计系统规范**：严格遵循 WAI-ARIA 无障碍规范并通过 `@google/design.md` 自动化质量校验。
-  - **Fail-Closed 数据契约**：前端 API 客户端严格执行数据解码校验，杜绝内部错误堆栈、敏感路径与未经处理的正文泄露。
-
----
-
-## 质量门禁与测试运行
-
-### 后端门禁
-```bash
-cd backend
-
-# 代码风格与静态分析
-uv run ruff check .
-
-# 快速非集成单元测试（1800+ 用例）
-uv run pytest -m "not integration"
-
-# Alembic 数据库迁移升级与回滚测试
-uv run pytest tests/test_alembic.py
-
-# PostgreSQL 真实数据库集成测试（需要测试数据库）
-TEST_DATABASE_URL=postgresql+asyncpg://postgres:postgres@127.0.0.1:5432/guranovel_test \
-  uv run pytest -m integration
-```
-
-### 前端门禁
 ```bash
 cd frontend
-
-# ESLint 语法与规范检查
-npm run lint
-
-# TypeScript 类型检查与生产构建
-npm run build
-
-# Google Design.md 规范与设计系统 Token 检查
-npx --no-install @google/design.md lint DESIGN.md
-
-# Vitest 单元与路由测试
-npm run test -- --run
-
-# Playwright 浏览器端到端全流程测试
-npm run test:e2e
+npm ci
+npm run dev
 ```
 
----
+开发采用 TDD，新增行为先确认有效 Red，再实现 Green 和整理。已有实现补充的是回归测试。本地只运行改动对应的定向测试；完整门禁由 Actions 执行：Ruff、架构/单元、真实 PostgreSQL 集成与迁移、前端 lint/单元/类型/构建/设计规范、Chromium、版本一致性和 Docker 作者流程。Python 命令使用 `uv run`，安装使用 `uv sync --frozen --all-groups`。
 
-## 文档导航
+按 issue 分支 → PR → review → Squash merge 交付，不直接推送 main。规则见 [CONTRIBUTING.md](CONTRIBUTING.md)。[开发日志](docs/development-log.md)区分实现、合并和发布；[v0.12.0 发布说明](docs/releases/v0.12.0.md)包含升级、备份与限制。
 
-- [系统架构全景文档](docs/architecture.md)：详细模块关系、数据流图与并发模型。
-- [读者剧场验收矩阵](docs/reader-panel-verification.md)：AC-01 至 AC-14 验收标准与自动化证据映射。
-- [后端与数据库配置说明](backend/README.md)：PostgreSQL 配置、工作区权限与提供商参数。
-- [贡献指南与质量门禁](CONTRIBUTING.md)：分支管理规范与双审查 Agent 审计流程。
-
----
-
-## 开源协议
-
-本项目采用 GNU 通用公共许可证 v3.0 ([GPL-3.0](LICENSE))。
+后端使用 FastAPI、SQLAlchemy、PostgreSQL 和版本化工作区，前端为 React/TypeScript/Vite。数据库和工作区共同构成持久数据，备份与恢复必须配对。许可证为 [GPLv3](LICENSE)。
