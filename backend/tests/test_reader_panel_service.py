@@ -1308,6 +1308,40 @@ class TestReaderPanelServiceApiProjection:
 
 @pytest.mark.anyio
 class TestReaderPanelColdReadingCollection:
+    @pytest.mark.parametrize("genre", [None, "", "日常生活小说"])
+    async def test_cold_reading_preserves_genre_without_inventing_a_default(
+        self, genre, fake_db_session, test_project_id, test_chapter_id,
+        test_document_id, test_version_id, sample_hash, sample_segments,
+    ) -> None:
+        setup_test_entities(
+            fake_db_session, project_id=test_project_id, chapter_id=test_chapter_id,
+            document_id=test_document_id, version_id=test_version_id,
+            content_hash=sample_hash, segments=sample_segments,
+        )
+        project = await fake_db_session.get(Project, test_project_id)
+        project.genre = genre
+        service = ReaderPanelService(fake_db_session)
+        init = await service.initialize_session(
+            project_id=test_project_id, chapter_id=test_chapter_id, mode=PanelMode.QUICK,
+        )
+        panel = await fake_db_session.get(ReaderPanelSession, init.session_id)
+        panel.reader_runs = list(fake_db_session.storage[ReaderRun].values())
+        panel.document = await fake_db_session.get(Document, test_document_id)
+        requests = []
+
+        class RecordingProvider(DeterministicReaderPanelProvider):
+            def generate_initial_reading(self, request):
+                requests.append(request)
+                return super().generate_initial_reading(request)
+
+        result = await service.collect_initial_reports(
+            session_id=panel.id,
+            provider=RecordingProvider(scenario=ReaderPanelFakeScenario.CLEAN),
+        )
+        assert result.completed_readers == 2
+        assert [request.genre for request in requests] == [genre or "unspecified"] * 2
+        assert project.genre == genre
+
     async def test_elapsed_budget_stops_without_provider_call(
         self,
         fake_db_session: FakeAsyncSession,

@@ -1942,7 +1942,7 @@ class ReaderPanelService:
         segments = await self._manuscript_segments(panel_session, doc_version)
 
         project = await self._db.get(Project, panel_session.project_id)
-        genre = project.genre if project and project.genre else "fantasy"
+        genre = project.genre if project and project.genre else "unspecified"
 
         # 4. Concurrently or sequentially run reader agents in mutual isolation
         collected_reports = []
