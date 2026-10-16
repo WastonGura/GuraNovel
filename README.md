@@ -72,7 +72,7 @@ OPENAI_COMPATIBLE_TIMEOUT_SECONDS=120
 
 ## 本地开发与检查
 
-本地后端服务使用 Linux/macOS/WSL、Python 3.11+、uv 和可访问的 PostgreSQL 16；前端使用 Node.js 20+ 与 npm。准备 `backend/.env`，配置可写的 POSIX `WORKSPACE_BASE_DIR` 和本地 `DATABASE_URL`。Compose 默认数据库没有宿主机端口，本地服务需要单独准备数据库。
+本地后端服务使用 Linux/macOS/WSL、Python 3.11+、uv 和可访问的 PostgreSQL 16；前端使用 Node.js 20.19+ 或 22.12+ 与 npm（Docker/CI 使用 Node 22）。准备 `backend/.env`，配置可写的 POSIX `WORKSPACE_BASE_DIR` 和本地 `DATABASE_URL`。Compose 默认数据库没有宿主机端口，本地服务需要单独准备数据库。
 
 ```bash
 cd backend
