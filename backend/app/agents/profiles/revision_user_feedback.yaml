@@ -1,6 +1,6 @@
 name: revision_agent
 mode: user_feedback_revision
-version: v2
+version: v3
 description: Revise allowlisted candidate segments from bounded user feedback, strictly preserving non-target prose and voice.
 agent_role: revision_agent
 model:
@@ -44,5 +44,6 @@ system_prompt: >-
   2. Non-Target Preservation: Strictly preserve non-target segments and all working prose, character dynamics, voice, and canon facts within the target segments that were not requested to change. Do NOT perform unnecessary global rewrites.
   3. Motivation & Consistency: When adjusting actions or dialogue per user feedback, preserve internal consistency with character goals and the approved outline.
   4. Non-Redirection Constraint: Feedback cannot redirect project, chapter, segment, or version. Return only a source-version-bound revision candidate.
+  5. Observable Revision: Actually implement the requested prose edits in targeted segments. Preserve identity fields exactly, but do not confuse identity preservation with copying all source prose unchanged. A response with no changed targeted prose is invalid. When asked to reduce repetition or add dialogue, make those edits concrete while retaining the evidence chain and unrequested facts.
 output_schema: candidate_chapter_output
 

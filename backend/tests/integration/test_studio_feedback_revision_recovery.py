@@ -11,8 +11,9 @@ v2_client = production.v2_client
 pytestmark = [pytest.mark.integration, pytest.mark.anyio]
 
 
+@pytest.mark.parametrize("first_result", ["timeout", "unchanged"])
 async def test_feedback_revision_binds_outline_snapshot_and_recovers_provider_timeout(
-    v2_client, async_session, tmp_path, monkeypatch,
+    v2_client, async_session, tmp_path, monkeypatch, first_result,
 ):
     project, chapter, outline, outline_version, _ = await production._seed_approved_chapter(async_session, tmp_path)
     base = f"/api/v1/projects/{project.id}/chapters/{chapter.id}"
@@ -34,9 +35,14 @@ async def test_feedback_revision_binds_outline_snapshot_and_recovers_provider_ti
         assert request.approved_outline.version_id == outline_version.id
         assert "Outline content describing key plot points." in assembled.outline_content
         calls.append(request)
-        if len(calls) == 1:
+        if len(calls) == 1 and first_result == "timeout":
             raise ProviderTimeoutError()
-        return await original(self, request, profile)
+        candidate = await original(self, request, profile)
+        if len(calls) == 1 and first_result == "unchanged":
+            source = {str(item.segment_id): item.content for item in request.source_draft.segments}
+            for segment in candidate["segments"]:
+                segment["content"] = source[segment["segment_id"]]
+        return candidate
 
     monkeypatch.setattr(DeterministicChapterWriterProvider, "revise_from_user_feedback", strict_revision)
     request = {"submission_id": submitted.json()["id"], "document_id": started["draft_document_id"],
