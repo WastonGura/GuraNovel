@@ -37,14 +37,14 @@ curl --noproxy '*' -fsS http://127.0.0.1:8000/api/v1/health
 curl --noproxy '*' -fsS http://127.0.0.1:5173/api/v1/health
 ```
 
-PowerShell 可用 `curl.exe`。前后端仅绑定 `127.0.0.1`；PostgreSQL 不向宿主机开放端口。端口占用时，在根目录 `.env` 中设置 `GURANOVEL_FRONTEND_PORT` 和 `GURANOVEL_BACKEND_PORT` 后重新启动。这个根目录文件用于 Compose 参数；模型配置位于另一个文件 `backend/.env`。
+PowerShell 可用 `curl.exe`。前后端仅绑定 `127.0.0.1`；PostgreSQL 不向宿主机开放端口。`GURANOVEL_BIND_ADDRESS=0.0.0.0` 会向其他主机开放前后端端口；本版默认保持 loopback，不验收公开部署。端口占用时，在根目录 `.env` 中设置 `GURANOVEL_FRONTEND_PORT` 和 `GURANOVEL_BACKEND_PORT` 后重新启动。这个根目录文件用于 Compose 参数；模型配置位于另一个文件 `backend/.env`。
 
 ```bash
 docker compose logs --tail=100 backend frontend db
 docker compose down
 ```
 
-`down` 保留数据卷；`down -v` 会永久删除数据库和正文工作区，升级时不要使用。Windows 无法连接 Docker 时，先启动 Docker Desktop 并检查 Linux/WSL Integration；Linux 检查 Docker 服务状态。
+`docker compose down` 保留数据卷；`docker compose down -v` 会永久删除数据库和正文工作区，升级时不要使用。Windows 无法连接 Docker 时，先启动 Docker Desktop 并检查 Linux/WSL Integration；Linux 检查 Docker 服务状态。
 
 ## 使用真实模型
 

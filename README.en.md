@@ -33,14 +33,14 @@ curl --noproxy '*' -fsS http://127.0.0.1:8000/api/v1/health
 curl --noproxy '*' -fsS http://127.0.0.1:5173/api/v1/health
 ```
 
-Use `curl.exe` in PowerShell. Ports bind to loopback and PostgreSQL is not published. Set `GURANOVEL_FRONTEND_PORT` / `GURANOVEL_BACKEND_PORT` in the root `.env` if occupied. That file configures Compose interpolation; model settings use the separate `backend/.env`.
+Use `curl.exe` in PowerShell. Ports bind to loopback and PostgreSQL is not published. `GURANOVEL_BIND_ADDRESS=0.0.0.0` exposes application ports to other hosts; keep the default loopback binding for this trial. Public deployment is not covered by acceptance. Set `GURANOVEL_FRONTEND_PORT` / `GURANOVEL_BACKEND_PORT` in the root `.env` if occupied. That file configures Compose interpolation; model settings use the separate `backend/.env`.
 
 ```bash
 docker compose logs --tail=100 backend frontend db
 docker compose down
 ```
 
-`down` retains volumes; `down -v` permanently deletes the database and workspaces. Never use it for upgrades. If Docker is unavailable, check Docker Desktop Linux/WSL integration or the Linux Docker service.
+`docker compose down` retains volumes; `docker compose down -v` permanently deletes the database and workspaces. Never use it for upgrades. If Docker is unavailable, check Docker Desktop Linux/WSL integration or the Linux Docker service.
 
 ## Real models
 
