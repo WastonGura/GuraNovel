@@ -26,7 +26,7 @@
     "status": "COMPLETED"
   },
   "main_ci_run": 38853233647,
-  "main_ci_conclusion": "pending",
+  "main_ci_conclusion": "success",
   "publication": "pending",
   "ui": {
     "old_project_id": "1325a29d-cee2-4f41-a36a-43e3a8685f31",
@@ -35,5 +35,6 @@
     "body_preserved": true,
     "screenshot": "release-local-final.png",
     "provider": "fake"
-  }
+  },
+  "main_ci_url": "https://github.com/WastonGura/GuraNovel/actions/runs/38853233647"
 }
