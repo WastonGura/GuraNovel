@@ -1516,6 +1516,7 @@ class TestReaderPanelColdReadingCollection:
             max_total_model_calls=2,
             max_model_calls_per_phase=2,
             max_total_output_tokens=8192,
+            max_output_tokens_per_call=4096,
         )
         service = ReaderPanelService(fake_db_session)  # type: ignore[arg-type]
         init = await service.initialize_session(

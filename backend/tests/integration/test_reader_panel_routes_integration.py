@@ -97,7 +97,7 @@ def _start(document: Document, version: DocumentVersion, key: str, **extra: obje
     }
 
 
-@pytest.mark.parametrize("check", ["budget", "provenance"])
+@pytest.mark.parametrize("check", ["budget", "output_budget", "provenance"])
 async def test_real_reader_accepts_desktop_chapter_and_records_its_provider(
     reader_panel_client, async_session, tmp_path, check,
 ):
@@ -121,6 +121,11 @@ async def test_real_reader_accepts_desktop_chapter_and_records_its_provider(
         calls.append(json.loads(request.content))
         output = {"overall_reaction": "证据链清晰，愿意继续阅读。", "continue_reading": "yes", "confidence": "high",
             "strengths": [], "reactions": [], "concerns": []}
+        if check == "output_budget":
+            output["strengths"] = [{"summary": "证据链值得继续追踪。" * 15,
+                "evidence": [{"segment_ids": ["S001"], "note": "档案证据"}]} for _ in range(6)]
+            output["reactions"] = [{"segment_ids": ["S001"], "reaction": "证据链值得继续追踪。" * 15,
+                "emotion": "投入"} for _ in range(6)]
         envelope = {"choices": [{"message": {"content": json.dumps(output)}, "finish_reason": "stop"}]}
         return httpx.Response(200, headers={"content-type": "application/json"}, stream=ResponseStream(json.dumps(envelope).encode()))
 

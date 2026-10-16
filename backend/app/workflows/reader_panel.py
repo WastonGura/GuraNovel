@@ -230,7 +230,7 @@ class ReaderPanelConfig:
     max_total_input_tokens: int = 2_000_000
     max_total_output_tokens: int = 1_000_000
     max_input_tokens_per_call: int = 65_536
-    max_output_tokens_per_call: int = 4096
+    max_output_tokens_per_call: int = 32_768
     max_messages: int = 200
     max_provider_attempts: int = 3
     max_invalid_output_repairs: int = 1

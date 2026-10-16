@@ -2,6 +2,12 @@
 
 Dates use Asia/Tokyo. Target: v0.12.0 desktop personal trial.
 
+## 2026-10-16 — #338 output reservation verification
+
+- The Chinese multi-finding output test now passes with a 32768-byte per-call reservation; the other long-input and provider-provenance cases also pass. All 111 service unit cases pass, including explicit budget exhaustion.
+- The exact-two-call budget test now states its intended 4096 per-call reservation explicitly, keeping its original 8192 total-budget assertion independent of default changes. This fixture adjustment is not a new behavioral Red.
+- Live Reader report and release acceptance remain pending. Application versions remain 0.11.0 until a dedicated release preparation PR.
+
 ## 2026-10-14 — #338 bounded Chinese Reader input and truthful source
 
 - Status: implementation; PR/latest-head Actions/review and live Reader acceptance pending. No migration or app version bump.
@@ -10,6 +16,7 @@ Dates use Asia/Tokyo. Target: v0.12.0 desktop personal trial.
 - Green: default non-off per-call reservations are 65536, still bounded by total input/call/time budgets and the provider's input policy. This is a conservative reservation, not actual token usage. New sessions snapshot server-owned provider/model configuration without credentials/endpoints; unknown providers remain unverified.
 - Validation: both new PostgreSQL cases pass, with two actual adapter/transport calls and complete Chinese source retained. 126 provider/service unit cases pass, retaining explicit low-budget failure coverage. The test stream fixture was corrected after an intermediate pre-consumed-response error; that fixture error is not claimed as a product Red.
 - Existing sessions retain their immutable original configuration/source snapshot. A failed disposable live sample is retained; a new invitation is required to use the revised budget. Actual model quality remains separate from the streamed fixture evidence.
+- Live cold reading then produced two structurally valid reports (10.66/16.44 s; 7674/7661 input and 1664/2898 output tokens), but the old 4096-byte output reservation rejected them after invocation. A new Chinese multi-finding response test reproduced that failure. Default per-call output reservation is now 32768, preserving the 1000000 total reservation and provider output bounds. Actual tokens and reserved bytes remain distinct in acceptance records.
 
 ## 2026-10-14 — #336 reject unchanged feedback revisions
 
