@@ -93,6 +93,50 @@ function sampleChapter(overrides: Partial<Chapter> = {}): Chapter {
 }
 
 describe('Dashboard Setting Collections and Novel Integration', () => {
+  it('offers an actionable first-novel empty state', async () => {
+    mockedApi.listProjects.mockResolvedValue([])
+    mockedApi.listSettingCollections.mockResolvedValue([])
+    renderDashboard()
+    fireEvent.click(await screen.findByRole('button', { name: '创建第一部作品' }))
+    expect(screen.getByRole('dialog', { name: '创建作品' })).toBeInTheDocument()
+  })
+
+  it('restores the collection trigger focus after native modal cancellation', async () => {
+    mockedApi.listProjects.mockResolvedValue([])
+    mockedApi.listSettingCollections.mockResolvedValue([])
+    renderDashboard()
+    const trigger = await screen.findByRole('button', { name: '新建设定集' })
+    trigger.focus(); fireEvent.click(trigger)
+    const dialog = screen.getByRole('dialog', { name: '新建设定集' })
+    expect(within(dialog).getByLabelText('标题')).toHaveFocus()
+    fireEvent(dialog, new Event('cancel', { cancelable: true }))
+    expect(screen.queryByRole('dialog', { name: '新建设定集' })).not.toBeInTheDocument()
+    expect(trigger).toHaveFocus()
+  })
+
+  it('keeps a pending collection modal open and focuses a recoverable failure', async () => {
+    mockedApi.listProjects.mockResolvedValue([])
+    mockedApi.listSettingCollections.mockResolvedValue([])
+    let reject!: (cause: Error) => void
+    mockedApi.createSettingCollection.mockImplementationOnce(() => new Promise((_resolve, fail) => { reject = fail }))
+    renderDashboard()
+    fireEvent.click(await screen.findByRole('button', { name: '新建设定集' }))
+    const dialog = screen.getByRole('dialog', { name: '新建设定集' })
+    fireEvent.change(within(dialog).getByLabelText('标题'), { target: { value: '雾港设定' } })
+    fireEvent.submit(within(dialog).getByRole('form'))
+    fireEvent.submit(within(dialog).getByRole('form'))
+    fireEvent.keyDown(window, { key: 'Escape' })
+    fireEvent(dialog, new Event('cancel', { cancelable: true }))
+    expect(dialog).toBeInTheDocument()
+    expect(within(dialog).getByRole('button', { name: '关闭新建设定集' })).toBeDisabled()
+    expect(mockedApi.createSettingCollection).toHaveBeenCalledTimes(1)
+    reject(new Error('network unavailable'))
+    const error = await screen.findByRole('alert')
+    expect(error).toHaveTextContent('已保留内容')
+    expect(error).toHaveFocus()
+    expect(within(dialog).getByLabelText('标题')).toHaveValue('雾港设定')
+  })
+
   it('clearly marks global preferences as unavailable', async () => {
     mockedApi.listProjects.mockResolvedValue([])
     mockedApi.listSettingCollections.mockResolvedValue([])
@@ -216,7 +260,7 @@ describe('Dashboard Setting Collections and Novel Integration', () => {
     expect(dialog).toBeInTheDocument()
 
     fireEvent.change(within(dialog).getByLabelText('标题'), { target: { value: 'New Realm' } })
-    fireEvent.change(within(dialog).getByLabelText('Slug (optional)'), { target: { value: 'new-realm' } })
+    fireEvent.change(within(dialog).getByLabelText('设定集标识'), { target: { value: 'new-realm' } })
     fireEvent.change(within(dialog).getByLabelText('说明（可选）'), { target: { value: 'Realm overview' } })
 
     const submitBtn = within(dialog).getByRole('button', { name: '新建设定集' })
