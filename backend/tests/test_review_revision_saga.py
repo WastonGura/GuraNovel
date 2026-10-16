@@ -741,7 +741,7 @@ async def test_revalidate_prewrite_binds_plan_source_to_fresh_context(
 
 def test_validate_persist_inputs_bounds_report_and_target_counts() -> None:
     reports = tuple(UUID(int=i) for i in range(1, 18))
-    targets = tuple(UUID(int=100 + i) for i in range(65))
+    targets = tuple(UUID(int=100 + i) for i in range(1025))
 
     with pytest.raises(ChapterProductionV2ValidationError):
         _validate_persist_inputs(
