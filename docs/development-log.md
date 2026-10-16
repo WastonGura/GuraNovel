@@ -2,6 +2,18 @@
 
 Dates use Asia/Tokyo. Target: v0.12.0 desktop personal trial.
 
+## 2026-10-16 — v0.12.0 published desktop personal trial (#343)
+
+- Status: published as a prerelease at https://github.com/WastonGura/GuraNovel/releases/tag/v0.12.0 on 2026-10-16 14:07 JST. Fixed tag v0.12.0 targets 97f58476bc1e3588480a58007ae098de77beb831; the tag was created once and not moved. Audit PR #348 records the published state.
+- Application code c326494 is Squash merged through #344 and passed full main Actions 38853233647: backend tests 1996, architecture gate 95, PostgreSQL integration/migration 679, frontend tests 438 and Chromium 12, plus Ruff/types/build/design/version/Docker gates. Counts describe their respective gate runs, not a sum of unique test cases.
+- Follow-up #347 documents the exact release-upgrade 0011/0012 behavior and verified runtime, with no application-code change. Its latest-head Actions 38853829060 and tag-target main Actions 38854032395 passed; runtime jobs were intentionally skipped for documentation-only changes, and the complete code result is recorded separately. Docker was built and containers recreated from the final tag-target checkout, with matching running-image digests, health 0.12.0, migration 0012, actual author API finalization and retained read-only prose verified.
+- M0 #300/#305 → #314/#315; M1 #298/#302/#303 → #316/#317/#318; M2 #299/#306/#309 → #319/#322/#324 are reviewed and Squash merged. Existing baseline implementations are explicitly regression coverage, not retrospective TDD.
+- Hardening #326/#328/#330/#332/#334/#336/#338/#340 → #327/#329/#331/#333/#335/#337/#339/#341; CI #320/#323 → #321/#325; dependency #345 → #346; stage acceptance #313 → #342; release preparation/verification #343 → #344/#347 plus this final published-state audit.
+- Two synthetic real-model samples completed local finalization; one completed actual Reader. Quality remains partial (missed edits/contradictions, length and language errors); model runtimes and 60-call ledger are explicit. Neither deterministic fixtures nor workflow completion are claimed as a literary-quality guarantee.
+- Paired backup restore verified 25 document-version hashes against the workspace archive. No published migrations were rewritten, and original repository uncommitted changes were preserved. Private model configuration and raw backups stay outside Git.
+- Local trial is running the released code with the previously tested deepseek-flash/none/120-second configuration, without the QA observer proxy. Startup verification invoked no generation routes. Disposable deterministic/test services were stopped with their volumes retained.
+- #313 remains open for broader setting/mobile/legacy/export acceptance. Deferred issues #301/#304/#307/#308/#310/#311/#312 and new concept/maintenance continuation are not marked delivered. No public deployment, multiple authors or external novel publishing is included.
+
 ## 2026-10-16 — #343 final application and upgrade verification
 
 - Application code is merged at c326494, with all six product versions at 0.12.0. Rebuilding from the exact checkout and force-recreating disposable containers confirmed the running image digests match this build. Health/version, migration 0012, actual proxy author workflow and retained old final prose/read-only UI passed. Machine-readable evidence and a synthetic UI screenshot are included.
