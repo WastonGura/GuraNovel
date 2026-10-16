@@ -4,7 +4,7 @@ Dates use Asia/Tokyo. Target: v0.12.0 desktop personal trial.
 
 ## 2026-10-16 — #351 bookshelf composition and creation dialogs
 
-- Status: implementation and local acceptance complete; PR/latest-head Actions and review required before Squash merge. This is a post-release source fix; application versions and the published v0.12.0 tag remain unchanged.
+- Delivery: issue #351 → [PR #352](https://github.com/WastonGura/GuraNovel/pull/352), with review/latest-head Actions required before Squash merge. This is a post-release source fix; application versions and the published v0.12.0 tag remain unchanged. The linked PR records the merge and applicable CI result.
 - Compared the existing design reference with the user's deployed screenshots. Restored a centered greeting/content hierarchy, content-driven shelves, an actionable empty state and vertical scrolling instead of fixed rows/cropped windows. Creation forms share native modal behavior and a monochrome paper style; less common metadata/internal identifiers are collapsed.
 - Red: 3 new component behaviors failed for the missing first-novel action, collection cancellation/focus restoration and pending Escape dismissal. Chromium measured the old desktop greeting at y=40.95px, outside the intended composition. Environment/port and incomplete-fixture errors are not Red evidence.
 - Green: all 17 Dashboard component tests and 3 focused Chromium cases pass, including short/narrow windows, collapsed fields, keyboard focus, pending dismissal and failure retention. Local lint and types/build passed; applicable full gates run in Actions. Visual evidence, exact fixture boundaries and deployment steps are in [the acceptance record](acceptance/ui-bookshelf-351.md).
