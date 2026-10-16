@@ -2,6 +2,13 @@
 
 Dates use Asia/Tokyo. Target: v0.12.0 desktop personal trial.
 
+## 2026-10-16 — #349 README onboarding and project overview
+
+- Delivery: issue #349 → [PR #350](https://github.com/WastonGura/GuraNovel/pull/350), through review/latest-head Actions and Squash merge. This updates main documentation; the published application remains 0.12.0 and the release tag is unchanged.
+- Reorganized Chinese and English READMEs around the author workflow, a retained real-model Studio screenshot, pinned-release Docker startup, first-chapter steps, model configuration, troubleshooting and documentation navigation.
+- Corrected pre-publication wording to the actual v0.12.0 prerelease. Distinguished deterministic examples from real model calls, explained provider context/charges and kept the known model-quality limits and deferred issue scope visible.
+- Validation: commands checked against Compose, provider defaults and frontend configuration; all 5 existing deployment/documentation regression tests passed using uv, 46 local links/images/anchors checked, fenced blocks balanced and git diff --check passed. Reviewed screenshot/source diff; the linked PR records the applicable Actions result. This is documentation maintenance, not a new behavioral TDD claim; no runtime, migration, dependency or version change.
+
 ## 2026-10-16 — v0.12.0 published desktop personal trial (#343)
 
 - Status: published as a prerelease at https://github.com/WastonGura/GuraNovel/releases/tag/v0.12.0 on 2026-10-16 14:07 JST. Fixed tag v0.12.0 targets 97f58476bc1e3588480a58007ae098de77beb831; the tag was created once and not moved. Audit PR #348 records the published state.
