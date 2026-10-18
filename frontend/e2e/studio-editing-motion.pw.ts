@@ -17,6 +17,8 @@ test.describe('Studio Editing Comments and Continuous Motion E2E', () => {
 
       // 1. Initial load (Outline stage) zero whole-page scroll check
       const checkZeroScroll = async () => {
+        await page.mouse.move(vp.width - 12, vp.height / 2)
+        await page.mouse.wheel(0, 600)
         const overflow = await page.evaluate(() => ({
           scrollHeight: document.documentElement.scrollHeight,
           clientHeight: document.documentElement.clientHeight,

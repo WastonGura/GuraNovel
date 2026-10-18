@@ -2,6 +2,19 @@
 
 Dates use Asia/Tokyo. Target: v0.12.0 desktop personal trial.
 
+## 2026-10-19 — dependency-ordered merge: hover halos and fixed layout
+
+- The user authorized review and Squash merges in dependency order. Checked submitted reviews, inline threads and discussion comments for PRs #358/#359/#361: all were empty; this is not an external reviewer approval. Inspected the issue-specific source/test diffs and found no blocking issue. The existing Studio navigation test's one unreproduced CI failure and successful rerun remain disclosed on #361.
+- [PR #358](https://github.com/WastonGura/GuraNovel/pull/358) was Squash merged as `c9526e84ca48173231b83b5b428f079b19e7dee3`, after verifying its exact-head Actions success. Rebased only #359's three layout/log commits onto that main; its tree remained identical to the previously tested #359 tree before this log update. [PR #359](https://github.com/WastonGura/GuraNovel/pull/359) now has no unmerged halo dependency and must pass its rebased latest-head Actions before its authorized merge.
+- #361 remains pending behind #359; its own carousel commits will be rebased after #359 merges, checked against the approved application tree and verified by new-head Actions. No direct main push, version bump, tag movement or release. This entry supersedes earlier submission-only merge restrictions under the user's new authorization.
+
+## 2026-10-19 — #355 approved fixed-page layout delivery
+
+- The user approved the final fixed layout and authorized a separate PR for #355. Delivery: [PR #359](https://github.com/WastonGura/GuraNovel/pull/359), branch `fix/355-fixed-page-layout`, builds on #356's [PR #358](https://github.com/WastonGura/GuraNovel/pull/358). Both PRs target main because the repository's pull-request Actions filter only includes main. Review the layout commit separately; after #358 is Squash merged, rebase the layout-only commits onto the new main and verify their new-head Actions before merging. This is an intentional stacked delivery, with one closing issue per PR. #357 remains outside the approved implementation scope.
+- Final behavior: page roots and the homepage stay fixed under wheel/PageDown/focus navigation. The three shelves and search fit the viewport by allocating available height and shrinking image areas/spacing; text and actions remain available. Horizontal shelf paging and designated internal document/form scrolling remain intact. The heading layer prevents transparent shadow padding from intercepting add controls.
+- TDD evidence: the clarified 1280×720 layout check failed with the settings shelf extending to about y=939 before implementation. The final split browser suite passes all 19 targeted checks, covering five bookshelf sizes, empty/populated data, navigation/focus, long forms, Studio and long-setting internal scroll with a fixed header. The existing Studio/setting checks are regression coverage. The approved source also passed 63 focused component tests; after test-file splitting, lint and types/build pass again. The existing bundle warning remains.
+- Development log and tests are included in the PR; latest-head Actions evidence is recorded on each linked PR after submission. No backend/API/dependency/migration/version change, tag movement or release. No merge is performed by this submission task. Older local-only entries describe draft history and are superseded by the approved delivery records.
+
 ## 2026-10-19 — #356 approved hover-halo delivery
 
 - The user approved the final appearance and authorized PR submission for #355/#356 only. Delivery is split per issue: [PR #358](https://github.com/WastonGura/GuraNovel/pull/358), branch `fix/356-remove-hover-halos`, targets main and closes #356; the fixed-layout PR follows on top of it so the shared stylesheet remains reviewable. No merge is authorized by this submission request; #357 remains pending.

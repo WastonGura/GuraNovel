@@ -91,7 +91,7 @@ test.describe('Setting Collection Standalone Workspace Chromium E2E', () => {
     await page.route(`**/api/v1/documents/${docId}/content`, route => json(route, {
       document_id: docId,
       version_id: versionId,
-      content: '海滨城是一座面朝大海的古老港口城市。城中分为上城区与下城区。',
+      content: '海滨城是一座面朝大海的古老港口城市。城中分为上城区与下城区。\n'.repeat(100),
     }))
 
     await page.goto(`/setting-collections/${collectionId}`)
@@ -125,6 +125,13 @@ test.describe('Setting Collection Standalone Workspace Chromium E2E', () => {
     }))
     expect(overflow.scrollHeight).toBeLessThanOrEqual(overflow.clientHeight + 1)
     expect(overflow.windowScrollY).toBe(0)
+    const documentScroll = page.locator('.setting-document-scroll')
+    const header = await page.locator('.setting-workspace-header').boundingBox()
+    await documentScroll.hover()
+    await page.mouse.wheel(0, 600)
+    await expect.poll(() => documentScroll.evaluate(element => element.scrollTop)).toBeGreaterThan(0)
+    expect(await page.evaluate(() => window.scrollY)).toBe(0)
+    expect(await page.locator('.setting-workspace-header').boundingBox()).toEqual(header)
   })
 
   test('P1 Read Defense: handles document read failure with error banner and retry, never writes empty doc', async ({ page }) => {
