@@ -8,7 +8,8 @@
 * { box-sizing: border-box; }
 ::selection { background: #e3e3e3; color: #171717; text-shadow: none; }
 
-body { background: #fafafa; margin: 0; min-width: 320px; min-height: 100vh; }
+html, body, #root { height: 100%; overflow: clip; }
+body { background: #fafafa; margin: 0; min-width: 320px; }
 
 a { color: inherit; }
 
@@ -17,7 +18,7 @@ a:focus-visible {
   outline-offset: 3px;
 }
 
-.app-shell { min-height: 100vh; }
+.app-shell { height: 100dvh; overflow: clip; }
 
 .topbar {
   align-items: center;
@@ -559,11 +560,12 @@ textarea:focus-visible { outline: 3px solid #171717; outline-offset: 2px; }
 
 .dashboard-canvas {
   background: #fff;
+  display: flex;
+  flex-direction: column;
   font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "Segoe UI", sans-serif;
   height: 100dvh;
-  overflow-x: hidden;
-  overflow-y: auto;
-  padding: clamp(96px, 19.14vh, 196px) 24px 64px;
+  overflow: clip;
+  padding: clamp(40px, calc(35dvh - 180px), 196px) 24px clamp(20px, 3dvh, 40px);
   position: relative;
   width: 100%;
 }
@@ -583,6 +585,7 @@ textarea:focus-visible { outline: 3px solid #171717; outline-offset: 2px; }
 .dashboard-settings:disabled { cursor: default; opacity: .4; }
 
 .dashboard-greeting {
+  flex: 0 0 auto;
   font-size: 36px;
   font-weight: 600;
   letter-spacing: -0.025em;
@@ -595,10 +598,19 @@ textarea:focus-visible { outline: 3px solid #171717; outline-offset: 2px; }
 
 .dashboard-main {
   display: grid;
-  gap: 40px;
-  margin: 32px auto 0;
+  flex: 1;
+  gap: clamp(12px, 2dvh, 24px);
+  grid-template-rows: minmax(0, 1fr) minmax(0, 1.2fr) minmax(0, 1fr) 50px;
+  margin: clamp(14px, 2dvh, 24px) auto 0;
+  min-height: 0;
+  position: relative;
   width: min(1000px, 100%);
 }
+.dashboard-recent { grid-row: 1; }
+.dashboard-novels { grid-row: 2; }
+.dashboard-collections { grid-row: 3; }
+.dashboard-main > .dashboard-search { grid-row: 4; margin: 0 auto; }
+.dashboard-main > .dashboard-load-error { align-self: center; grid-column: 1; grid-row: 1; margin: 0; z-index: 1; }
 
 .dashboard-canvas button {
   background: transparent;
@@ -621,7 +633,7 @@ textarea:focus-visible { outline: 3px solid #171717; outline-offset: 2px; }
   outline-offset: 3px;
 }
 
-.dashboard-section { min-width: 0; position: relative; width: 100%; }
+.dashboard-section { display: flex; flex-direction: column; min-height: 0; min-width: 0; position: relative; width: 100%; }
 .dashboard-section h2 {
   align-items: center;
   color: #636363;
@@ -634,10 +646,10 @@ textarea:focus-visible { outline: 3px solid #171717; outline-offset: 2px; }
 }
 
 .dashboard-section h2 img { height: 14px; width: 14px; }
-.dashboard-section-heading { align-items: center; display: flex; gap: 8px; }
+.dashboard-section-heading { align-items: center; display: flex; gap: 8px; position: relative; z-index: 3; }
 .novel-add, .collection-add { border-radius: 6px !important; height: 22px; width: 22px; }
 .novel-add img, .collection-add img { height: 18px; width: 18px; }
-.dashboard-carousel { margin-top: 23px; position: relative; }
+.dashboard-carousel { flex: 1; margin-top: clamp(8px, 1.8dvh, 23px); min-height: 0; position: relative; }
 .dashboard-carousel::after {
   background: linear-gradient(90deg, rgb(255 255 255 / 0%), #fff 86%);
   bottom: 0;
@@ -666,15 +678,16 @@ textarea:focus-visible { outline: 3px solid #171717; outline-offset: 2px; }
 }
 
 .dashboard-row::-webkit-scrollbar { display: none; }
-.recent-row { --carousel-bleed: 15px; gap: 15px; height: 216px; padding-inline-end: 126px; }
-.novels-row { --carousel-bleed: 24px; gap: 25px; height: 251px; padding-inline-end: 166px; }
-.collections-row { --carousel-bleed: 20px; gap: 20px; height: 216px; padding-inline-end: 140px; }
+.recent-row { --carousel-bleed: 15px; gap: 15px; height: calc(100% + 56px); padding-inline-end: 126px; }
+.novels-row { --carousel-bleed: 24px; gap: 25px; height: calc(100% + 56px); padding-inline-end: 166px; }
+.collections-row { --carousel-bleed: 20px; gap: 20px; height: calc(100% + 56px); padding-inline-end: 140px; }
 
 .project-card {
   box-shadow: 0 2px 2px rgb(0 0 0 / 25%);
   cursor: pointer;
-  display: block;
+  display: flex;
   flex: 0 0 auto;
+  flex-direction: column;
   scroll-snap-align: start;
   text-align: left;
   transition: transform 180ms ease, box-shadow 180ms ease;
@@ -682,12 +695,12 @@ textarea:focus-visible { outline: 3px solid #171717; outline-offset: 2px; }
 
 .project-card:hover { box-shadow: 0 8px 18px rgb(0 0 0 / 16%); transform: translateY(-2px); }
 .project-card:active { transform: scale(.975) rotate(.4deg); }
-.recent-card { border-radius: 28px !important; height: 160px; overflow: hidden; width: 280px; }
-.novel-card { border-radius: 20px !important; height: 195px; overflow: hidden; width: 146px; }
-.collection-card { border-radius: 24px !important; height: 160px; overflow: hidden; width: 220px; }
+.recent-card { border-radius: 28px !important; height: 100%; max-height: 160px; overflow: hidden; width: 280px; }
+.novel-card { border-radius: 20px !important; height: 100%; max-height: 195px; overflow: hidden; width: 146px; }
+.collection-card { border-radius: 24px !important; height: 100%; max-height: 160px; overflow: hidden; width: 220px; }
 .recent-art,
 .novel-art,
-.collection-art { display: block; overflow: hidden; }
+.collection-art { display: block; flex: 1; min-height: 0; overflow: hidden; }
 .recent-art { height: 91px; }
 .novel-art { height: 112px; }
 .collection-art { height: 94px; position: relative; }
@@ -713,6 +726,7 @@ textarea:focus-visible { outline: 3px solid #171717; outline-offset: 2px; }
 .collection-info {
   background: #fff;
   display: flex;
+  flex-shrink: 0;
   font-family: "Noto Sans SC", "Microsoft YaHei", sans-serif;
   position: relative;
 }
@@ -1435,7 +1449,7 @@ textarea:focus-visible { outline: 3px solid #171717; outline-offset: 2px; }
 @keyframes novel-detail-out { to { opacity: 0; transform: perspective(900px) scale(.76) rotateY(-8deg); } }
 
 @media (max-width: 1100px) {
-  .dashboard-canvas { padding: 96px 24px 48px; }
+  .dashboard-canvas { padding-inline: 24px; }
   .dashboard-settings { left: 24px; top: 24px; }
 
 
@@ -1450,8 +1464,7 @@ textarea:focus-visible { outline: 3px solid #171717; outline-offset: 2px; }
   .dashboard-canvas { padding-inline: 16px; }
   .dashboard-greeting { font-size: 30px; }
   .dashboard-main { gap: 32px; }
-  .recent-row { height: 152px; }
-  .recent-card { height: 152px; width: 266px; }
+  .recent-card { max-height: 152px; width: 266px; }
   .recent-art { height: 87px; }
   .recent-info { height: 65px; }
   .novels-row, .collections-row { gap: 16px; }
