@@ -42,7 +42,7 @@ export default function CreationDialog({ titleId, closeLabel, busy, onClose, chi
       const boundary = event.shiftKey ? controls[0] : controls.at(-1)
       if (document.activeElement === boundary && target) { event.preventDefault(); target.focus() }
     }}>
-    <button className="dashboard-dialog-close" data-glow type="button" onClick={onClose} disabled={busy} aria-label={closeLabel}>×</button>
+    <button className="dashboard-dialog-close" type="button" onClick={onClose} disabled={busy} aria-label={closeLabel}>×</button>
     {children}
   </dialog>
 }
