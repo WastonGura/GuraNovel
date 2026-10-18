@@ -9,6 +9,7 @@ import StudioReader from './StudioReader'
 import { useDraftAutosave } from './useDraftAutosave'
 import { useChapterIdea } from './useChapterIdea'
 import StudioOutlineOptions from './StudioOutlineOptions'
+import StudioOutlineSurface, { OutlineChoiceLabel, OutlineRefreshButton, OutlineSendButton } from './StudioOutlineSurface'
 import OutlineEditor from './OutlineEditor'
 import { ChapterArchiveRow } from './StudioArchives'
 import { loadDraftArchives, archiveStorageKey, archiveTime, type DraftArchive } from './studioPreview'
@@ -41,20 +42,13 @@ function OutlineGeneration({ chapter, preview, refresh, onIdea, onGenerate, onCh
   chapter: StudioChapter; preview: boolean; refresh: number; onIdea: (idea: string) => void; onGenerate: () => void; onChoose: (text: string) => void; onRefresh: () => void; readOnly?: boolean
 }) {
   const split = chapter.outlineStep === 'choose'
-  return <div className={`studio-outline-generation${split ? ' is-split' : ''}`}>
-    <div className="studio-outline-prompt"><h1><TextSweep text={split ? '选择大纲' : '想怎么写？'} /></h1></div>
-    <div className="studio-outline-frame">
-      <div className="studio-split-panels" aria-hidden="true"><i /><i /><i /></div>
-      <div className="studio-outline-generator-content">
-        <div className="studio-idea-card" data-text-inactive={split} aria-hidden={split} inert={split}><div className="studio-idea-copy" aria-hidden="true"><TextSweep text={chapter.idea || '你的大纲思路…'} changeKey="idea" /></div><textarea readOnly={readOnly} maxLength={8000} aria-label="大纲思路" placeholder="你的大纲思路…" value={chapter.idea} onChange={event => onIdea(event.target.value)} /><IconButton icon="send" label="生成大纲方案" disabled={!chapter.idea.trim() || !preview} onClick={onGenerate} /></div>
+  return <StudioOutlineSurface choosing={split} footer={split && <OutlineRefreshButton onClick={onRefresh} />}>
+        <div className="studio-idea-card" data-text-inactive={split} aria-hidden={split} inert={split}><div className="studio-idea-copy" aria-hidden="true"><TextSweep text={chapter.idea || '你的大纲思路…'} changeKey="idea" /></div><textarea readOnly={readOnly} maxLength={8000} aria-label="大纲思路" placeholder="你的大纲思路…" value={chapter.idea} onChange={event => onIdea(event.target.value)} /><OutlineSendButton disabled={!chapter.idea.trim() || !preview} onClick={onGenerate} /></div>
           {split && <div className="studio-outline-options">{outlineOptions.map((_, index) => {
             const option = outlineOptions[(index + refresh) % 3]
-            return <button key={index} aria-label={`方案 0${index + 1}：${option.title}`} onClick={() => onChoose(option.text)}><small data-sweep-text>方案 0{index + 1}</small><h2><TextSweep text={option.title} /></h2><p><StreamText text={option.text} /></p><span data-sweep-text className="studio-option-action">选择这个方向</span></button>
+            return <button key={index} aria-label={`方案 0${index + 1}：${option.title}`} onClick={() => onChoose(option.text)}><small data-sweep-text>方案 0{index + 1}</small><h2><TextSweep text={option.title} /></h2><p><StreamText text={option.text} /></p><span data-sweep-text className="studio-option-action"><OutlineChoiceLabel /></span></button>
           })}</div>}
-      </div>
-    </div>
-    <div className="studio-outline-refresh-slot">{split && <button className="studio-refresh" onClick={onRefresh} title="切换预览方案排列"><img src={asset('refresh')} alt="" />换一组</button>}</div>
-  </div>
+  </StudioOutlineSurface>
 }
 
 function PersistedChapterOutline(props: { chapter: StudioChapter; projectId: string; ref: Ref<StudioEditorHandle>; onChange: (patch: Partial<StudioChapter>) => void; onSend: () => void }) {
@@ -69,7 +63,7 @@ function PersistedIdea({ chapter, projectId, ref, onChange, onSend }: { chapter:
   useImperativeHandle(ref, () => ({ flush, changeFeedback: patch => outlineEditor.current?.changeFeedback(patch),
     submitFeedback: async ids => outlineEditor.current ? outlineEditor.current.submitFeedback(ids) : false }))
   return <>
-    {chapter.outlineDocumentId && <PersistedOutline key={chapter.outlineDocumentId} ref={outlineEditor} chapter={chapter} projectId={projectId} onChange={onChange} onSend={onSend} />}
+    {chapter.outlineDocumentId && <div className="studio-selected-outline" hidden={showAlternatives}><PersistedOutline key={chapter.outlineDocumentId} ref={outlineEditor} chapter={chapter} projectId={projectId} onChange={onChange} onSend={onSend} /></div>}
     {chapter.outlineDocumentId && !chapter.documentId && <button onClick={() => setShowAlternatives(value => !value)}>{showAlternatives ? '收起大纲方案' : '比较大纲方案'}</button>}
     {showAlternatives && <StudioOutlineOptions projectId={projectId} chapterId={chapter.id} idea={save}
       beforeSelect={async () => !await flush() ? undefined : outlineEditor.current?.savedVersion?.() ?? chapter.outlineVersionId ?? null}
@@ -188,7 +182,7 @@ function ProseEditor({ chapter, projectId, preview, archive, busy, onChange, onC
     <OutlineEditor outline={text} comments={archive ? archive.comments || [] : preview ? chapter.draftComments || [] : save.feedback?.comments || chapter.draftComments || []} readOnly={readonly || (!preview && (!save.feedback || save.feedback.read_only))} draftInput={{ ref: input, onTyping, ready, visible, onSubmittedSelect, animateText: true }}
       onChange={(value, comments) => { if (preview) onChange(value, comments); else { save.change(value); onChange(value, reanchorFeedbackComments(save.feedback?.comments || [], text, value)) } }} onCommentsChange={preview ? onCommentsChange : comments => save.changeFeedback({ comments })} onSend={onSend}
       prepareSend={preview ? undefined : animate => save.submit((save.feedback?.comments || []).filter(comment => !comment.submitted).map(comment => comment.id), animate)} />
-    {!archive && <div className="studio-save-status" role="status">{preview ? '自动保存到本机 · 交互预览' : save.status}
+    {!archive && !preview && save.status !== '已自动保存' && <div className="studio-save-status" role="status">{save.status}
       {!preview && save.status.includes('失败') && <button onClick={() => void save.flush()}>重试自动保存</button>}
       {!preview && save.status.includes('冲突') && <button onClick={save.reloadServer}>使用服务器版本</button>}
     </div>}
@@ -262,10 +256,10 @@ function PersistedOutline({ chapter, projectId, onChange, onSend, ref }: {
       confirm={<IconButton icon="check" label="确认大纲并生成正文" disabled={starting || !save.feedback || chapter.published || chapter.legacyProduction || Boolean(chapter.documentId) || !save.text.trim()} onClick={() => void confirmAndDraft()} />} />
     {chapter.legacyProduction && <p role="alert">{chapter.productionError}</p>}
     {startMessage && <p className="studio-integration-note" role="status">{startMessage}</p>}
-    <div className="studio-save-status" role="status">{save.status}
+    {save.status !== '已自动保存' && <div className="studio-save-status" role="status">{save.status}
       {save.status.includes('失败') && <button onClick={() => void save.flush()}>重试自动保存</button>}
       {save.status.includes('冲突') && <button onClick={save.reloadServer}>使用服务器版本</button>}
-    </div>
+    </div>}
   </>
 }
 
@@ -864,7 +858,7 @@ function StudioWorkspace({ title, initial, initialId, project, preview }: {
             onSend={() => setToast('评论已保留在所选文本上；当前为交互预览，未调用真实 Agent。')}
             confirm={<IconButton icon="check" label="确认大纲并进入正文" disabled={!selected.outline.trim()} onClick={() => void leave(() => update(selected.id, { stage: 'Draft', draft: selected.draft || previewProse }))} />} />}
           </MotionFrame>
-          {!preview && <p className="studio-integration-note">{selected.legacyProduction ? '历史任务当前为只读。' : selected.documentId ? '正文生成已开始，大纲为只读。' : '比较方案、编辑大纲，再由你确认生成正文。大纲 Agent 反馈修订尚待接入。'}</p>}
+          {!preview && (selected.legacyProduction || selected.documentId) && <p className="studio-integration-note">{selected.legacyProduction ? '历史任务当前为只读。' : '正文生成已开始，大纲为只读。'}</p>}
         </section>}
         {writing && <article className="studio-manuscript" aria-label="章节创作">
           <ChapterScroll key={selected.id}>
@@ -968,7 +962,7 @@ function StudioWorkspace({ title, initial, initialId, project, preview }: {
       <section className={`studio-stats studio-floating${pins.stats ? ' is-pinned' : ''}${hidden && !pins.stats ? ' is-hidden' : ''}`} inert={(hidden || !sidebarOpen) && !pins.stats} aria-label="创作统计"><div><img src={asset('time')} alt="时间" />{Math.floor(seconds / 3600)}h {Math.floor(seconds / 60) % 60}m {seconds % 60}s</div><div><img src={asset('font')} alt="字数" />{(selected?.draft.replace(/\s/g, '').length || 0).toLocaleString()} 字</div><Pin label="统计面板" pinned={pins.stats} onChange={() => setPins(value => ({ ...value, stats: !value.stats }))} /></section>
       <section className={`studio-directory studio-floating${pins.directory ? ' is-pinned' : ''}${hidden && !pins.directory ? ' is-hidden' : ''}`} inert={(hidden || !sidebarOpen) && !pins.directory} aria-label="章节目录"><div className="studio-directory-tools"><Pin label="章节目录" pinned={pins.directory} onChange={() => setPins(value => ({ ...value, directory: !value.directory }))} /></div><div className="studio-directory-title"><h2>{title}</h2><IconButton icon="add" label="新建卷" disabled={!preview} onClick={() => setVolumes(items => [...items, `第${items.length + 1}卷`])} /></div><div className="studio-directory-scroll">{volumes.slice().reverse().map(volume => <details key={volume} open><summary><span>{volume}</span><IconButton icon="add" label={`在${volume}新建章节`} disabled={chapterPending} onClick={event => { event.preventDefault(); addChapter(volume) }} /></summary>{chapters.filter(chapter => chapter.volume === volume).slice().sort((a, b) => b.number - a.number).map(chapter => <ChapterArchiveRow projectId={project?.id} key={chapter.id} chapter={chapter} current={selectedId === chapter.id} activeArchive={archive?.chapterId === chapter.id ? archive.id : undefined} preview={preview} local={archives[chapter.id] || []} revision={archiveRevision} onChapter={() => selectChapter(chapter.id)} onArchive={entry => viewArchive(chapter, entry)} />)}</details>)}</div></section>
     </aside>
-    <footer className={`studio-bottom studio-chrome${hidden ? ' is-hidden' : ''}`}><button onClick={() => void leave(() => navigate('/'))}>返回书架</button><span>{preview ? '交互预览 · Agent 流程为示例' : '章节内容与状态保存到服务器'}</span></footer>
+    {preview && <footer className={`studio-bottom studio-chrome${hidden ? ' is-hidden' : ''}`}><span>创作预览</span></footer>}
     <GlobalAssistant hidden={hidden} project={project} chapter={selected} currentView={selected?.stage || 'Create'} preview={preview} />
     {(toast || storageError) && <div className="studio-toast" role={storageError ? 'alert' : 'status'}>{storageError || toast}<button aria-label="关闭提示" onClick={() => { setToast(''); setStorageError('') }}>×</button></div>}
     {publishing && <PublishDialog preview={preview} busy={Boolean(productionBusyId)} error={selected?.productionError} onClose={() => setPublishing(false)} onConfirm={() => void publish()} />}

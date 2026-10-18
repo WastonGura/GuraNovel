@@ -13,11 +13,6 @@ function ChangeCard({ change, disabled, referencingProjects, onEdit, onAccept, o
 }) {
   const [expanded, setExpanded] = useState(false)
   const pending = change.status === 'pending'
-  const sourceItems = [
-    change.sourceTask?.novelTitle,
-    change.sourceTask?.agentRole,
-    change.sourceTask?.chapterId ? `章节: ${change.sourceTask.chapterId}` : '',
-  ].filter(Boolean)
 
   return <MotionFrame className={`setting-change is-${change.status}${expanded ? ' is-expanded' : ''}`} chrome={<div className="setting-change-actions">{pending ? <><button disabled={disabled} onClick={onDismiss}>暂不采用</button><button disabled={disabled || !change.body.trim()} onClick={onAccept}>接受此条</button></> : change.status === 'accepted' ? <button onClick={onOpen}>查看条目</button> : null}</div>}>
     <div className="setting-change-heading">
@@ -28,8 +23,7 @@ function ChangeCard({ change, disabled, referencingProjects, onEdit, onAccept, o
     </div>
     <div className="setting-change-content" aria-hidden={!expanded} inert={!expanded}><div className="setting-change-body">
       {change.reason && <div className="setting-change-meta-row setting-change-reason"><small>调整理由：</small><span>{change.reason}</span></div>}
-      {sourceItems.length > 0 && <div className="setting-change-meta-row setting-change-source"><small>来源任务：</small><span>{sourceItems.join(' · ')}</span></div>}
-      {change.baseVersionId && <div className="setting-change-meta-row setting-change-base"><small>基准版本：</small><code>{change.baseVersionId.slice(0, 8)}</code></div>}
+      {change.sourceTask?.novelTitle && <div className="setting-change-meta-row setting-change-source"><small>来源作品：</small><span>{change.sourceTask.novelTitle}</span></div>}
       {referencingProjects && referencingProjects.length > 0 && <div className="setting-change-impact-warning" role="note">共享设定变更将影响关联小说后续任务：{referencingProjects.map(p => p.title).join('、')}</div>}
       {change.before && <details><summary>修改前的内容</summary><p>{change.before.body || '暂无正文'}</p></details>}
       {pending ? <textarea aria-label={`提案正文：${change.title}`} value={change.body} maxLength={30000} onChange={event => onEdit(event.target.value)} disabled={disabled} /> : <p>{change.body}</p>}
@@ -83,11 +77,11 @@ export default function SettingConversation({
     count.current = conversation.messages.length
   }, [visible, conversation.messages.length])
   return <section className="setting-conversation" aria-label="设定 Agent 会话" hidden={!visible}>
-    <header><div><h1>设定对话</h1><small>{preview ? '围绕整部作品，持续构思' : '讨论功能准备中'}</small></div><button className="setting-example" disabled={disabled || !preview} onClick={onExample}>示例回复</button></header>
+    <header><h1>设定对话</h1>{preview && <button className="setting-example" disabled={disabled} onClick={onExample}>示例回复</button>}</header>
     <div className="setting-conversation-history" ref={history} role="log" aria-label="设定对话记录" tabIndex={0} onScroll={event => {
       if (visible) { position.current = event.currentTarget.scrollTop; onScroll(position.current) }
     }}>
-      {!conversation.messages.length && <div className="setting-conversation-empty"><img src="/ui/studio/shark.svg" alt="" /><h2>从哪里开始？</h2><p>{preview ? '聊角色、地点和规则。确认后的条目会出现在左侧。' : '设定讨论尚未接入。请通过左侧直接创建并编辑设定条目。'}</p><button disabled={disabled || !preview} onClick={onExample}>体验连续创建</button></div>}
+      {!conversation.messages.length && <div className="setting-conversation-empty"><img src="/ui/studio/shark.svg" alt="" /><h2>从哪里开始？</h2><p>{preview ? '聊角色、地点和规则。确认后的条目会出现在左侧。' : '请从左侧新建或编辑设定条目。'}</p>{preview && <button disabled={disabled} onClick={onExample}>体验连续创建</button>}</div>}
       {conversation.messages.map(message => <article className={`setting-conversation-message is-${message.role}`} key={message.id}>
         <small>{message.role === 'user' ? (preview ? '你 · 暂存本机，尚未发送' : '历史消息 · 未发送') : (preview ? '设定 Agent · 示例回复' : '已有变更提案 · 待作者确认')}</small>
         {message.role === 'assistant' ? <StreamText text={message.text} startedAt={message.createdAt} delay={0} /> : <p>{message.text}</p>}
@@ -107,10 +101,10 @@ export default function SettingConversation({
         </div>)}</div>
       </details>}
       {context && <div className="setting-discussion-context"><button type="button" onClick={() => onOpen(context)}>正在讨论 · {context.title}</button><button type="button" aria-label="移除讨论条目" onClick={() => onPatch({ contextId: null })}>×</button></div>}
-      <textarea ref={input} rows={1} aria-label="给设定 Agent 的消息" aria-describedby="setting-chat-status" placeholder={context ? `想怎样完善「${context.title}」？` : '说说你的想法，或接着上次的话题…'} maxLength={6000} value={conversation.draft} disabled={disabled || !preview} onChange={event => onPatch({ draft: event.target.value })} onKeyDown={event => {
+      <textarea ref={input} rows={1} aria-label="给设定 Agent 的消息" aria-describedby={preview ? 'setting-chat-status' : undefined} placeholder={!preview ? '设定对话暂不可用' : context ? `想怎样完善「${context.title}」？` : '说说你的想法，或接着上次的话题…'} maxLength={6000} value={conversation.draft} disabled={disabled || !preview} onChange={event => onPatch({ draft: event.target.value })} onKeyDown={event => {
         if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing && event.nativeEvent.keyCode !== 229) { event.preventDefault(); onSend() }
       }} />
-      <div className="setting-composer-footer"><small id="setting-chat-status">{preview ? '交互预览 · Agent 尚未接入 · 消息与提案保存在本机' : '设定讨论尚未接入 · 历史消息只读，不会调用模型'}</small><button type="submit" className="setting-chat-send" aria-label={preview ? '发送设定消息（仅预览）' : '设定讨论（尚未接入）'} disabled={disabled || !preview || !canSend}><img src="/ui/studio/send.svg" alt="" /></button></div>
+      <div className="setting-composer-footer">{preview && <small id="setting-chat-status">预览消息仅保存在此设备</small>}<button type="submit" className="setting-chat-send" aria-label={preview ? '发送设定消息（仅预览）' : '设定对话暂不可用'} disabled={disabled || !preview || !canSend}><img src="/ui/studio/send.svg" alt="" /></button></div>
     </form>
   </section>
 }

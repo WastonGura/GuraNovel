@@ -154,7 +154,7 @@ describe('SettingCollectionWorkspace', () => {
     cleanup()
   })
 
-  it('renders collection title, revision, referencing novel count, and impact warning', async () => {
+  it('shows useful collection context without revision or routine saved badges', async () => {
     renderWorkspace()
 
     expect(screen.getByText('正在加载设定集…')).toBeInTheDocument()
@@ -163,10 +163,10 @@ describe('SettingCollectionWorkspace', () => {
       expect(screen.getByText('天穹纪元设定集')).toBeInTheDocument()
     })
 
-    expect(screen.getByText('r3')).toBeInTheDocument()
+    expect(screen.queryByText('r3')).not.toBeInTheDocument()
     expect(screen.getByText('关联小说 (2)')).toBeInTheDocument()
-    expect(screen.getByText('⚠️ 修改将影响关联小说后续启动的新任务')).toBeInTheDocument()
-    expect(screen.getAllByText('已保存').length).toBeGreaterThan(0)
+    expect(screen.getByText('修改会影响关联作品的后续创作')).toBeInTheDocument()
+    expect(screen.queryByText('已保存')).not.toBeInTheDocument()
   })
 
   it('renders documents as setting notes in the library sidebar', async () => {
@@ -219,7 +219,8 @@ describe('SettingCollectionWorkspace', () => {
       expect(screen.getByRole('alert')).toBeInTheDocument()
     })
 
-    expect(screen.getByText(/版本冲突（409 Conflict）/)).toBeInTheDocument()
+    expect(screen.getByText('版本冲突')).toBeInTheDocument()
+    expect(screen.queryByText(/409 Conflict/)).not.toBeInTheDocument()
     expect(screen.getByText(/拉取最新版本覆盖草稿/)).toBeInTheDocument()
     expect(screen.getByText(/以本地草稿覆盖服务端/)).toBeInTheDocument()
     expect(screen.getByText(/保留本地草稿继续编辑/)).toBeInTheDocument()
@@ -265,7 +266,9 @@ describe('SettingCollectionWorkspace', () => {
       expect(screen.queryByText(/版本冲突/)).not.toBeInTheDocument()
     })
 
-    expect(screen.getAllByText('已保存').length).toBeGreaterThan(0)
+    expect(screen.getByRole('textbox', { name: '设定正文' })).toHaveValue('服务端更新后的最新内容。')
+    expect(sessionStorage.getItem('guranovel:setting-draft-recovery:doc-char-1')).toBeNull()
+    expect(screen.queryByText('已保存')).not.toBeInTheDocument()
   })
 
   it('creates new setting document in the collection', async () => {
@@ -379,13 +382,9 @@ describe('SettingCollectionWorkspace', () => {
       expect(screen.getByText('天穹纪元设定集')).toBeInTheDocument()
     })
 
-    const exampleBtn = screen.getByRole('button', { name: '示例回复' })
-    expect(exampleBtn).toBeDisabled()
-    await act(async () => {
-      fireEvent.click(exampleBtn)
-    })
+    expect(screen.queryByRole('button', { name: '示例回复' })).not.toBeInTheDocument()
     expect(screen.queryByRole('button', { name: '接受此条' })).not.toBeInTheDocument()
     expect(mockedApplySettingProposal).not.toHaveBeenCalled()
-    expect(screen.getByText('设定讨论尚未接入 · 历史消息只读，不会调用模型')).toBeInTheDocument()
+    expect(screen.getByPlaceholderText('设定对话暂不可用')).toBeDisabled()
   })
 })

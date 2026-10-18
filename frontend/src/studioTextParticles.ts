@@ -8,6 +8,16 @@ export function snapshotText(box: HTMLElement): TextSnapshot {
   const height = Math.max(origin.height, box.querySelector(':scope > .studio-motion-content')?.getBoundingClientRect().height || 0)
   box.querySelectorAll<HTMLElement>('[data-sweep-text]').forEach(surface => {
     if (surface.closest('[data-text-inactive="true"]')) return
+    let left = origin.left, right = origin.right, top = origin.top, bottom = origin.top + height
+    for (let parent: HTMLElement | null = surface; parent && parent !== box; parent = parent.parentElement) {
+      const style = getComputedStyle(parent), bounds = parent.getBoundingClientRect()
+      if (/auto|scroll|hidden|clip/.test(style.overflowX || style.overflow)) {
+        left = Math.max(left, bounds.left); right = Math.min(right, bounds.right)
+      }
+      if (/auto|scroll|hidden|clip/.test(style.overflowY || style.overflow)) {
+        top = Math.max(top, bounds.top); bottom = Math.min(bottom, bounds.bottom)
+      }
+    }
     const walker = document.createTreeWalker(surface, NodeFilter.SHOW_TEXT)
     for (let text = walker.nextNode(); text; text = walker.nextNode()) {
       const style = getComputedStyle(text.parentElement!)
@@ -17,7 +27,7 @@ export function snapshotText(box: HTMLElement): TextSnapshot {
         range.setStart(text, index); range.setEnd(text, index + segment.length)
         if (!range.getBoundingClientRect) continue
         const rect = range.getBoundingClientRect()
-        if (!rect.width || rect.top > origin.top + height || rect.bottom < origin.top) continue
+        if (!rect.width || rect.left < left - .5 || rect.right > right + .5 || rect.top < top - .5 || rect.bottom > bottom + .5) continue
         glyphs.push({ text: segment, x: rect.left - origin.left, y: rect.top - origin.top, width: rect.width, height: rect.height, font: style.font, color: style.color })
       }
     }
@@ -48,7 +58,7 @@ function revealRows(box: HTMLElement) {
   box.querySelectorAll<HTMLElement>('[data-sweep-text]').forEach(textSurface => {
     if (textSurface.closest('[data-text-inactive="true"]')) return
     // The input's layout mirror supplies line measurements, but the input itself is revealed.
-    const surface = textSurface.closest('.studio-context-body.is-input, .studio-prose')?.querySelector<HTMLTextAreaElement>('textarea') || textSurface
+    const surface = textSurface.closest('.studio-context-body.is-input, .studio-prose, .studio-idea-card')?.querySelector<HTMLTextAreaElement>('textarea') || textSurface
     const origin = surface.getBoundingClientRect()
     const walker = document.createTreeWalker(textSurface, NodeFilter.SHOW_TEXT)
     for (let text = walker.nextNode(); text; text = walker.nextNode()) {
@@ -74,7 +84,7 @@ function revealRows(box: HTMLElement) {
 }
 
 // Canvas is only used for outgoing dust; incoming text keeps its original DOM.
-export function animateTextChange(box: HTMLElement, old: TextSnapshot | null, delay = 0) {
+export function animateTextChange(box: HTMLElement, old: TextSnapshot | null, delay = 0, revealAfter = 0) {
   if (typeof CanvasRenderingContext2D === 'undefined') return () => {}
   const source = old?.glyphs.length ? paint(old) : null
   const layer = document.createElement('canvas')
@@ -98,6 +108,7 @@ export function animateTextChange(box: HTMLElement, old: TextSnapshot | null, de
     }
   }
   if (source) box.append(layer)
+  const revealStart = Math.max(source ? DISSOLVE_MS : 0, revealAfter)
   box.dataset.textPhase = source ? 'dissolve' : 'waiting'
   box.querySelectorAll('.studio-stream').forEach(node => node.setAttribute('aria-busy', 'true'))
   if (box.matches('.studio-stream')) box.setAttribute('aria-busy', 'true')
@@ -125,6 +136,9 @@ export function animateTextChange(box: HTMLElement, old: TextSnapshot | null, de
         ctx.drawImage(source, tile.x, tile.y, step, step, tile.x + tile.dx * p, tile.y + tile.dy * p * p, step * (1 - p * .4), step * (1 - p * .4))
       }
       ctx.globalAlpha = 1
+    } else if (elapsed < revealStart) {
+      layer.remove()
+      box.dataset.textPhase = 'waiting'
     } else {
       if (box.dataset.textPhase !== 'reveal') {
         layer.remove()
@@ -132,7 +146,7 @@ export function animateTextChange(box: HTMLElement, old: TextSnapshot | null, de
         rows = revealRows(box)
         rows.forEach(({ surface }) => { masked.add(surface); surface.style.mask = 'linear-gradient(transparent, transparent)' })
       }
-      const revealTime = elapsed - (source ? DISSOLVE_MS : 0), stagger = Math.min(90, 900 / Math.max(1, rows.length))
+      const revealTime = elapsed - revealStart, stagger = Math.min(90, 900 / Math.max(1, rows.length))
       const masks = new Map<HTMLElement, string[]>()
       rows.forEach((row, i) => {
         const p = Math.max(0, Math.min(1, (revealTime - i * stagger) / 300))

@@ -140,7 +140,6 @@ export default function StudioSetting({
   const [sidebarOpen, setSidebarOpen] = useState(false)
   const [sweep, setSweep] = useState(0)
   const [error, setError] = useState(initial.error)
-  const [saved, setSaved] = useState(false)
   const [deleted, setDeleted] = useState<{ items: { note: SettingNote; index: number }[]; staged: NonNullable<Conversation['stagedComments']> } | null>(null)
   const mutationPending = useRef(false)
   const [mutationBusy, setMutationBusy] = useState(false)
@@ -259,7 +258,6 @@ export default function StudioSetting({
       const res = note.comments === undefined ? await onSaveNoteContent(id, bodyToSave, expectedVersion)
         : await onSaveNoteContent(id, bodyToSave, expectedVersion, note.comments)
       if (res === 'conflict') {
-        setSaved(false)
         q.inFlight = false
         const w = q.waiters
         q.waiters = []
@@ -282,7 +280,6 @@ export default function StudioSetting({
           } catch (_err: unknown) {
             void _err
           }
-          setSaved(true)
           setError('')
           const w = q.waiters
           q.waiters = []
@@ -290,7 +287,6 @@ export default function StudioSetting({
           return true
         }
       } else {
-        setSaved(false)
         q.inFlight = false
         const w = q.waiters
         q.waiters = []
@@ -298,7 +294,6 @@ export default function StudioSetting({
         return false
       }
     } catch {
-      setSaved(false)
       q.inFlight = false
       const w = q.waiters
       q.waiters = []
@@ -308,7 +303,6 @@ export default function StudioSetting({
   }
 
   function enqueueSave(id: string, debounceMs = 400) {
-    setSaved(false)
     let q = saveQueues.current.get(id)
     if (!q) {
       q = { timer: null, inFlight: false, lastSavedBody: null, waiters: [] }
@@ -348,8 +342,8 @@ export default function StudioSetting({
       }
       return true
     }
-    try { localStorage.setItem(settingStorageKey, JSON.stringify({ notes: next, conversation: chat })); setSaved(true); setError(''); stored = true }
-    catch { setSaved(false); setError('本机保存失败，编辑仍保留在当前页，请先复制备份。'); if (requireSave) return false }
+    try { localStorage.setItem(settingStorageKey, JSON.stringify({ notes: next, conversation: chat })); setError(''); stored = true }
+    catch { setError('本机保存失败，编辑仍保留在当前页，请先复制备份。'); if (requireSave) return false }
     currentNotes.current = next
     currentConversation.current = chat
     setNotes(next)
@@ -694,6 +688,7 @@ export default function StudioSetting({
     return persist(currentNotes.current)
   } }))
 
+  const sidebarStatus = saveStatusText ?? (collection?.status === 'archived' ? '已归档 · 只读' : preview ? '交互预览' : '')
   return <div className="studio-setting" aria-label="作品设定">
     <div className="setting-sidebar" onPointerEnter={() => { if (!hidden) setSidebarOpen(true) }} onPointerLeave={() => setSidebarOpen(false)} onFocus={() => { if (!hidden) setSidebarOpen(true) }} onBlur={event => { if (!event.currentTarget.contains(event.relatedTarget)) setSidebarOpen(false) }} onKeyDown={event => { if (event.key === 'Escape' && !pinned) { event.currentTarget.querySelector<HTMLButtonElement>('.setting-sidebar-trigger')?.focus(); setSidebarOpen(false) } }}>
     <button className="setting-sidebar-trigger" aria-label="展开设定侧边栏" aria-expanded={sidebarVisible} aria-controls="setting-library" disabled={hidden && !pinned} onClick={() => setSidebarOpen(true)}><span /></button>
@@ -712,7 +707,7 @@ export default function StudioSetting({
       <SettingNoteList notes={shown} category={category} activeId={mode === 'note' ? active?.id : undefined} disabled={readOnly || !activePage} onOpen={choose} onOrder={orderNotes} onDelete={deleteNotes} />
       {mutationBusy && <p role="status">正在同步删除或恢复…</p>}
       {deleted && <div className="setting-delete-undo" role="status"><small>已删除 {deleted.items.length} 项，正文引用保留</small><button type="button" disabled={mutationBusy} onClick={undoDelete}>撤销删除</button></div>}
-      <small className="setting-local-note">{saveStatusText || (collection ? (collection.status === 'archived' ? '已归档 · 只读' : saved ? '已保存' : '设定集') : preview ? saved ? '已保存到本机 · 交互预览' : '示例设定 · 交互预览' : '设定接口尚未接入')}</small>
+      {sidebarStatus && <small className="setting-local-note" role={saveStatusText ? 'status' : undefined}>{sidebarStatus}</small>}
     </aside>
     </div>
     <div className={`setting-main${mode === 'chat' ? ' is-conversation' : chatVisited ? ' has-conversation-return' : ''}`}>
@@ -746,7 +741,7 @@ export default function StudioSetting({
             return <button key={title} onClick={() => openTitle(title)}>{title}<small>{note ? categoryNames[note.category] : '未解析'}</small></button>
           })}</section>}
         </div>
-      </> : <div className="setting-empty"><h1>{categoryNames[category]}</h1><p>{preview ? '从一段对话开始，也可以直接新建条目。' : '从左侧新建条目开始，编辑后自动保存到设定集。设定讨论将在后续版本提供。'}</p><button disabled={readOnly || !preview} onClick={() => showMode('chat')}>{preview ? '新建内容' : '设定讨论（尚未接入）'}</button></div>}
+      </> : <div className="setting-empty"><h1>{categoryNames[category]}</h1><p>{preview ? '从一段对话开始，也可以直接新建条目。' : readOnly ? '暂无可查看的设定。' : '从左侧新建条目，开始完善设定。'}</p>{preview && <button disabled={readOnly} onClick={() => showMode('chat')}>新建内容</button>}</div>}
       {error && <p className="setting-error" role="alert">{error}</p>}
     </div>
   </div>

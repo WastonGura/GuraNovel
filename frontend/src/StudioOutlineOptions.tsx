@@ -2,10 +2,16 @@ import { useEffect, useRef, useState } from 'react'
 import { ApiError, cancelOutlineGeneration, createOutlineGeneration, getOutlineGeneration, listOutlineGenerations,
   readDocumentContent, selectOutlineCandidate, type OutlineGeneration, type OutlineSelection, type SelectedOutline } from './api/client'
 import type { useChapterIdea } from './useChapterIdea'
+import StudioOutlineSurface, { OutlineChoiceLabel, OutlineRefreshButton, OutlineSendButton } from './StudioOutlineSurface'
+import StudioOutlineHistory from './StudioOutlineHistory'
+import { TextSweep } from './StudioMotion'
 import './studioOutlineOptions.css'
 
 type PendingGeneration = { request_id: string; expected_idea_revision: number }
 type PendingSelection = { runId: string; payload: OutlineSelection }
+function hasOutlineResults(batch: OutlineGeneration) {
+  return batch.status === 'completed' && batch.candidates.length > 0
+}
 function recover<T>(key: string): T | null {
   try { return JSON.parse(sessionStorage.getItem(key) || 'null') as T | null } catch { return null }
 }
@@ -24,14 +30,16 @@ export default function StudioOutlineOptions({ projectId, chapterId, idea, befor
   const [loaded, setLoaded] = useState(false)
   const [error, setError] = useState('')
   const [busy, setBusy] = useState(false)
+  const [editingIdea, setEditingIdea] = useState(false)
   const guard = useRef(false)
   const mounted = useRef(false)
   const active = batches.find(batch => batch.id === activeId)
+  const latestAttempt = batches[0]
   const ongoing = batches.find(batch => batch.status === 'running' || batch.status === 'uncertain')
   function upsert(batch: OutlineGeneration) {
     if (!mounted.current) return
-    setBatches(previous => [batch, ...previous.filter(item => item.id !== batch.id)])
-    setActiveId(previous => previous || batch.id)
+    setBatches(previous => [batch, ...previous.filter(item => item.id !== batch.id)].sort((a, b) => b.started_at.localeCompare(a.started_at)))
+    if (hasOutlineResults(batch)) setActiveId(batch.id)
     if (batch.status !== 'running') {
       const stored = recover<PendingGeneration>(generationKey)
       if (stored?.request_id === batch.id) { sessionStorage.removeItem(generationKey); setPending(null) }
@@ -41,7 +49,8 @@ export default function StudioOutlineOptions({ projectId, chapterId, idea, befor
     let live = true; mounted.current = true
     listOutlineGenerations(projectId, chapterId).then(values => {
       if (!live) return
-      setBatches(values); setActiveId(values[0]?.id || ''); setLoaded(true)
+      const newestFirst = [...values].sort((a, b) => b.started_at.localeCompare(a.started_at))
+      setBatches(newestFirst); setActiveId(newestFirst.find(hasOutlineResults)?.id || ''); setLoaded(true)
       const completed = values.find(item => item.id === pending?.request_id && item.status !== 'running')
       if (completed) { sessionStorage.removeItem(generationKey); setPending(null) }
     }).catch(() => { if (live) setError('大纲方案加载失败，已有内容未改动。请刷新重试。') })
@@ -76,7 +85,7 @@ export default function StudioOutlineOptions({ projectId, chapterId, idea, befor
         if (!(cause instanceof ApiError) || cause.status !== 404) throw cause
         batch = await createOutlineGeneration(projectId, chapterId, payload)
       }
-      upsert(batch); if (mounted.current) setActiveId(batch.id)
+      upsert(batch); if (mounted.current) setEditingIdea(false)
     } catch { if (mounted.current) setError('生成请求尚未核对完成。请核对原请求，已有方案和思路仍保留。') }
     finally { guard.current = false; if (mounted.current) setBusy(false) }
   }
@@ -114,37 +123,51 @@ export default function StudioOutlineOptions({ projectId, chapterId, idea, befor
     catch { setError('放弃请求未完成，请重新核对任务状态。') }
     finally { guard.current = false; setBusy(false) }
   }
+  const choosing = Boolean(active?.status === 'completed' && active.candidates.length && !editingIdea)
+  const ideaStatus = idea.status === '思路已保存' ? '' : idea.status
+  const inputStatus = busy || ongoing?.status === 'running' ? '正在生成…' : ideaStatus
+  const cannotGenerate = busy || !loaded || !idea.ready || idea.readOnly || !idea.text.trim() || Boolean(ongoing)
+  const history = choosing && <StudioOutlineHistory batches={batches} activeId={activeId}
+    onSelect={id => { setActiveId(id); setEditingIdea(false) }} />
   return <section className="studio-outline-alternatives" aria-label="大纲方案比较">
-    <h2>本章大纲方案</h2>
-    <p>每批生成三个方向。查看方案不会覆盖编辑，采用后仍需作者确认。</p>
-    <label>大纲思路<textarea aria-label="大纲思路" maxLength={8000} readOnly={!idea.ready || idea.readOnly || busy}
-      value={idea.text} onChange={event => idea.change(event.target.value)} placeholder="这一章要推进什么，角色将面临什么选择？" /></label>
-    <p role="status">{idea.status}</p>
-    {idea.status.includes('保存失败') && <button onClick={() => void idea.flush()}>重试保存思路</button>}
-    {(idea.status.includes('冲突') || idea.status.includes('加载失败')) && <button onClick={() => void idea.reloadServer()}>使用服务器思路</button>}
-    <div className="studio-actions">
-      <button className="studio-primary" disabled={busy || !loaded || !idea.ready || idea.readOnly || !idea.text.trim() || Boolean(ongoing)} onClick={() => void generate()}>
-        {pending ? '核对上次生成请求' : batches.some(batch => batch.status === 'completed') ? '换一组' : '生成大纲方案'}
-      </button>
+    <StudioOutlineSurface choosing={choosing} motionKey={choosing ? active!.id : 'idea'} footer={<>
+      {choosing ? <>
+        <button className="outline-secondary" onClick={() => setEditingIdea(true)}>编辑思路</button>
+        <OutlineRefreshButton disabled={cannotGenerate} onClick={() => void generate()} />
+      </> : active?.status === 'completed' ? <button className="outline-secondary" onClick={() => setEditingIdea(false)}>返回方案</button> : null}
+      {history}
+    </>}>
+      {choosing && <div className="studio-outline-options persisted-outline-options">
+        {active!.candidates.map((candidate, index) => {
+          const title = candidate.title.replace(/^\s*方案\s*[一二三四五六七八九十\d０-９]+\s*[：:、.．—-]\s*/u, '').trim() || candidate.title
+          return <article key={candidate.id} className="outline-candidate">
+          <div className="outline-candidate-scroll" tabIndex={0} role="region" aria-label={'方案全文：' + title}>
+            <small data-sweep-text>方案 {String(index + 1).padStart(2, '0')}</small>
+            <h2 data-sweep-text>{title}</h2><p data-sweep-text className="outline-candidate-summary">{candidate.summary}</p>
+            <div data-sweep-text className="outline-candidate-content">{candidate.content}</div>
+          </div>
+          <button className="studio-option-action" disabled={busy || idea.readOnly} aria-label={'采用此方案：' + title} onClick={() => void choose(active!.id, candidate.id)}><OutlineChoiceLabel /></button>
+        </article>})}
+      </div>}
+      <div className="studio-idea-card" data-text-inactive={choosing} aria-hidden={choosing} inert={choosing}>
+        <div className="studio-idea-copy" aria-hidden="true"><TextSweep text={idea.text || '你的大纲思路…'} changeKey="idea" /></div>
+        <textarea aria-label="大纲思路" maxLength={8000} readOnly={!idea.ready || idea.readOnly || busy || choosing}
+          value={idea.text} onChange={event => idea.change(event.target.value)} placeholder="你的大纲思路…" />
+        <div className="outline-input-actions">{inputStatus && <span role="status">{inputStatus}</span>}
+          {pending ? <button disabled={cannotGenerate} onClick={() => void generate()}>核对上次生成请求</button> : <OutlineSendButton disabled={cannotGenerate} onClick={() => void generate()} />}
+        </div>
+      </div>
+    </StudioOutlineSurface>
+    <div className="outline-recovery" aria-live="polite">
+      {choosing && (busy || ideaStatus) && <span className="outline-save-state" role="status">{busy ? '正在处理请求…' : ideaStatus}</span>}
+      {idea.status.includes('保存失败') && <button onClick={() => void idea.flush()}>重试保存思路</button>}
+      {(idea.status.includes('冲突') || idea.status.includes('加载失败')) && <button onClick={() => void idea.reloadServer()}>使用服务器思路</button>}
       {(ongoing || pending) && <button disabled={busy} onClick={() => void refresh()}>刷新生成状态</button>}
-      {ongoing?.status === 'uncertain' && <button disabled={busy} onClick={() => void abandon()}>放弃未确定的请求</button>}
+      {ongoing?.status === 'uncertain' && <><p role="status">模型结果尚不确定，请先核对原请求。</p><button disabled={busy} onClick={() => void abandon()}>放弃未确定的请求</button></>}
+      {selection && <><button disabled={busy} onClick={() => void choose(selection.runId, selection.payload.candidate_id)}>核对上次选择</button>
+        <button disabled={busy} onClick={() => { if (window.confirm('保留当前大纲并清除本机待核对选择？服务端仍按版本校验处理原请求。')) { sessionStorage.removeItem(selectionKey); setSelection(null) } }}>保留当前大纲</button></>}
+      {error && <p role="alert">{error}</p>}
+      {latestAttempt?.status === 'failed' && <p role="alert">本次生成失败，已有方案未改动。可以重新生成。</p>}
     </div>
-    {busy && <p role="status">正在处理请求…</p>}
-    {ongoing && <p role="status">{ongoing.status === 'running' ? '正在生成大纲，可离开后返回核对同一任务。' : '模型结果尚不确定，请先核对原请求。'}</p>}
-    {selection && <div className="studio-actions">
-      <button disabled={busy} onClick={() => void choose(selection.runId, selection.payload.candidate_id)}>核对上次选择</button>
-      <button disabled={busy} onClick={() => { if (window.confirm('保留当前大纲并清除本机待核对选择？服务端仍按版本校验处理原请求。')) { sessionStorage.removeItem(selectionKey); setSelection(null) } }}>保留当前大纲</button>
-    </div>}
-    {error && <p role="alert">{error}</p>}
-    {batches.length > 0 && <label>历史批次<select aria-label="大纲历史批次" value={activeId} onChange={event => setActiveId(event.target.value)}>
-      {batches.map((batch, index) => <option key={batch.id} value={batch.id}>第 {batches.length - index} 批 · 思路 r{batch.idea_revision} · {batch.status === 'completed' ? '已完成' : batch.status === 'failed' ? '失败' : batch.status === 'cancelled' ? '已放弃' : '待核对'}</option>)}
-    </select></label>}
-    {active && <p className="studio-muted">本批思路：{active.idea_text} · {active.provenance.provider_kind === 'fake' ? '测试 Provider' : '模型生成'}</p>}
-    {active?.status === 'failed' && <p role="alert">这一批生成失败，已有方案未改动。可明确发起新的一批。</p>}
-    <div className="studio-outline-candidates">{active?.candidates.map(candidate => <article key={candidate.id}>
-      <h3>{candidate.title}</h3><p>{candidate.summary}</p>
-      <details><summary>查看完整大纲：{candidate.title}</summary><pre>{candidate.content}</pre></details>
-      <button disabled={busy || idea.readOnly} onClick={() => void choose(active.id, candidate.id)}>采用此方案：{candidate.title}</button>
-    </article>)}</div>
   </section>
 }

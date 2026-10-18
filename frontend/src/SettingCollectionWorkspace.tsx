@@ -311,6 +311,10 @@ export default function SettingCollectionWorkspace() {
         getDocument(conflict.noteId),
         readDocumentContent(conflict.noteId),
       ])
+      // The author explicitly chose to replace this draft. Otherwise the child
+      // editor restores its stale recovery copy over the freshly loaded text.
+      sessionStorage.removeItem(`guranovel:setting-draft-recovery:${conflict.noteId}`)
+      sessionStorage.removeItem(`guranovel:setting-feedback-recovery:${conflict.noteId}`)
       setNotes((prev) =>
         prev.map((n) =>
           n.id === conflict.noteId
@@ -364,9 +368,6 @@ export default function SettingCollectionWorkspace() {
           <Link to="/" className="setting-workspace-back">← 返回项目列表</Link>
           <span className="setting-workspace-loading">正在加载设定集…</span>
         </header>
-        <div className="setting-workspace-loading-body">
-          <p>正在读取设定集文件与关联数据…</p>
-        </div>
       </div>
     )
   }
@@ -397,14 +398,14 @@ export default function SettingCollectionWorkspace() {
 
   const saveStatusMessage =
     isArchived
-      ? '已归档 · 只读'
+      ? ''
       : saveStatus === 'saving'
         ? '正在保存…'
         : saveStatus === 'conflict'
           ? '保存冲突（草稿已保留）'
           : saveStatus === 'error'
             ? '保存失败'
-            : '已保存'
+            : ''
 
   return (
     <div className="setting-workspace-page studio">
@@ -418,9 +419,6 @@ export default function SettingCollectionWorkspace() {
         </Link>
         <div className="setting-workspace-header-title">
           <h1 className="setting-workspace-title">{collection.title}</h1>
-          <span className="setting-badge-revision" aria-label={`版本 r${collection.revision}`} title={`修订版本 r${collection.revision}`}>
-            r{collection.revision}
-          </span>
           {isArchived && (
             <span className="setting-badge-archived" role="status">
               已归档 · 只读
@@ -435,19 +433,14 @@ export default function SettingCollectionWorkspace() {
           >
             关联小说 ({projects.length})
           </span>
-          <span className="setting-impact-warning" title="修改将影响关联小说后续启动的新任务">
-            ⚠️ 修改将影响关联小说后续启动的新任务
-          </span>
-          <span className={`setting-save-pill is-${saveStatus}`} role="status">
-            {saveStatusMessage}
-          </span>
+          {projects.length > 0 && <span className="setting-impact-warning">修改会影响关联作品的后续创作</span>}
         </div>
       </header>
 
       {conflict && (
         <div className="setting-conflict-banner" role="alert">
           <div className="setting-conflict-info">
-            <strong>版本冲突（409 Conflict）</strong>
+            <strong>版本冲突</strong>
             <span>
               条目「{conflict.noteTitle}」已被其他操作或新任务更新。您的本地草稿已保留，未被覆盖。
             </span>

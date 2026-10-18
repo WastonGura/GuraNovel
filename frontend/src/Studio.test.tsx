@@ -142,6 +142,12 @@ describe('creation studio', () => {
     expect(launcher).toHaveFocus()
   })
 
+  it('keeps the header as the single bookshelf exit', () => {
+    openPreview()
+    expect(screen.getByRole('button', { name: '返回主页' })).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: '返回书架' })).not.toBeInTheDocument()
+  })
+
   it('opens Gura, switches to Draft, collapses and handles rapid reverse with correct gutter and comment placement', async () => {
     const comment = { id: 'pending-1', start: 0, end: 2, quote: '正文', text: '修改意见', color: commentColors[0] }
     localStorage.setItem('guranovel:studio-preview:v1', JSON.stringify({ 'preview-10': { outline: '大纲', draft: '正文测试内容', draftComments: [comment] } }))

@@ -291,7 +291,8 @@ export default function GlobalAssistant({
         inert={open}
         onClick={() => handleSetOpen(true)}
       >
-        <SharkIcon />
+        <img className="gura-launcher-circle" src="/ui/studio/gura-circle.svg" alt="" />
+        <span className="gura-launcher-icon" aria-hidden="true"><img className="gura-shark" src="/ui/studio/gura-shark.svg" alt="" /></span>
       </button>
       <div
         id="studio-assistant-dialog"
@@ -307,7 +308,7 @@ export default function GlobalAssistant({
         <header>
           <AssistantIconButton icon="hide" label="收起助手" onClick={() => handleSetOpen(false)} />
           <span>Gura</span>
-          <small>{!isReal ? '交互预览' : '只读助手'}</small>
+          {!isReal && <small>交互预览</small>}
         </header>
         <div className="studio-assistant-history" ref={history} role="log" aria-label="助手对话记录" tabIndex={0}>
           {!isReal ? (
@@ -316,7 +317,6 @@ export default function GlobalAssistant({
                 <div className="studio-assistant-empty">
                   <SharkIcon />
                   <p>软件哪里不会用？</p>
-                  <small>问我操作方法，或说说你想完成的事。</small>
                 </div>
               )}
               {previewMessages.map((message, index) => (
@@ -337,7 +337,6 @@ export default function GlobalAssistant({
                 <div className="studio-assistant-empty">
                   <SharkIcon />
                   <p>软件哪里不会用？</p>
-                  <small>问我操作方法、大纲、审阅或还原点状态。</small>
                 </div>
               )}
               {realMessages.map(msg => (
@@ -406,7 +405,7 @@ export default function GlobalAssistant({
           <textarea
             ref={input}
             aria-label="给 Gura 的消息"
-            aria-describedby="studio-assistant-note"
+            aria-describedby={!isReal ? 'studio-assistant-note' : undefined}
             placeholder="询问用法，或描述要完成的操作…"
             rows={1}
             value={draft}
@@ -419,9 +418,7 @@ export default function GlobalAssistant({
             }}
           />
           <div>
-            <small id="studio-assistant-note">
-              {!isReal ? '仅本次预览 · Agent 尚未接入' : '受限只读业务助手 · 无修改定稿权限'}
-            </small>
+            {!isReal && <small id="studio-assistant-note">预览消息不会发送</small>}
             <AssistantIconButton
               icon="send"
               label={!isReal ? '发送给 Gura（仅预览）' : sending ? '正在思考…' : '发送给 Gura'}
