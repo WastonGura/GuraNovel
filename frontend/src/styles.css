@@ -790,24 +790,6 @@ textarea:focus-visible { outline: 3px solid #171717; outline-offset: 2px; }
 .carousel-arrow img { height: 18px; opacity: .55; width: 18px; }
 .carousel-previous img { transform: rotate(180deg); }
 
-/* Pointer-driven light sits on the component surface; it never replaces its fill. */
-.dashboard-canvas [data-glow] { isolation: isolate; overflow: hidden; position: relative; }
-.dashboard-canvas [data-glow]::after {
-  background: radial-gradient(circle 54px at var(--glow-x, 50%) var(--glow-y, 50%), rgb(0 0 0 / 32%), rgb(255 255 255 / 11%) 42%, transparent 72%);
-  content: "";
-  inset: 0;
-  opacity: 0;
-  pointer-events: none;
-  position: absolute;
-  transition: opacity 150ms ease, transform 220ms ease;
-  transform-origin: var(--glow-x, 50%) var(--glow-y, 50%);
-  z-index: 4;
-}
-
-.dashboard-canvas [data-glow]:hover::after { opacity: 1; }
-.dashboard-canvas [data-glow]:active::after { opacity: .48; transform: scale(1.45); }
-.dashboard-canvas [data-glow].is-glow-burst::after { animation: glow-burst 520ms cubic-bezier(.16, .72, .24, 1) both; }
-
 .dashboard-search {
   border-radius: 28px;
   height: 50px;
@@ -1352,7 +1334,7 @@ textarea:focus-visible { outline: 3px solid #171717; outline-offset: 2px; }
 
 .form-field-full { grid-column: 1 / -1; }
 
-/* Creation uses the same paper, ink and soft glow as the bookshelf. */
+/* Creation uses the same paper, ink and soft shadows as the bookshelf. */
 .creation-dialog {
   border: 1px solid #eee;
   border-radius: 32px;
@@ -1410,11 +1392,6 @@ textarea:focus-visible { outline: 3px solid #171717; outline-offset: 2px; }
 .creation-error { background: #f4f4f4; border-radius: 12px; color: #222222; font-size: 13px; line-height: 1.7; margin: 20px 0 0; padding: 12px 16px; }
 
 @keyframes dashboard-pulse { 50% { opacity: .62; } }
-@keyframes glow-burst {
-  from { opacity: .72; transform: scale(.72); }
-  45% { opacity: .46; }
-  to { opacity: 0; transform: scale(2.15); }
-}
 @keyframes search-border-fast { from { --search-angle: 0deg; } to { --search-angle: 360deg; } }
 @keyframes search-border-slow { from { --search-angle: 360deg; } to { --search-angle: 720deg; } }
 @keyframes search-border-leave {

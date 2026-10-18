@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type FormEvent, type MouseEvent, type PointerEvent } from 'react'
+import { useEffect, useRef, useState, type FormEvent } from 'react'
 import { useLocation, useNavigate, useSearchParams } from 'react-router-dom'
 import CreationDialog from './CreationDialog'
 import {
@@ -149,7 +149,7 @@ function ProjectForm({
         {error && <p ref={errorRef} id="create-project-error" className="creation-error" role="alert" tabIndex={-1}>{error}</p>}
         <footer className="creation-footer">
           <button className="creation-cancel" type="button" onClick={onClose} disabled={pending}>取消</button>
-          <button className="creation-submit" data-glow type="submit" disabled={pending}>{pending ? '正在创建作品…' : '创建作品'}<span aria-hidden="true">↗</span></button>
+          <button className="creation-submit" type="submit" disabled={pending}>{pending ? '正在创建作品…' : '创建作品'}<span aria-hidden="true">↗</span></button>
         </footer>
       </form>
     </CreationDialog>
@@ -219,7 +219,7 @@ function SettingCollectionForm({
         {error && <p ref={errorRef} className="creation-error" role="alert" tabIndex={-1}>{error}</p>}
         <footer className="creation-footer">
           <button className="creation-cancel" type="button" onClick={onClose} disabled={pending}>取消</button>
-          <button className="creation-submit" data-glow type="submit" disabled={pending}>{pending ? '正在创建设定集…' : '新建设定集'}<span aria-hidden="true">↗</span></button>
+          <button className="creation-submit" type="submit" disabled={pending}>{pending ? '正在创建设定集…' : '新建设定集'}<span aria-hidden="true">↗</span></button>
         </footer>
       </form>
     </CreationDialog>
@@ -345,7 +345,7 @@ function NovelDetails({
       <section className={`novel-detail${closing ? ' is-closing' : ''}`} role="dialog" aria-modal="true" aria-labelledby="novel-detail-title" onAnimationEnd={() => {
         if (closing) onClose()
       }}>
-        <button ref={closeButton} className="dashboard-dialog-close" data-glow type="button" onClick={() => setClosing(true)} aria-label="关闭作品详情">×</button>
+        <button ref={closeButton} className="dashboard-dialog-close" type="button" onClick={() => setClosing(true)} aria-label="关闭作品详情">×</button>
 
         <div className="novel-detail-columns">
           {/* Left Column: Cover, Title & Meta */}
@@ -362,7 +362,6 @@ function NovelDetails({
               {boundCollection ? (
                 <button
                   className="novel-detail-setting-link"
-                  data-glow
                   type="button"
                   onClick={() => navigate(`/setting-collections/${encodeURIComponent(boundCollection.id)}`)}
                   aria-label={`Open setting collection ${boundCollection.title}`}
@@ -376,7 +375,6 @@ function NovelDetails({
             </div>
             <button
               className="novel-edit-toggle"
-              data-glow
               type="button"
               onClick={toggleEditing}
             >
@@ -449,10 +447,10 @@ function NovelDetails({
                 </label>
                 {saveError && <p className="notice" role="alert">{saveError}</p>}
                 <div className="novel-edit-actions">
-                  <button data-glow type="submit" disabled={saving}>
+                  <button type="submit" disabled={saving}>
                     {saving ? '正在保存…' : '保存修改'}
                   </button>
-                  <button data-glow type="button" onClick={() => setEditing(false)}>
+                  <button type="button" onClick={() => setEditing(false)}>
                     Cancel
                   </button>
                 </div>
@@ -482,7 +480,7 @@ function NovelDetails({
           {/* Right Column: Chapters */}
           <div className="novel-detail-right">
             <div className="novel-detail-chapters">
-              <button className="volume-toggle" data-glow type="button" onClick={() => setExpanded((value) => !value)} aria-expanded={expanded}>
+              <button className="volume-toggle" type="button" onClick={() => setExpanded((value) => !value)} aria-expanded={expanded}>
                 <span className="volume-caret" aria-hidden="true">{expanded ? '⌄' : '›'}</span>
                 <span>第一卷 …</span>
                 <img src={icon('rename')} alt="" />
@@ -492,7 +490,7 @@ function NovelDetails({
               {expanded && chapters?.length === 0 && <p className="detail-status">暂无章节</p>}
               {expanded && chapters && chapters.length > 0 && <ul className="detail-chapter-list">
                 {chapters.map((chapter) => <li key={chapter.id}>
-                  <button data-glow type="button" onClick={() => navigate(`/projects/${encodeURIComponent(currentProject.id)}/studio/${encodeURIComponent(chapter.id)}`)}>
+                  <button type="button" onClick={() => navigate(`/projects/${encodeURIComponent(currentProject.id)}/studio/${encodeURIComponent(chapter.id)}`)}>
                     <span>第{chapter.chapter_number}话</span><span>{chapter.title || '未命名章节'}</span>
                     <img src={icon('rename')} alt="" />
                   </button>
@@ -500,31 +498,12 @@ function NovelDetails({
               </ul>}
             </div>
             <span className="novel-detail-rule" aria-hidden="true" />
-            <button className="novel-create-button" data-glow type="button" onClick={() => navigate(`/projects/${encodeURIComponent(currentProject.id)}/studio`)}>开始创作</button>
+            <button className="novel-create-button" type="button" onClick={() => navigate(`/projects/${encodeURIComponent(currentProject.id)}/studio`)}>开始创作</button>
           </div>
         </div>
       </section>
     </div>
   )
-}
-
-function trackGlow(event: PointerEvent<HTMLDivElement>) {
-  const target = (event.target as HTMLElement).closest<HTMLElement>('[data-glow]')
-  if (!target || !event.currentTarget.contains(target)) return
-  const bounds = target.getBoundingClientRect()
-  target.style.setProperty('--glow-x', `${event.clientX - bounds.left}px`)
-  target.style.setProperty('--glow-y', `${event.clientY - bounds.top}px`)
-}
-
-function burstGlow(event: MouseEvent<HTMLDivElement>) {
-  const target = (event.target as HTMLElement).closest<HTMLElement>('[data-glow]')
-  if (!target || !event.currentTarget.contains(target)) return
-  const bounds = target.getBoundingClientRect()
-  target.style.setProperty('--glow-x', `${event.detail ? event.clientX - bounds.left : bounds.width / 2}px`)
-  target.style.setProperty('--glow-y', `${event.detail ? event.clientY - bounds.top : bounds.height / 2}px`)
-  target.classList.remove('is-glow-burst')
-  void target.offsetWidth
-  target.classList.add('is-glow-burst')
 }
 
 export default function Dashboard() {
@@ -618,9 +597,7 @@ export default function Dashboard() {
   }
 
   return (
-    <div className="dashboard-canvas" onPointerMove={trackGlow} onClickCapture={burstGlow} onAnimationEnd={(event) => {
-      if (event.animationName === 'glow-burst') (event.target as HTMLElement).classList.remove('is-glow-burst')
-    }}>
+    <div className="dashboard-canvas">
       <button className="dashboard-settings" type="button" disabled aria-label="全局设置（暂未提供）" title="全局设置暂未提供"><img src={icon('setting')} alt="" /></button>
       <h1 id="route-title" className="dashboard-greeting">{greeting()}</h1>
       <div className="dashboard-main" aria-labelledby="route-title">
@@ -630,15 +607,15 @@ export default function Dashboard() {
           <div className="dashboard-carousel">
             <div className={`dashboard-row recent-row${projects?.length === 0 ? ' is-empty' : ''}`} ref={recentRow} onScroll={(event) => setRecentIndex(Math.round(event.currentTarget.scrollLeft / 295))}>
               {projects === null && !failed && Array.from({ length: 4 }, (_, index) => <div className="dashboard-skeleton recent-card" key={index} />)}
-              {recent.map((project) => <button className="recent-card project-card" data-glow type="button" key={project.id} onClick={() => setSelected(project)} aria-label={`Open ${project.title}`}>
+              {recent.map((project) => <button className="recent-card project-card" type="button" key={project.id} onClick={() => setSelected(project)} aria-label={`Open ${project.title}`}>
                 <span className="recent-art"><img src={artwork(project)} alt="" /></span>
                 <span className="recent-info"><strong>{project.title}</strong><span><span>字数：{wordCount(project)}</span><time dateTime={project.updated_at}>{relativeTime(project.updated_at)}</time></span></span>
               </button>)}
               {projects?.length === 0 && <p className="dashboard-empty">还没有作品，新建一部开始创作。</p>}
             </div>
             {recent.length > 3 && <>
-              <button className="carousel-arrow carousel-previous" data-glow type="button" disabled={recentIndex === 0} onClick={() => moveCarousel(recentRow.current, -1, 295, recentMaxIndex, setRecentIndex)} aria-label="查看更早作品"><img src={icon('akar-icons_arrow-right')} alt="" /></button>
-              <button className="carousel-arrow carousel-next" data-glow type="button" disabled={recentIndex === recentMaxIndex} onClick={() => moveCarousel(recentRow.current, 1, 295, recentMaxIndex, setRecentIndex)} aria-label="查看更多最近作品"><img src={icon('akar-icons_arrow-right')} alt="" /></button>
+              <button className="carousel-arrow carousel-previous" type="button" disabled={recentIndex === 0} onClick={() => moveCarousel(recentRow.current, -1, 295, recentMaxIndex, setRecentIndex)} aria-label="查看更早作品"><img src={icon('akar-icons_arrow-right')} alt="" /></button>
+              <button className="carousel-arrow carousel-next" type="button" disabled={recentIndex === recentMaxIndex} onClick={() => moveCarousel(recentRow.current, 1, 295, recentMaxIndex, setRecentIndex)} aria-label="查看更多最近作品"><img src={icon('akar-icons_arrow-right')} alt="" /></button>
             </>}
           </div>
         </section>
@@ -647,24 +624,24 @@ export default function Dashboard() {
         <section className="dashboard-section dashboard-novels" aria-labelledby="novels-title">
           <div className="dashboard-section-heading">
             <h2 id="novels-title"><img src={icon('akar-icons_book')} alt="" />作品</h2>
-            <button className="novel-add" data-glow type="button" onClick={() => setCreating(true)} aria-label="新建作品"><img src={icon('bx_message-square-add')} alt="" /></button>
+            <button className="novel-add" type="button" onClick={() => setCreating(true)} aria-label="新建作品"><img src={icon('bx_message-square-add')} alt="" /></button>
           </div>
           <div className="dashboard-carousel">
             <div className={`dashboard-row novels-row${projects?.length === 0 ? ' is-empty' : ''}`} ref={novelsRow} onScroll={(event) => setNovelIndex(Math.round(event.currentTarget.scrollLeft / 171))}>
               {projects === null && !failed && Array.from({ length: 6 }, (_, index) => <div className="dashboard-skeleton novel-card" key={index} />)}
-              {projects?.length === 0 && <button className="dashboard-empty-create" data-glow type="button" onClick={() => setCreating(true)} aria-label="创建第一部作品">
+              {projects?.length === 0 && <button className="dashboard-empty-create" type="button" onClick={() => setCreating(true)} aria-label="创建第一部作品">
                 <span className="empty-create-icon" aria-hidden="true">+</span>
                 <span><strong>写下你的第一部作品</strong><span>从一个名字、一个念头开始。</span></span>
                 <span className="empty-create-arrow" aria-hidden="true">↗</span>
               </button>}
-              {projects?.map((project) => <button className="novel-card project-card" data-glow type="button" key={project.id} onClick={() => setSelected(project)} aria-label={`Open ${project.title}`}>
+              {projects?.map((project) => <button className="novel-card project-card" type="button" key={project.id} onClick={() => setSelected(project)} aria-label={`Open ${project.title}`}>
                 <span className="novel-art"><img src={artwork(project)} alt="" /></span>
                 <span className="novel-info"><strong>{project.title}</strong><span>字数：{wordCount(project)}</span><time dateTime={project.updated_at}>{relativeTime(project.updated_at)}</time></span>
               </button>)}
             </div>
             {(projects?.length ?? 0) > 5 && <>
-              <button className="carousel-arrow carousel-previous" data-glow type="button" disabled={novelIndex === 0} onClick={() => moveCarousel(novelsRow.current, -1, 171, novelMaxIndex, setNovelIndex)} aria-label="Show previous novels"><img src={icon('akar-icons_arrow-right')} alt="" /></button>
-              <button className="carousel-arrow carousel-next" data-glow type="button" disabled={novelIndex === novelMaxIndex} onClick={() => moveCarousel(novelsRow.current, 1, 171, novelMaxIndex, setNovelIndex)} aria-label="Show more novels"><img src={icon('akar-icons_arrow-right')} alt="" /></button>
+              <button className="carousel-arrow carousel-previous" type="button" disabled={novelIndex === 0} onClick={() => moveCarousel(novelsRow.current, -1, 171, novelMaxIndex, setNovelIndex)} aria-label="Show previous novels"><img src={icon('akar-icons_arrow-right')} alt="" /></button>
+              <button className="carousel-arrow carousel-next" type="button" disabled={novelIndex === novelMaxIndex} onClick={() => moveCarousel(novelsRow.current, 1, 171, novelMaxIndex, setNovelIndex)} aria-label="Show more novels"><img src={icon('akar-icons_arrow-right')} alt="" /></button>
             </>}
           </div>
         </section>
@@ -673,7 +650,7 @@ export default function Dashboard() {
         <section className="dashboard-section dashboard-collections" aria-labelledby="collections-title">
           <div className="dashboard-section-heading">
             <h2 id="collections-title"><img src={icon('setting')} alt="" />设定集</h2>
-            <button className="collection-add" data-glow type="button" onClick={() => setCreatingCollection(true)} aria-label="新建设定集"><img src={icon('bx_message-square-add')} alt="" /></button>
+            <button className="collection-add" type="button" onClick={() => setCreatingCollection(true)} aria-label="新建设定集"><img src={icon('bx_message-square-add')} alt="" /></button>
           </div>
           <div className="dashboard-carousel">
             <div className={`dashboard-row collections-row${collections?.length === 0 ? ' is-empty' : ''}`} ref={collectionsRow} onScroll={(event) => setCollectionIndex(Math.round(event.currentTarget.scrollLeft / 220))}>
@@ -683,7 +660,6 @@ export default function Dashboard() {
                 return (
                   <button
                     className="collection-card project-card"
-                    data-glow
                     type="button"
                     key={col.id}
                     onClick={() => navigate(`/setting-collections/${encodeURIComponent(col.id)}`)}
@@ -705,8 +681,8 @@ export default function Dashboard() {
               {collections?.length === 0 && <p className="dashboard-empty">还没有设定集，可以新建或随作品自动创建。</p>}
             </div>
             {(collections?.length ?? 0) > 4 && <>
-              <button className="carousel-arrow carousel-previous" data-glow type="button" disabled={collectionIndex === 0} onClick={() => moveCarousel(collectionsRow.current, -1, 220, collectionMaxIndex, setCollectionIndex)} aria-label="Show previous setting collections"><img src={icon('akar-icons_arrow-right')} alt="" /></button>
-              <button className="carousel-arrow carousel-next" data-glow type="button" disabled={collectionIndex === collectionMaxIndex} onClick={() => moveCarousel(collectionsRow.current, 1, 220, collectionMaxIndex, setCollectionIndex)} aria-label="Show more setting collections"><img src={icon('akar-icons_arrow-right')} alt="" /></button>
+              <button className="carousel-arrow carousel-previous" type="button" disabled={collectionIndex === 0} onClick={() => moveCarousel(collectionsRow.current, -1, 220, collectionMaxIndex, setCollectionIndex)} aria-label="Show previous setting collections"><img src={icon('akar-icons_arrow-right')} alt="" /></button>
+              <button className="carousel-arrow carousel-next" type="button" disabled={collectionIndex === collectionMaxIndex} onClick={() => moveCarousel(collectionsRow.current, 1, 220, collectionMaxIndex, setCollectionIndex)} aria-label="Show more setting collections"><img src={icon('akar-icons_arrow-right')} alt="" /></button>
             </>}
           </div>
         </section>
@@ -731,10 +707,9 @@ export default function Dashboard() {
           }
         }}>
           {showResults && <div className="search-results" role="region" aria-label="搜索结果">
-            {matches.map((project) => <button data-glow type="button" key={project.id} onClick={() => setSelected(project)}>{project.title}</button>)}
+            {matches.map((project) => <button type="button" key={project.id} onClick={() => setSelected(project)}>{project.title}</button>)}
             {collectionMatches.map((col) => (
               <button
-                data-glow
                 type="button"
                 key={col.id}
                 className="search-result-collection"
