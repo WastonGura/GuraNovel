@@ -2,6 +2,12 @@
 
 Dates use Asia/Tokyo. Target: v0.12.0 desktop personal trial.
 
+## 2026-10-19 — dependency-ordered merge: hover halos and fixed layout
+
+- The user authorized review and Squash merges in dependency order. Checked submitted reviews, inline threads and discussion comments for PRs #358/#359/#361: all were empty; this is not an external reviewer approval. Inspected the issue-specific source/test diffs and found no blocking issue. The existing Studio navigation test's one unreproduced CI failure and successful rerun remain disclosed on #361.
+- [PR #358](https://github.com/WastonGura/GuraNovel/pull/358) was Squash merged as `c9526e84ca48173231b83b5b428f079b19e7dee3`, after verifying its exact-head Actions success. Rebased only #359's three layout/log commits onto that main; its tree remained identical to the previously tested #359 tree before this log update. [PR #359](https://github.com/WastonGura/GuraNovel/pull/359) now has no unmerged halo dependency and must pass its rebased latest-head Actions before its authorized merge.
+- #361 remains pending behind #359; its own carousel commits will be rebased after #359 merges, checked against the approved application tree and verified by new-head Actions. No direct main push, version bump, tag movement or release. This entry supersedes earlier submission-only merge restrictions under the user's new authorization.
+
 ## 2026-10-19 — #355 approved fixed-page layout delivery
 
 - The user approved the final fixed layout and authorized a separate PR for #355. Delivery: [PR #359](https://github.com/WastonGura/GuraNovel/pull/359), branch `fix/355-fixed-page-layout`, builds on #356's [PR #358](https://github.com/WastonGura/GuraNovel/pull/358). Both PRs target main because the repository's pull-request Actions filter only includes main. Review the layout commit separately; after #358 is Squash merged, rebase the layout-only commits onto the new main and verify their new-head Actions before merging. This is an intentional stacked delivery, with one closing issue per PR. #357 remains outside the approved implementation scope.
