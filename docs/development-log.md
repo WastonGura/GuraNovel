@@ -2,6 +2,12 @@
 
 Dates use Asia/Tokyo. Target: v0.12.0 desktop personal trial.
 
+## 2026-10-19 — dependency-ordered merge: carousel repair
+
+- [PR #359](https://github.com/WastonGura/GuraNovel/pull/359) was Squash merged as `fc893f7dac08a928b1a0d4697b0902c8b56531ef`, after its rebased head `1f9971b4196a0c0a659adf4b20f363ab2611234f` passed [Actions 39144904382](https://github.com/WastonGura/GuraNovel/actions/runs/39144904382). #358 had already merged as `c9526e8`; the authorized sequence has reached [PR #361](https://github.com/WastonGura/GuraNovel/pull/361).
+- Rebased only #361's carousel repair/log commits onto the new main, retaining both sides of a development-log insertion conflict. Application and browser-test trees compare identical to the user-approved `010d0c6` version. Its original Actions run passed 450 component and 31 Chromium checks after one disclosed Studio navigation failure/retry; that historical success does not replace the rebased head's new gate.
+- No submitted external reviews or comments existed at the initial check; code/test inspection found no blocking concern. Verify the rebased latest head's Actions and recheck review state before the user-authorized Squash merge. Final head/run and merge outcome are recorded on the linked PR. No API/data/dependency/version change, direct main push, tag movement or release; #357 remains pending design work.
+
 ## 2026-10-19 — dependency-ordered merge: hover halos and fixed layout
 
 - The user authorized review and Squash merges in dependency order. Checked submitted reviews, inline threads and discussion comments for PRs #358/#359/#361: all were empty; this is not an external reviewer approval. Inspected the issue-specific source/test diffs and found no blocking issue. The existing Studio navigation test's one unreproduced CI failure and successful rerun remain disclosed on #361.
