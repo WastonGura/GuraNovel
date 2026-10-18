@@ -550,6 +550,34 @@ export default function Dashboard() {
     return () => { active = false }
   }, [])
 
+  useEffect(() => {
+    const rows = [recentRow.current, novelsRow.current, collectionsRow.current].filter(row => row !== null)
+    const updateCardEdges = () => {
+      // Clip only the part of a moving card that has passed the shelf edge.
+      // Fully visible cards retain their shadow bleed, including after paging back.
+      const cards = rows.flatMap(row => {
+        if (!row.clientWidth) return []
+        const edge = row.parentElement!.getBoundingClientRect().left
+        return Array.from(row.querySelectorAll<HTMLElement>('.project-card'), card => {
+          const bounds = card.getBoundingClientRect()
+          return { card, cut: Math.max(0, Math.min(bounds.width, edge - bounds.left)) }
+        })
+      })
+      cards.forEach(({ card, cut }) => {
+        card.toggleAttribute('data-carousel-clipped', cut > 0)
+        if (cut > 0) card.style.setProperty('--carousel-cut', `${cut}px`)
+        else card.style.removeProperty('--carousel-cut')
+      })
+    }
+    updateCardEdges()
+    rows.forEach(row => row.addEventListener('scroll', updateCardEdges, { passive: true }))
+    window.addEventListener('resize', updateCardEdges)
+    return () => {
+      rows.forEach(row => row.removeEventListener('scroll', updateCardEdges))
+      window.removeEventListener('resize', updateCardEdges)
+    }
+  }, [projects, collections])
+
   useEffect(() => () => {
     if (searchHideTimer.current !== null) window.clearTimeout(searchHideTimer.current)
   }, [])
