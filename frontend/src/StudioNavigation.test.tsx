@@ -56,6 +56,17 @@ it('uses author-facing Chinese stage names', async () => {
   open('/projects/p/studio/a')
   const workflow = await screen.findByRole('navigation', { name: '创作阶段' })
   for (const name of ['大纲', '正文', '审阅', '读者评审', '定稿']) expect(within(workflow).getByRole('button', { name })).toBeInTheDocument()
+  await screen.findByRole('textbox', { name: '章节正文' })
+  expect(screen.queryByText('章节内容与状态保存到服务器')).not.toBeInTheDocument()
+  expect(screen.queryByText('已自动保存')).not.toBeInTheDocument()
+})
+
+it('uses the original outline input surface for real chapters', async () => {
+  vi.mocked(listChapters).mockResolvedValue([{ ...chapter('a'), current_draft_document_id: null }])
+  open('/projects/p/studio/a')
+  expect(await screen.findByRole('heading', { name: '想怎么写？' })).toBeInTheDocument()
+  expect(screen.getByRole('textbox', { name: '大纲思路' })).toBeInTheDocument()
+  expect(screen.queryByRole('heading', { name: '本章大纲方案' })).not.toBeInTheDocument()
 })
 
 it('generates three comparable alternatives and persists an explicit author selection', async () => {
@@ -63,22 +74,71 @@ it('generates three comparable alternatives and persists an explicit author sele
   vi.mocked(readChapterIdea).mockResolvedValue({ project_id: 'p', chapter_id: 'a', text: '调查档案', revision: 1, read_only: false })
   const batch = { id: 'batch-1', project_id: 'p', chapter_id: 'a', status: 'completed', idea_revision: 1, idea_text: '调查档案', context_hash: 'hash',
     started_at: '2026-10-14T00:00:00Z', failure_code: null, provenance: { provider_kind: 'fake' },
-    candidates: ['线索追踪', '人物抉择', '反转验证'].map((title, index) => ({ id: `option-${index}`, title, summary: `${title}的摘要`, content: `${title}的完整大纲` })) } as OutlineGeneration
+    candidates: ['方案一：线索追踪', '方案 02: 人物抉择', '方案三、反转验证'].map((title, index) => ({ id: `option-${index}`, title, summary: `${title}的摘要`, content: `${title}的完整大纲` })) } as OutlineGeneration
   vi.mocked(createOutlineGeneration).mockResolvedValue(batch)
   vi.mocked(selectOutlineCandidate).mockResolvedValue({ chapter_id: 'a', document_id: 'outline-a', version_id: 'outline-a-v1' })
   vi.mocked(readStudioFeedback).mockResolvedValue({ chapter_id: 'a', region: 'outline', document_id: 'outline-a', source_version_id: 'outline-a-v1', revision: 0, comments: [], requirements: '', read_only: false })
   open('/projects/p/studio/a')
   const generate = await screen.findByRole('button', { name: '生成大纲方案' })
   await waitFor(() => expect(generate).toBeEnabled())
+  expect(screen.queryByText('思路已保存')).not.toBeInTheDocument()
   fireEvent.click(generate)
-  for (const title of ['线索追踪', '人物抉择', '反转验证']) await screen.findByRole('button', { name: `采用此方案：${title}` })
+  for (const [index, title] of ['线索追踪', '人物抉择', '反转验证'].entries()) {
+    await screen.findByRole('heading', { name: title })
+    expect(screen.getByText(`方案 ${String(index + 1).padStart(2, '0')}`)).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: `采用此方案：${title}` })).toHaveTextContent('采用此方案')
+  }
+  expect(screen.queryByRole('textbox', { name: '大纲思路' })).not.toBeInTheDocument()
+  expect(screen.queryByText('思路已保存')).not.toBeInTheDocument()
+  fireEvent.click(screen.getByRole('button', { name: '编辑思路' }))
+  expect(screen.getByRole('textbox', { name: '大纲思路' })).toBeInTheDocument()
+  expect(screen.queryByRole('navigation', { name: '大纲历史批次' })).not.toBeInTheDocument()
+  fireEvent.click(screen.getByRole('button', { name: '返回方案' }))
+  expect(screen.getByRole('navigation', { name: '大纲历史批次' })).toHaveTextContent('第 1 / 1 批')
+  expect(createOutlineGeneration).toHaveBeenCalledTimes(1)
   expect(selectOutlineCandidate).not.toHaveBeenCalled()
   fireEvent.click(screen.getByRole('button', { name: '采用此方案：人物抉择' }))
   const outline = await screen.findByRole('textbox', { name: '编辑大纲' })
   await waitFor(() => expect(outline).not.toHaveAttribute('readonly'))
+  expect(screen.queryByText('已自动保存')).not.toBeInTheDocument()
   expect(selectOutlineCandidate).toHaveBeenCalledWith('p', 'a', 'batch-1', expect.objectContaining({ candidate_id: 'option-1', expected_current_version_id: null }))
   expect(approveStudioOutline).not.toHaveBeenCalled()
   expect(startChapterProductionV2).not.toHaveBeenCalled()
+})
+
+it('opens the newest batch regardless of response order and browses history without adopting or generating', async () => {
+  vi.mocked(listChapters).mockResolvedValue([{ ...chapter('a'), current_draft_document_id: null }])
+  vi.mocked(readChapterIdea).mockResolvedValue({ project_id: 'p', chapter_id: 'a', text: '当前思路草稿', revision: 3, read_only: false })
+  const old = { id: 'old', started_at: '2026-10-14T00:00:00Z', status: 'completed', idea_text: '旧思路', candidates: [{ id: 'old-option', title: '旧方向', summary: '旧摘要', content: '旧全文' }] } as unknown as OutlineGeneration
+  const latest = { id: 'new', started_at: '2026-10-16T00:00:00Z', status: 'completed', idea_text: '最新思路', candidates: [{ id: 'option', title: '最新方向', summary: '最新摘要', content: '最新全文' }] } as unknown as OutlineGeneration
+  const failed = { id: 'failed', started_at: '2026-10-17T00:00:00Z', status: 'failed', candidates: [] } as unknown as OutlineGeneration
+  vi.mocked(listOutlineGenerations).mockResolvedValue([old, failed, latest])
+  open('/projects/p/studio/a')
+  await screen.findByRole('button', { name: '采用此方案：最新方向' })
+  expect(screen.getByRole('navigation', { name: '大纲历史批次' })).toHaveTextContent('第 2 / 2 批')
+  fireEvent.click(screen.getByRole('button', { name: '查看上一批大纲' }))
+  expect(screen.getByRole('button', { name: '采用此方案：旧方向' })).toBeInTheDocument()
+  expect(screen.getByRole('button', { name: '查看上一批大纲' })).toBeDisabled()
+  fireEvent.click(screen.getByRole('button', { name: '查看下一批大纲' }))
+  expect(screen.getByRole('button', { name: '采用此方案：最新方向' })).toBeInTheDocument()
+  expect(selectOutlineCandidate).not.toHaveBeenCalled()
+  expect(createOutlineGeneration).not.toHaveBeenCalled()
+  expect(writeChapterIdea).not.toHaveBeenCalled()
+  fireEvent.click(screen.getByRole('button', { name: '编辑思路' }))
+  expect(screen.getByRole('textbox', { name: '大纲思路' })).toHaveValue('当前思路草稿')
+  expect(screen.queryByRole('navigation', { name: '大纲历史批次' })).not.toBeInTheDocument()
+})
+
+it('keeps a failed attempt recoverable without presenting the idea as a result batch', async () => {
+  vi.mocked(listChapters).mockResolvedValue([{ ...chapter('a'), current_draft_document_id: null }])
+  vi.mocked(readChapterIdea).mockResolvedValue({ project_id: 'p', chapter_id: 'a', text: '保留的思路', revision: 1, read_only: false })
+  vi.mocked(listOutlineGenerations).mockResolvedValue([{ id: 'failed', started_at: '2026-10-17T00:00:00Z', status: 'failed', candidates: [] }] as unknown as OutlineGeneration[])
+  open('/projects/p/studio/a')
+  await waitFor(() => expect(screen.getByRole('textbox', { name: '大纲思路' })).toHaveValue('保留的思路'))
+  expect(screen.queryByRole('navigation', { name: '大纲历史批次' })).not.toBeInTheDocument()
+  expect(screen.getByRole('alert')).toHaveTextContent('生成失败')
+  expect(screen.getByRole('button', { name: '生成大纲方案' })).toBeEnabled()
+  expect(createOutlineGeneration).not.toHaveBeenCalled()
 })
 
 it('loads saved chapter ideas and flushes edits before navigating to settings', async () => {
@@ -124,7 +184,8 @@ it('retries a lost idea-save response using the original request identity', asyn
   const retry = await screen.findByRole('button', { name: '重试保存思路' })
   expect(idea).toHaveValue('重试必须保留原请求')
   fireEvent.click(retry)
-  await screen.findByText('思路已保存')
+  await waitFor(() => expect(screen.queryByRole('button', { name: '重试保存思路' })).not.toBeInTheDocument())
+  expect(screen.queryByText('思路已保存')).not.toBeInTheDocument()
   expect(vi.mocked(writeChapterIdea).mock.calls[1][2]).toEqual(vi.mocked(writeChapterIdea).mock.calls[0][2])
   expect(sessionStorage.getItem('guranovel:chapter-idea:p:a')).toBeNull()
 })

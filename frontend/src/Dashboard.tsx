@@ -120,15 +120,13 @@ function ProjectForm({
     <CreationDialog titleId="create-project-title" closeLabel="关闭创建作品" busy={pending} onClose={() => { if (!submitting.current) onClose() }}>
       <form className="creation-form" onSubmit={submit} aria-label="创建作品">
         <header className="creation-header">
-          <span className="creation-kicker">让故事开始</span>
           <h2 id="create-project-title">创建作品</h2>
-          <p>给新故事取个名字，其余的可以慢慢补充。</p>
         </header>
         <fieldset className="creation-fields" disabled={pending}>
           <label>标题<input value={title} onChange={event => setTitle(event.target.value)} required placeholder="你的故事叫什么？" aria-describedby={error ? 'create-project-error' : undefined} /></label>
           <label>设定集<select value={selectedCollectionId} onChange={event => setSelectedCollectionId(event.target.value)} aria-label="设定集">
             <option value="new">同时创建空白设定集 (默认)</option>
-            {collections.map(col => <option key={col.id} value={col.id}>{col.title} (r{col.revision})</option>)}
+            {collections.map(col => <option key={col.id} value={col.id}>{col.title}</option>)}
           </select><span className="creation-field-hint">为这部作品新建，或沿用已有世界。</span></label>
           <label>简介（可选）<textarea value={introduction} onChange={event => setIntroduction(event.target.value)} rows={3} placeholder="一句话，记下这个故事的起点…" /></label>
           <details className="creation-disclosure">
@@ -207,14 +205,11 @@ function SettingCollectionForm({
     <CreationDialog titleId="create-collection-title" closeLabel="关闭新建设定集" busy={pending} onClose={() => { if (!submitting.current) onClose() }}>
       <form className="creation-form" onSubmit={submit} aria-label="新建设定集">
         <header className="creation-header">
-          <span className="creation-kicker">收好一个世界</span>
           <h2 id="create-collection-title">新建设定集</h2>
-          <p>人物、地点与世界规则，放在一起慢慢生长。</p>
         </header>
         <fieldset className="creation-fields" disabled={pending}>
           <label>标题<input value={title} onChange={event => setTitle(event.target.value)} required placeholder="给这个世界取个名字" /></label>
           <label>说明（可选）<textarea value={description} onChange={event => setDescription(event.target.value)} rows={4} placeholder="这个世界是什么样的？" /></label>
-          <p className="creation-field-hint">设定集可关联多部作品，创建后可继续添加和编辑设定。</p>
           <details className="creation-disclosure">
             <summary>高级选项：设定集标识</summary>
             <p id="collection-slug-help" className="creation-field-hint">留空自动生成；仅在需要固定标识时填写。</p>
@@ -374,7 +369,6 @@ function NovelDetails({
                 >
                   <img src={icon('setting')} alt="" />
                   <span className="collection-link-title">{boundCollection.title}</span>
-                  <span className="collection-link-badge">r{boundCollection.revision}</span>
                 </button>
               ) : (
                 <span className="novel-no-setting">未关联设定集</span>
@@ -431,7 +425,7 @@ function NovelDetails({
                     <option value="">(无关联设定集)</option>
                     {collections.map((col) => (
                       <option key={col.id} value={col.id}>
-                        {col.title} (r{col.revision})
+                        {col.title}
                       </option>
                     ))}
                   </select>
@@ -697,7 +691,6 @@ export default function Dashboard() {
                   >
                     <span className="collection-art">
                       <img src={collectionArtwork(col)} alt="" />
-                      <span className="collection-badge">r{col.revision}</span>
                     </span>
                     <span className="collection-info">
                       <strong>{col.title}</strong>

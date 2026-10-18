@@ -99,6 +99,8 @@ describe('Dashboard Setting Collections and Novel Integration', () => {
     renderDashboard()
     fireEvent.click(await screen.findByRole('button', { name: '创建第一部作品' }))
     expect(screen.getByRole('dialog', { name: '创建作品' })).toBeInTheDocument()
+    expect(screen.queryByText('让故事开始')).not.toBeInTheDocument()
+    expect(screen.queryByText('给新故事取个名字，其余的可以慢慢补充。')).not.toBeInTheDocument()
   })
 
   it('restores the collection trigger focus after native modal cancellation', async () => {
@@ -109,6 +111,8 @@ describe('Dashboard Setting Collections and Novel Integration', () => {
     trigger.focus(); fireEvent.click(trigger)
     const dialog = screen.getByRole('dialog', { name: '新建设定集' })
     expect(within(dialog).getByLabelText('标题')).toHaveFocus()
+    expect(within(dialog).queryByText('收好一个世界')).not.toBeInTheDocument()
+    expect(within(dialog).queryByText('人物、地点与世界规则，放在一起慢慢生长。')).not.toBeInTheDocument()
     fireEvent(dialog, new Event('cancel', { cancelable: true }))
     expect(screen.queryByRole('dialog', { name: '新建设定集' })).not.toBeInTheDocument()
     expect(trigger).toHaveFocus()
@@ -228,7 +232,7 @@ describe('Dashboard Setting Collections and Novel Integration', () => {
     expect(await screen.findByRole('heading', { name: '设定集' })).toBeInTheDocument()
     const card = await screen.findByRole('button', { name: 'Open Great Lore setting collection' })
     expect(card).toBeInTheDocument()
-    expect(within(card).getByText('r2')).toBeInTheDocument()
+    expect(within(card).queryByText('r2')).not.toBeInTheDocument()
     expect(within(card).getByText('关联小说 (1)')).toBeInTheDocument()
 
     // Clicking the card navigates to the setting collection workspace
@@ -405,7 +409,7 @@ describe('Dashboard Setting Collections and Novel Integration', () => {
     // Verify setting collection link badge
     const colLink = within(dialog).getByRole('button', { name: 'Open setting collection Ash World Lore' })
     expect(colLink).toBeInTheDocument()
-    expect(within(colLink).getByText('r3')).toBeInTheDocument()
+    expect(within(colLink).queryByText('r3')).not.toBeInTheDocument()
 
     // Click setting collection link navigates to setting collection workspace
     fireEvent.click(colLink)

@@ -25,8 +25,8 @@ function marquee(list: HTMLElement, first: number, last = first) {
 describe('setting notes and graph', () => {
   it('does not present an unwired setting conversation as a real Agent', () => {
     render(<StudioSetting preview={false} backendNotes={seed} readOnly={false} onSaveNoteContent={vi.fn()} initialView={{ mode: 'chat' }} />)
-    expect(screen.getByText('设定讨论尚未接入 · 历史消息只读，不会调用模型')).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: '设定讨论（尚未接入）' })).toBeDisabled()
+    expect(screen.getByPlaceholderText('设定对话暂不可用')).toBeDisabled()
+    expect(screen.getByRole('button', { name: '设定对话暂不可用' })).toBeDisabled()
   })
   it('retains an orphaned comment when its quoted setting text is deleted', async () => {
     const comment = { id: 'c', start: 0, end: 1, quote: '住', text: '保留此意见', color: '#8d9bff' }
@@ -363,7 +363,8 @@ describe('setting notes and graph', () => {
     const saved = readSettingNotes()
     expect(saved[0].body).toBe('住在 [[海风城]]，路过 [[旧街]]。再次 [[海风城]]。')
     expect(saved[1].body).toContain('新的内容')
-    expect(screen.getByText('已保存到本机 · 交互预览')).toBeInTheDocument()
+    expect(screen.getByText('交互预览')).toBeInTheDocument()
+    expect(screen.queryByText('已保存到本机 · 交互预览')).not.toBeInTheDocument()
     view.unmount()
     render(<StudioSetting preview hidden={false} onTyping={() => {}} />)
     fireEvent.click(screen.getAllByRole('button', { name: '海风城' })[0])
@@ -453,7 +454,8 @@ describe('setting notes and graph', () => {
     expect(() => readSettingWorkspace()).toThrow('Invalid setting conversation')
     expect(localStorage.getItem(settingStorageKey)).toBe(invalidConversation)
     render(<StudioSetting preview={false} hidden={false} onTyping={() => {}} />)
-    expect(screen.getByText('设定接口尚未接入')).toBeInTheDocument()
+    expect(screen.queryByText('设定接口尚未接入')).not.toBeInTheDocument()
+    expect(screen.getByText('暂无可查看的设定。')).toBeInTheDocument()
     expect(screen.queryByRole('heading', { name: '甲' })).toBeNull()
   })
 
@@ -577,8 +579,8 @@ describe('setting notes and graph', () => {
 
     // Verify metadata displayed
     expect(screen.getByText('第2章剧情需要法宝线索')).toBeInTheDocument()
-    expect(screen.getByText(/天穹之剑 · lore_agent/)).toBeInTheDocument()
-    expect(screen.getByText('ver-base')).toBeInTheDocument()
+    expect(screen.getByText('天穹之剑')).toBeInTheDocument()
+    expect(screen.queryByText(/lore_agent|chap-101|ver-base/)).not.toBeInTheDocument()
     expect(screen.getByText('共享设定变更将影响关联小说后续任务：天穹之剑、星穹旅人')).toBeInTheDocument()
   })
 

@@ -1,4 +1,4 @@
-import { useLayoutEffect, useRef, type ReactNode, type RefObject } from 'react'
+import { Component, createRef, useLayoutEffect, useRef, type ReactNode, type RefObject } from 'react'
 import { animateTextChange, snapshotText, type TextSnapshot } from './studioTextParticles'
 
 const reducedMotion = () => window.matchMedia?.('(prefers-reduced-motion: reduce)').matches
@@ -103,6 +103,34 @@ function useTextMotion(frame: RefObject<HTMLElement | null>, key?: string) {
   })
   useLayoutEffect(() => () => stop.current(), [])
 }
+
+type TextMotionSurfaceProps = { children: ReactNode; className: string; motionKey?: string; revealAfter?: number }
+
+export class TextMotionSurface extends Component<TextMotionSurfaceProps, Record<string, never>, TextSnapshot | null> {
+  private frame = createRef<HTMLDivElement>()
+  private stop = () => {}
+
+  // Capture the outgoing DOM before React removes it or changes its layout.
+  // Render-time caches miss CSS transitions, scrolling, resizing and font loads.
+  getSnapshotBeforeUpdate(previous: TextMotionSurfaceProps) {
+    if (previous.motionKey === undefined || previous.motionKey === this.props.motionKey || this.props.motionKey === undefined || reducedMotion()) return null
+    return snapshotText(this.frame.current!)
+  }
+
+  componentDidUpdate(previous: TextMotionSurfaceProps, _state: Readonly<Record<string, never>>, snapshot: TextSnapshot | null) {
+    if (previous.motionKey === this.props.motionKey) return
+    this.stop()
+    if (snapshot && !reducedMotion()) this.stop = animateTextChange(this.frame.current!, snapshot, 0, this.props.revealAfter)
+  }
+
+  componentWillUnmount() { this.stop() }
+
+  render() {
+    const { children, className, motionKey } = this.props
+    return <div ref={this.frame} data-sweep-group={motionKey === undefined ? undefined : ''} className={className}>{children}</div>
+  }
+}
+
 export function TextSweep({ text, changeKey = text }: { text: string; changeKey?: string }) {
   const frame = useRef<HTMLSpanElement>(null)
   useTextMotion(frame, changeKey)

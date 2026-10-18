@@ -48,7 +48,7 @@ describe('Studio Assistant', () => {
 
     expect(screen.getByRole('dialog', { name: '与 Gura 对话' })).toBeInTheDocument()
     expect(screen.getByText('交互预览')).toBeInTheDocument()
-    expect(screen.getByText('仅本次预览 · Agent 尚未接入')).toBeInTheDocument()
+    expect(screen.getByText('预览消息不会发送')).toBeInTheDocument()
 
     const input = screen.getByRole('textbox', { name: '给 Gura 的消息' })
     const sendButton = screen.getByRole('button', { name: '发送给 Gura（仅预览）' })
@@ -143,8 +143,8 @@ describe('Studio Assistant', () => {
       fireEvent.click(launcher)
     })
 
-    expect(screen.getByText('只读助手')).toBeInTheDocument()
-    expect(screen.getByText('受限只读业务助手 · 无修改定稿权限')).toBeInTheDocument()
+    expect(screen.queryByText('只读助手')).not.toBeInTheDocument()
+    expect(screen.queryByText('受限只读业务助手 · 无修改定稿权限')).not.toBeInTheDocument()
 
     // History loaded
     expect(screen.getByText('之前的消息')).toBeInTheDocument()
@@ -451,7 +451,7 @@ describe('Studio Assistant', () => {
         method: 'POST',
       })
     )
-    expect(screen.getByText('只读助手')).toBeInTheDocument()
+    expect(screen.queryByText('只读助手')).not.toBeInTheDocument()
   })
 
   it('renders and toggles correctly on dashboard without studio wrapper', async () => {
@@ -467,7 +467,7 @@ describe('Studio Assistant', () => {
 
     const launcher = screen.getByRole('button', { name: 'Gura' })
     expect(launcher).toBeInTheDocument()
-    expect(launcher.querySelector('svg')).toBeInTheDocument()
+    expect(launcher).toHaveAttribute('aria-expanded', 'false')
 
     // Open assistant on Dashboard
     await act(async () => {

@@ -1,11 +1,25 @@
 import { act, cleanup, render, screen } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { MotionFrame, TextSweep, StreamText } from './StudioMotion'
-import { animateTextChange, DISSOLVE_MS, textMotionPhase, type TextSnapshot } from './studioTextParticles'
+import { animateTextChange, DISSOLVE_MS, snapshotText, textMotionPhase, type TextSnapshot } from './studioTextParticles'
 
 afterEach(() => { cleanup(); vi.useRealTimers(); vi.restoreAllMocks(); vi.unstubAllGlobals() })
 
 describe('continuous studio motion', () => {
+  it('dissolves only glyphs visible inside a scrolled text panel', () => {
+    const box = document.createElement('div')
+    box.innerHTML = '<div style="overflow-y:auto"><span data-sweep-text>可见藏</span></div>'
+    document.body.append(box)
+    const rect = (top: number, bottom: number) => ({ left: 0, right: 100, top, bottom, width: 100, height: bottom - top }) as DOMRect
+    vi.spyOn(box, 'getBoundingClientRect').mockReturnValue(rect(0, 120))
+    vi.spyOn(box.firstElementChild!, 'getBoundingClientRect').mockReturnValue(rect(10, 50))
+    const range = document.createRange()
+    range.getBoundingClientRect = () => rect([20, 46, 70][range.startOffset], [30, 56, 80][range.startOffset])
+    vi.spyOn(document, 'createRange').mockReturnValue(range)
+    expect(snapshotText(box).glyphs.map(glyph => glyph.text)).toEqual(['可'])
+    box.remove()
+  })
+
   it('keeps chrome mounted, interpolates real height and reveals new controls only after resizing', async () => {
     const calls: { element: HTMLElement; frames: Keyframe[]; options: KeyframeAnimationOptions }[] = []
     let finish!: () => void
@@ -105,6 +119,18 @@ describe('continuous studio motion', () => {
     tick(0); tick(DISSOLVE_MS + 50); interrupt()
     expect(box.dataset.textPhase).toBeUndefined()
     expect(box.querySelector('canvas')).toBeNull()
+    expect(text.style.mask).toBe('')
+    const delayed = animateTextChange(box, snapshot, 0, DISSOLVE_MS + 200)
+    tick(0); tick(DISSOLVE_MS)
+    expect(box.dataset.textPhase).toBe('waiting')
+    expect(box.querySelector('canvas')).toBeNull()
+    expect(text.style.mask).toBe('')
+    tick(DISSOLVE_MS + 200)
+    expect(box.dataset.textPhase).toBe('reveal')
+    tick(DISSOLVE_MS + 250)
+    expect(text.style.mask).toContain('linear-gradient')
+    delayed()
+    expect(box.dataset.textPhase).toBeUndefined()
     expect(text.style.mask).toBe('')
     box.remove()
   })
