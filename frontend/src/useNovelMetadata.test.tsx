@@ -25,7 +25,7 @@ it('coalesces rapid edits and preserves unrelated metadata', async () => {
 })
 
 it('clears an existing introduction through the server metadata merge contract', async () => {
-  const original = { ...project, metadata: { ...project.metadata, introduction: 'Old introduction' } }
+  const original: Project = { ...project, metadata: { ...project.metadata, introduction: 'Old introduction' } }
   let server = original
   write.mockImplementation(async (_id, payload) => {
     server = { ...server, ...payload, metadata: { ...server.metadata, ...payload.metadata } } as typeof original
