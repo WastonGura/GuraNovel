@@ -18,7 +18,7 @@ test('bookshelf controls have no pointer-following halo and retain keyboard focu
   await page.keyboard.press('Enter')
   const dialog = page.getByRole('dialog', { name: '创建作品' })
   await expect(dialog).toBeVisible()
-  const cancel = dialog.getByRole('button', { name: '取消', exact: true })
+  const cancel = dialog.getByRole('button', { name: '关闭创建作品', exact: true })
   await cancel.hover()
   expect(await cancel.evaluate(element => getComputedStyle(element, '::after').backgroundImage)).toBe('none')
   await cancel.click()

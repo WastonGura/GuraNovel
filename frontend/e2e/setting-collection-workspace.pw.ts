@@ -82,6 +82,31 @@ function json(route: Route, body: unknown, status = 200) {
 }
 
 test.describe('Setting Collection Standalone Workspace Chromium E2E', () => {
+  test('content search uses the shared preview window, opens by keyboard and leaves documents unchanged', async ({ page }) => {
+    let writes = 0
+    await page.route(`**/api/v1/setting-collections/${collectionId}`, route => json(route, mockCollection))
+    await page.route(`**/api/v1/setting-collections/${collectionId}/projects`, route => json(route, mockProjects))
+    await page.route(`**/api/v1/setting-collections/${collectionId}/documents`, route => json(route, mockDocs))
+    await page.route(`**/api/v1/documents/${docId}/content`, route => {
+      if (route.request().method() !== 'GET') writes++
+      return json(route, { document_id: docId, version_id: versionId, content: '港口的灯塔照亮旧街。' })
+    })
+    await page.goto(`/setting-collections/${collectionId}?mode=search`)
+    const search = page.getByRole('dialog', { name: '搜索内容', exact: true })
+    await expect(search).toHaveClass(/search-dialog/)
+    const input = search.getByLabel('搜索设定内容')
+    await expect(input).toBeFocused()
+    await input.fill('灯塔')
+    await expect(search.getByRole('button', { name: '海滨城', exact: true })).toBeVisible()
+    await expect(search.getByRole('region', { name: '预览' })).toContainText('港口的灯塔照亮旧街。')
+    await input.press('ArrowDown')
+    await page.keyboard.press('Enter')
+    await expect(search).not.toBeAttached()
+    await expect(page.locator('.setting-document h1')).toHaveText('海滨城')
+    expect(writes).toBe(0)
+    await expect(page).not.toHaveURL(/mode=search/)
+  })
+
   test('P1 Layout: verifies body width > 300px, no text squishing, and zero whole-page scroll', async ({ page }) => {
     await page.setViewportSize({ width: 1440, height: 900 })
 

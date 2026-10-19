@@ -1,0 +1,11 @@
+.studio-detail-labels { align-items: center; display: flex; flex-wrap: wrap; gap: 8px; margin-left: 40px; }
+.studio-detail-labels .studio-label { color: #444; font-weight: 400; background: #f0f0f0; border: 0; border-radius: 18px; font-size: 13px; height: 28px; min-height: 28px; min-width: 46px; padding: 0 10px; position: relative; }
+.studio-detail-labels .studio-label:hover:not(:disabled) { background: #e8e8e8; color: #171717; }
+.studio-label-name { display: block; transition: opacity 160ms; }
+.studio-label-remove { align-items: center; color: #444444; display: flex; font-size: 18px; inset: 0; justify-content: center; opacity: 0; position: absolute; transition: opacity 160ms; }
+.studio-label:is(:hover, :focus-visible) .studio-label-name { opacity: 0; }
+.studio-label:is(:hover, :focus-visible) .studio-label-remove { opacity: 1; }
+.studio-label-add { align-items: center; display: inline-flex; justify-content: center; }
+.studio-label-add img { clip-path: inset(25%); height: 20px; opacity: .5; width: 20px; }
+.studio-announcer { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+.studio-detail-labels .studio-label:focus-visible { outline: 1px solid #777; outline-offset: 3px; }

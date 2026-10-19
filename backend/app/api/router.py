@@ -5,6 +5,7 @@ from app.api.routes_chapters import router as chapters_router
 from app.api.routes_chapter_production import router as chapter_production_router
 from app.api.routes_chapter_production_v2 import router as chapter_production_v2_router
 from app.api.routes_documents import router as documents_router
+from app.api.routes_covers import router as covers_router
 from app.api.routes_health import router as health_router
 from app.api.routes_projects import router as projects_router
 from app.api.routes_project_creation import router as project_creation_router
@@ -17,6 +18,7 @@ from app.api.routes_outline_options import router as outline_options_router
 
 api_router = APIRouter(prefix="/api/v1")
 api_router.include_router(outline_options_router, tags=["outline-options"])
+api_router.include_router(covers_router, tags=["covers"])
 api_router.include_router(health_router, tags=["health"])
 api_router.include_router(setting_collections_router, tags=["setting-collections"])
 api_router.include_router(documents_router, tags=["documents"])

@@ -6,6 +6,7 @@ import OutlineEditor from './OutlineEditor'
 import { useCommentDrag } from './useCommentDrag'
 import { reanchorComments, reanchorFeedbackComments, restoreOutlineComments, type OutlineComment } from './studioPreview'
 import SettingGraph from './SettingGraph'
+import SearchDialog from './SearchDialog'
 import SettingConversation from './SettingConversation'
 import SettingNoteList from './SettingNoteList'
 import { applySettingChanges, categoryNames, emptySettingConversation, noteLinks, readSettingWorkspace, resolveNote, settingExampleReply, settingStorageKey, stagedSettingComments, type SettingCategory, type SettingChange, type SettingConversation as Conversation, type SettingNote } from './settingNotes'
@@ -134,6 +135,8 @@ export default function StudioSetting({
     initialModeParam || location.state?.settingView?.mode || initialView?.mode || 'note'
   )
   const [editing, setEditing] = useState(false)
+  const [searchReturnMode, setSearchReturnMode] = useState<SettingView['mode']>(mode === 'search' ? 'note' : mode)
+  const displayMode = mode === 'search' ? searchReturnMode : mode
   const [draftTitle, setDraftTitle] = useState('')
   const [query, setQuery] = useState('')
   const [pinned, setPinned] = useState(defaultPinned ?? false)
@@ -143,7 +146,6 @@ export default function StudioSetting({
   const [deleted, setDeleted] = useState<{ items: { note: SettingNote; index: number }[]; staged: NonNullable<Conversation['stagedComments']> } | null>(null)
   const mutationPending = useRef(false)
   const [mutationBusy, setMutationBusy] = useState(false)
-  const search = useRef<HTMLInputElement>(null)
   const noteInput = useRef<HTMLTextAreaElement>(null)
 
   const [prevBackendNotes, setPrevBackendNotes] = useState(backendNotes)
@@ -476,10 +478,10 @@ export default function StudioSetting({
   function showMode(next: 'graph' | 'search' | 'chat') {
     if (editing && !titleCommit()) return
     if (!editing && !readOnly && !persist(currentNotes.current)) return
+    if (next === 'search' && mode !== 'search') setSearchReturnMode(mode)
     rememberView({ id: selectedId, category, mode: next })
     setMode(next); setEditing(false)
     if (next === 'chat') setChatVisited(true)
-    if (next === 'search') requestAnimationFrame(() => search.current?.focus())
   }
   function patchConversation(patch: Partial<Conversation>) {
     persist(currentNotes.current, { ...currentConversation.current, ...patch })
@@ -704,26 +706,27 @@ export default function StudioSetting({
         <button className={mode === 'graph' ? 'is-active' : ''} aria-pressed={mode === 'graph'} onClick={() => showMode('graph')}><img src="/ui/setting/commit.svg" alt="" />关系图谱</button>
         <button className={mode === 'search' ? 'is-active' : ''} aria-pressed={mode === 'search'} onClick={() => showMode('search')}><img src="/ui/setting/search.svg" alt="" />搜索内容</button>
       </div>
-      <SettingNoteList notes={shown} category={category} activeId={mode === 'note' ? active?.id : undefined} disabled={readOnly || !activePage} onOpen={choose} onOrder={orderNotes} onDelete={deleteNotes} />
+      <SettingNoteList notes={shown} category={category} activeId={displayMode === 'note' ? active?.id : undefined} disabled={readOnly || !activePage} onOpen={choose} onOrder={orderNotes} onDelete={deleteNotes} />
       {mutationBusy && <p role="status">正在同步删除或恢复…</p>}
       {deleted && <div className="setting-delete-undo" role="status"><small>已删除 {deleted.items.length} 项，正文引用保留</small><button type="button" disabled={mutationBusy} onClick={undoDelete}>撤销删除</button></div>}
       {sidebarStatus && <small className="setting-local-note" role={saveStatusText ? 'status' : undefined}>{sidebarStatus}</small>}
     </aside>
     </div>
-    <div className={`setting-main${mode === 'chat' ? ' is-conversation' : chatVisited ? ' has-conversation-return' : ''}`}>
-      {chatVisited && mode !== 'chat' && <button className="setting-return-chat" onClick={() => showMode('chat')}>返回设定对话</button>}
-      <SettingConversation conversation={conversation} notes={notes} visible={mode === 'chat' && activePage} disabled={readOnly} referencingProjects={referencingProjects} preview={preview} onPatch={patchConversation} onSend={sendMessage} onCommentChange={(noteId, commentId, text) => {
+    {mode === 'search' && activePage && !hidden && <SearchDialog title="搜索内容" query={query} onQuery={setQuery}
+      inputType="text" inputLabel="搜索设定内容" placeholder="搜索设定与世界观中的标题、正文…"
+      items={results.map(note => {
+        const body = note.body.replace(/\[\[|\]\]/g, ''), start = Math.max(0, body.toLocaleLowerCase().indexOf(query.trim().toLocaleLowerCase()) - 30)
+        return { ...note, description: `${start > 0 ? '…' : ''}${body.slice(start, start + 140)}${body.length > start + 140 ? '…' : ''}`, kind: categoryNames[note.category], icon: '/ui/setting/append.svg' }
+      })}
+      onClose={() => { rememberView({ id: selectedId, category, mode: searchReturnMode }); setMode(searchReturnMode) }} onSelect={choose}
+      emptyText="没有找到相关条目"
+      renderPreview={note => note ? <><img className="search-preview-icon" src="/ui/setting/append.svg" alt="" /><h3>{note.title}</h3><span className="search-preview-kind">{categoryNames[note.category]}</span><p>{note.body.replace(/\[\[|\]\]/g, '') || '暂无正文'}</p></> : <><h3>寻找世界的细节</h3><p>搜索设定与世界观中的标题和正文。</p></>} />}
+    <div className={`setting-main${displayMode === 'chat' ? ' is-conversation' : chatVisited ? ' has-conversation-return' : ''}`}>
+      {chatVisited && displayMode !== 'chat' && <button className="setting-return-chat" onClick={() => showMode('chat')}>返回设定对话</button>}
+      <SettingConversation conversation={conversation} notes={notes} visible={displayMode === 'chat' && activePage} disabled={readOnly} referencingProjects={referencingProjects} preview={preview} onPatch={patchConversation} onSend={sendMessage} onCommentChange={(noteId, commentId, text) => {
         if (!readOnly) persist(currentNotes.current.map(note => note.id === noteId ? { ...note, comments: note.comments?.map(comment => comment.id === commentId ? { ...comment, text } : comment) } : note))
       }} onExample={() => patchConversation({ messages: [...currentConversation.current.messages, settingExampleReply(currentNotes.current, currentConversation.current)] })} onAccept={acceptProposals} onChange={changeProposal} onOpen={choose} onScroll={scrollTop => { currentConversation.current = { ...currentConversation.current, scrollTop } }} />
-      {mode === 'chat' ? null : mode === 'graph' ? <SettingGraph notes={notes} onOpen={openTitle} /> : mode === 'search' ? <section className="setting-search-page" aria-label="搜索设定">
-        <h1>搜索内容</h1>
-        <input ref={search} aria-label="搜索设定内容" placeholder="搜索设定和世界观中的标题、正文…" value={query} onChange={event => setQuery(event.target.value)} onKeyDown={event => { if (event.key === 'Escape') setQuery('') }} />
-        <p className="setting-search-count" role="status">{results.length ? `${results.length} 个相关条目` : '没有找到相关条目'}</p>
-        <div className="setting-search-results" aria-label="搜索结果">{results.map(note => {
-          const body = note.body.replace(/\[\[|\]\]/g, ''), start = Math.max(0, body.toLocaleLowerCase().indexOf(query.trim().toLocaleLowerCase()) - 30)
-          return <button key={note.id} onClick={() => choose(note)}><span>{note.title}<small>{categoryNames[note.category]}</small></span><p>{start > 0 ? '…' : ''}{body.slice(start, start + 140)}{body.length > start + 140 ? '…' : ''}</p></button>
-        })}</div>
-      </section> : active ? <>
+      {displayMode === 'chat' ? null : displayMode === 'graph' ? <SettingGraph notes={notes} onOpen={openTitle} /> : active ? <>
         <div className="setting-editor-tools"><button disabled={readOnly} onClick={discussNote}>交给 Agent 讨论</button><button disabled={readOnly} onClick={() => { if (editing && !titleCommit()) return; if (!editing) setDraftTitle(active.title); setEditing(!editing) }}>{editing ? '阅读' : '编辑'}</button></div>
         <div className="setting-document-scroll">
           <MotionFrame className="setting-document" textKey={active.id}>

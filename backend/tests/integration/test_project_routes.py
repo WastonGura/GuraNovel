@@ -251,3 +251,57 @@ async def test_unknown_commit_outcome_preserves_workspace_and_is_named(
         await service.create_project(slug="unknown-commit", title="Unknown commit")
 
     assert workspace.root_for("unknown-commit").is_dir()
+
+
+@pytest.mark.integration
+@pytest.mark.anyio
+async def test_uploaded_cover_reference_roundtrips_project_metadata(project_client):
+    import io
+    from PIL import Image
+
+    client, _ = project_client
+    stream = io.BytesIO()
+    Image.new("RGB", (6, 8), "white").save(stream, format="PNG")
+    uploaded = await client.post("/api/v1/covers", content=stream.getvalue())
+    assert uploaded.status_code == 201
+    cover = uploaded.json()["cover"]
+    created = await client.post("/api/v1/projects", json={"slug": "uploaded-cover", "title": "Cover"})
+    project_id = created.json()["id"]
+    updated = await client.patch(f"/api/v1/projects/{project_id}", json={"metadata": {"cover": cover}})
+    assert updated.status_code == 200
+    fetched = await client.get(f"/api/v1/projects/{project_id}")
+    assert fetched.json()["metadata"]["cover"] == cover
+    listed = await client.get("/api/v1/projects")
+    assert listed.json()[0]["metadata"]["cover"] == cover
+    asset = await client.get("/api/v1/covers/" + cover.split(":")[1])
+    assert asset.status_code == 200
+    assert asset.headers["content-type"] == "image/webp"
+
+
+@pytest.mark.integration
+@pytest.mark.anyio
+async def test_metadata_patch_omits_binding_and_preserves_legacy_genre(project_client):
+    client, _ = project_client
+    created = await client.post(
+        "/api/v1/projects", json={"slug": "metadata-recovery", "title": "Original", "genre": "Fantasy"}
+    )
+    assert created.status_code == 201
+    original = created.json()
+    assert original["setting_collection_id"]
+    path = f"/api/v1/projects/{original['id']}"
+    rejected = await client.patch(path, json={"setting_collection_id": None, "title": "Rejected"})
+    assert rejected.status_code == 409
+    accepted = await client.patch(path, json={"title": "Recovered", "metadata": {"labels": ["Fantasy"]}})
+    assert accepted.status_code == 200
+    fetched = (await client.get(path)).json()
+    assert fetched["title"] == "Recovered"
+    assert fetched["genre"] == "Fantasy"
+    assert fetched["setting_collection_id"] == original["setting_collection_id"]
+    assert fetched["metadata"]["labels"] == ["Fantasy"]
+    await client.patch(path, json={"metadata": {"introduction": "Old intro", "word_count": 42}})
+    cleared = await client.patch(path, json={"metadata": {"introduction": ""}})
+    assert cleared.status_code == 200
+    reloaded = (await client.get(path)).json()
+    assert reloaded["metadata"]["introduction"] == ""
+    assert reloaded["metadata"]["word_count"] == 42
+    assert reloaded["metadata"]["labels"] == ["Fantasy"]

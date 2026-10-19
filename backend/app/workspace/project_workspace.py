@@ -42,6 +42,14 @@ class ProjectWorkspace:
             os.close(base_descriptor)
         return root
 
+    def open_assets_directory(self) -> int:
+        """Open the service-private shared asset folder; the caller closes its descriptor."""
+        base = self._open_or_create_base_directory()
+        try:
+            return self._open_or_create_managed_directory(base, ".assets")
+        finally:
+            os.close(base)
+
     def remove_new_empty(self, slug: str) -> bool:
         """Remove an empty standard workspace created during a failed transaction.
 
