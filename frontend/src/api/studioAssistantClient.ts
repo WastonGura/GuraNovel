@@ -1,6 +1,7 @@
 /**
  * Client for Gura Studio Assistant conversation API.
  */
+import { ApiError } from './client'
 
 export interface AssistantToolCall {
   id: string
@@ -25,7 +26,8 @@ export interface AssistantMessage {
 
 export interface AssistantConversation {
   id: string
-  project_id: string
+  project_id: string | null
+  setting_collection_id?: string | null
   chapter_id?: string | null
   title?: string | null
   messages: AssistantMessage[]
@@ -87,4 +89,24 @@ export async function sendAssistantMessage(
     throw new Error(`Failed to send message to assistant: ${response.statusText}`)
   }
   return response.json()
+}
+
+async function collectionRequest(collectionId: string, path = '', payload: object = {}): Promise<AssistantConversation> {
+  const response = await fetch(`/api/v1/setting-collections/${encodeURIComponent(collectionId)}/assistant/conversations${path}`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload),
+  })
+  if (!response.ok) throw new ApiError(response.status, 'assistant_request_failed', response.status === 409 ? '条目版本已变化，请核对当前内容后重试。'
+    : response.status === 503 ? '模型暂不可用，请检查模型配置或稍后重试；消息已保留。'
+      : '无法连接设定集助手，请稍后重试；消息已保留。')
+  return response.json()
+}
+
+export function getOrCreateSettingAssistantConversation(collectionId: string) {
+  return collectionRequest(collectionId)
+}
+
+export function sendSettingAssistantMessage(collectionId: string, conversationId: string, content: string, clientMessageId: string, documentId?: string, versionId?: string) {
+  return collectionRequest(collectionId, `/${encodeURIComponent(conversationId)}/messages`, {
+    content, client_message_id: clientMessageId, document_id: documentId ?? null, document_version_id: versionId ?? null,
+  })
 }

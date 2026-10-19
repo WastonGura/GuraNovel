@@ -1,5 +1,5 @@
-import { useEffect, useState } from 'react'
-import { Link, useLocation, useParams } from 'react-router-dom'
+import { useEffect, useRef, useState, type MouseEvent } from 'react'
+import { Link, useNavigate, useParams } from 'react-router-dom'
 import {
   ApiError,
   applySettingProposal,
@@ -19,6 +19,7 @@ import {
   type SettingCollection,
 } from './api/client'
 import StudioSetting from './StudioSetting'
+import GlobalAssistant from './GlobalAssistant'
 import {
   categoryNames,
   type SettingCategory,
@@ -66,8 +67,22 @@ function slugify(text: string): string {
 
 export default function SettingCollectionWorkspace() {
   const { settingCollectionId = '' } = useParams<{ settingCollectionId: string }>()
-  const location = useLocation()
-  const returnTo = (location.state as { returnTo?: string } | null)?.returnTo || new URLSearchParams(location.search).get('returnTo')
+  const navigate = useNavigate()
+  const editor = useRef<{ flush: () => Promise<boolean> }>(null)
+  const [assistantContext, setAssistantContext] = useState<{ documentId?: string; versionId?: string }>({})
+  const [leaving, setLeaving] = useState(false)
+  const [navigationError, setNavigationError] = useState('')
+  async function goHome(event: MouseEvent<HTMLAnchorElement>) {
+    if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return
+    event.preventDefault()
+    if (leaving) return
+    setLeaving(true)
+    try {
+      if (!editor.current || await editor.current.flush()) navigate('/')
+      else setNavigationError('内容尚未保存，草稿仍保留在当前页面。请重试返回主页。')
+    } finally { setLeaving(false) }
+  }
+  const homeLink = <Link to="/" className="setting-workspace-home" aria-disabled={leaving} onClick={goHome}>回到书架</Link>
   const isPreview = settingCollectionId === 'preview'
   const [collection, setCollection] = useState<SettingCollection | null>(null)
   const [projects, setProjects] = useState<Project[]>([])
@@ -365,9 +380,9 @@ export default function SettingCollectionWorkspace() {
     return (
       <div className="setting-workspace-page studio" aria-busy="true">
         <header className="setting-workspace-header">
-          <Link to="/" className="setting-workspace-back">← 返回项目列表</Link>
           <span className="setting-workspace-loading">正在加载设定集…</span>
         </header>
+        <div className="setting-workspace-fallback-navigation">{homeLink}</div>
       </div>
     )
   }
@@ -376,10 +391,10 @@ export default function SettingCollectionWorkspace() {
     return (
       <div className="setting-workspace-page studio" role="alert">
         <header className="setting-workspace-header">
-          <Link to="/" className="setting-workspace-back">← 返回项目列表</Link>
           <h1 className="setting-workspace-title">设定集加载失败</h1>
         </header>
         <div className="setting-workspace-error-body">
+          {homeLink}
           <p>{loadError || '未找到该设定集'}</p>
           <div className="setting-workspace-error-actions" style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
             <button
@@ -410,15 +425,8 @@ export default function SettingCollectionWorkspace() {
   return (
     <div className="setting-workspace-page studio">
       <header className="setting-workspace-header" aria-label="设定集工作区导航">
-        <Link
-          to={returnTo || '/'}
-          className="setting-workspace-back"
-          aria-label={returnTo ? '返回创作区' : '返回项目列表'}
-        >
-          {returnTo ? '← 返回创作区' : '← 项目'}
-        </Link>
         <div className="setting-workspace-header-title">
-          <h1 className="setting-workspace-title">{collection.title}</h1>
+          <h1 className="setting-workspace-title" title={collection.title}>{collection.title}</h1>
           {isArchived && (
             <span className="setting-badge-archived" role="status">
               已归档 · 只读
@@ -433,9 +441,10 @@ export default function SettingCollectionWorkspace() {
           >
             关联小说 ({projects.length})
           </span>
-          {projects.length > 0 && <span className="setting-impact-warning">修改会影响关联作品的后续创作</span>}
         </div>
       </header>
+
+      {navigationError && <p className="setting-navigation-error" role="alert">{navigationError}</p>}
 
       {conflict && (
         <div className="setting-conflict-banner" role="alert">
@@ -473,6 +482,9 @@ export default function SettingCollectionWorkspace() {
 
       <section className="setting-workspace-body" aria-label="设定集正文">
         <StudioSetting
+          ref={editor}
+          onAssistantContext={setAssistantContext}
+          libraryFooter={homeLink}
           preview={isPreview}
           hidden={false}
           collection={collection}
@@ -491,6 +503,7 @@ export default function SettingCollectionWorkspace() {
           onTyping={() => {}}
         />
       </section>
+      <GlobalAssistant key={settingCollectionId} collection={{ id: settingCollectionId, title: collection.title, ...assistantContext }} preview={isPreview} currentView="SettingCollection" />
     </div>
   )
 }

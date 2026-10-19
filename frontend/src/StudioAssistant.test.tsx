@@ -31,6 +31,62 @@ describe('Studio Assistant', () => {
     vi.restoreAllMocks()
   })
 
+  it('isolates collection drafts while restoring each collection when returning', async () => {
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async () => new Response(JSON.stringify({ id: 'conv', project_id: null, messages: [] }), { status: 200 }))
+    const view = (id: string) => <MemoryRouter><GlobalAssistant collection={{ id, title: id }} /></MemoryRouter>
+    const result = render(view('world-A'))
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Gura' })) })
+    fireEvent.change(screen.getByRole('textbox', { name: '给 Gura 的消息' }), { target: { value: 'A 的想法' } })
+    await act(async () => { result.rerender(view('world-B')) })
+    expect(screen.getByRole('textbox', { name: '给 Gura 的消息' })).toHaveValue('')
+    fireEvent.change(screen.getByRole('textbox', { name: '给 Gura 的消息' }), { target: { value: 'B 的想法' } })
+    await act(async () => { result.rerender(view('world-A')) })
+    expect(screen.getByRole('textbox', { name: '给 Gura 的消息' })).toHaveValue('A 的想法')
+  })
+
+  it('recovers unsent text after refresh during conversation initialization retry', async () => {
+    let calls = 0
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async () => {
+      calls++
+      if (calls === 1) return new Response('{}', { status: 503 })
+      if (calls === 2) return new Promise<Response>(() => {})
+      return new Response(JSON.stringify({ id: 'world-conv', project_id: null, messages: [] }), { status: 200 })
+    })
+    const view = <MemoryRouter><GlobalAssistant collection={{ id: 'world', title: '世界' }} /></MemoryRouter>
+    const first = render(view)
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Gura' })) })
+    fireEvent.change(screen.getByRole('textbox', { name: '给 Gura 的消息' }), { target: { value: '刷新也不能丢失' } })
+    act(() => { fireEvent.click(screen.getByRole('button', { name: '发送给 Gura' })) })
+    expect(calls).toBe(2)
+    first.unmount()
+    await act(async () => { render(view) })
+    expect(screen.getByRole('textbox', { name: '给 Gura 的消息' })).toHaveValue('刷新也不能丢失')
+  })
+
+  it('retries a rejected setting version with the current context and a fresh identity', async () => {
+    const requests: { document_version_id: string; client_message_id: string }[] = []
+    const conversation = { id: 'world-conv', project_id: null, messages: [] }
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (url, init) => {
+      if (String(url).endsWith('/messages')) {
+        requests.push(JSON.parse(String(init?.body)))
+        return new Response('{}', { status: 409 })
+      }
+      return new Response(JSON.stringify(conversation), { status: 200 })
+    })
+    const view = (versionId: string) => <MemoryRouter><GlobalAssistant collection={{ id: 'world', title: '世界', documentId: 'doc', versionId }} /></MemoryRouter>
+    const rendered = render(view('old'))
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Gura' })) })
+    const input = screen.getByRole('textbox', { name: '给 Gura 的消息' })
+    fireEvent.change(input, { target: { value: '解释当前设定' } })
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: '发送给 Gura' })) })
+    expect(input).toHaveValue('解释当前设定')
+    rendered.rerender(view('current'))
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: '发送给 Gura' })) })
+    expect(requests).toHaveLength(2)
+    expect(requests[1].document_version_id).toBe('current')
+    expect(requests[1].client_message_id).not.toBe(requests[0].client_message_id)
+  })
+
   it('renders preview assistant with backwards compatible labels and no network call', async () => {
     const fetchSpy = vi.spyOn(globalThis, 'fetch')
     await act(async () => {

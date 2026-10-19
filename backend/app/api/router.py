@@ -13,6 +13,7 @@ from app.api.routes_project_maintenance import router as project_maintenance_rou
 from app.api.routes_reader_panel import router as reader_panel_router
 from app.api.routes_setting_collections import router as setting_collections_router
 from app.api.routes_studio_assistant import router as studio_assistant_router
+from app.api.routes_studio_assistant import collection_router as setting_assistant_router
 
 from app.api.routes_outline_options import router as outline_options_router
 
@@ -28,6 +29,7 @@ api_router.include_router(project_maintenance_router, tags=["project-maintenance
 api_router.include_router(chapters_router, tags=["chapters"])
 api_router.include_router(studio_router, tags=["studio"])
 api_router.include_router(studio_assistant_router, tags=["studio-assistant"])
+api_router.include_router(setting_assistant_router, tags=["setting-assistant"])
 api_router.include_router(chapter_production_router, tags=["chapter-production"])
 api_router.include_router(chapter_production_v2_router, tags=["chapter-production-v2"])
 api_router.include_router(reader_panel_router, tags=["reader-panel"])

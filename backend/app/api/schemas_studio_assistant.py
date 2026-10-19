@@ -25,6 +25,14 @@ class AssistantSendMessageRequest(BaseModel):
     client_message_id: str | None = Field(default=None, max_length=128)
 
 
+class SettingAssistantSendRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    content: str = Field(min_length=1, max_length=16384)
+    client_message_id: str = Field(min_length=1, max_length=128)
+    document_id: UUID | None = None
+    document_version_id: UUID | None = None
+
+
 class AssistantMessageResponse(BaseModel):
     model_config = ConfigDict(extra="forbid", from_attributes=True)
 
@@ -40,7 +48,8 @@ class AssistantConversationResponse(BaseModel):
     model_config = ConfigDict(extra="forbid", from_attributes=True)
 
     id: UUID
-    project_id: UUID
+    project_id: UUID | None
+    setting_collection_id: UUID | None = None
     chapter_id: UUID | None = None
     title: str | None = None
     messages: list[AssistantMessageResponse] = []

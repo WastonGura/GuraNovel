@@ -3,7 +3,7 @@
 from datetime import datetime
 from uuid import UUID, uuid4
 
-from sqlalchemy import CheckConstraint, DateTime, ForeignKey, Index, Integer, String, Text, func
+from sqlalchemy import CheckConstraint, DateTime, ForeignKey, Index, Integer, String, Text, func, text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.dialects.postgresql import UUID as PGUUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -71,10 +71,13 @@ class StudioAssistantConversation(Base):
     __table_args__ = (
         Index("idx_studio_assistant_conversations_project", "project_id"),
         Index("idx_studio_assistant_conversations_chapter", "chapter_id"),
+        Index("uq_studio_assistant_collection", "setting_collection_id", unique=True, postgresql_where=text("setting_collection_id IS NOT NULL")),
+        CheckConstraint("num_nonnulls(project_id, setting_collection_id) = 1 AND (setting_collection_id IS NULL OR chapter_id IS NULL)", name="ck_studio_assistant_scope"),
     )
 
     id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True, default=uuid4)
-    project_id: Mapped[UUID] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"), nullable=False)
+    project_id: Mapped[UUID | None] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"), nullable=True)
+    setting_collection_id: Mapped[UUID | None] = mapped_column(ForeignKey("setting_collections.id", ondelete="CASCADE"), nullable=True)
     chapter_id: Mapped[UUID | None] = mapped_column(ForeignKey("chapters.id", ondelete="CASCADE"), nullable=True)
     title: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
