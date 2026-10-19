@@ -155,7 +155,12 @@ describe('creation studio', () => {
     const launcher = screen.getByRole('button', { name: 'Gura' })
     await stage('Gura')
     expect(launcher).toHaveAttribute('aria-expanded', 'true')
+    const assistantInput = screen.getByRole('textbox', { name: '给 Gura 的消息' })
+    fireEvent.change(assistantInput, { target: { value: '切换阶段时保留这段想法' } })
     await stage('Draft')
+    expect(document.querySelector('.studio-assistant-launcher')).toBe(launcher)
+    expect(screen.getByRole('textbox', { name: '给 Gura 的消息' })).toBe(assistantInput)
+    expect(assistantInput).toHaveValue('切换阶段时保留这段想法')
     const viewport = document.querySelector<HTMLElement>('.studio-manuscript-viewport')!
     expect(viewport).toBeInTheDocument()
     const commentPanel = document.querySelector<HTMLElement>('.studio-floating-comment')!

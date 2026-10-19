@@ -31,6 +31,19 @@ describe('Studio Assistant', () => {
     vi.restoreAllMocks()
   })
 
+  it('isolates collection drafts while restoring each collection when returning', async () => {
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async () => new Response(JSON.stringify({ id: 'conv', project_id: null, messages: [] }), { status: 200 }))
+    const view = (id: string) => <MemoryRouter><GlobalAssistant collection={{ id, title: id }} /></MemoryRouter>
+    const result = render(view('world-A'))
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Gura' })) })
+    fireEvent.change(screen.getByRole('textbox', { name: '给 Gura 的消息' }), { target: { value: 'A 的想法' } })
+    await act(async () => { result.rerender(view('world-B')) })
+    expect(screen.getByRole('textbox', { name: '给 Gura 的消息' })).toHaveValue('')
+    fireEvent.change(screen.getByRole('textbox', { name: '给 Gura 的消息' }), { target: { value: 'B 的想法' } })
+    await act(async () => { result.rerender(view('world-A')) })
+    expect(screen.getByRole('textbox', { name: '给 Gura 的消息' })).toHaveValue('A 的想法')
+  })
+
   it('recovers unsent text after refresh during conversation initialization retry', async () => {
     let calls = 0
     vi.spyOn(globalThis, 'fetch').mockImplementation(async () => {

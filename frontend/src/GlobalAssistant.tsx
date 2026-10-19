@@ -75,7 +75,8 @@ export interface GlobalAssistantProps {
 
 export default function GlobalAssistant(props: GlobalAssistantProps = {}) {
   const location = useLocation()
-  const scope = props.collection ? `collection:${props.collection.id}` : props.project?.id || location.pathname
+  const projectId = props.project?.id || location.pathname.match(/\/projects\/([^/]+)/)?.[1]
+  const scope = props.collection ? `collection:${props.collection.id}` : projectId ? `project:${projectId}` : 'global'
   return <AssistantSession key={scope} {...props} />
 }
 

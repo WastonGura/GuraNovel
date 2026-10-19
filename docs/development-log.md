@@ -2,6 +2,12 @@
 
 Dates use Asia/Tokyo. Target: v0.12.0 desktop personal trial.
 
+## 2026-10-20 — #367 CI correction before merge
+
+- User authorized checking review/CI and merging only when clean. GitHub had no submitted reviews, inline threads or discussion comments at the initial check; this is not independent approval. The first run (39296045203, head 5df93e5) failed one full-suite Studio test while its other 484 frontend tests passed. Backend unit/lint, version consistency and Docker author workflow passed; PostgreSQL was still running when this correction began. No failing gate was bypassed.
+- Reproduced the exact Studio open → stage switch → close failure locally. GlobalAssistant used pathname as a fallback React session key, remounting on preview-stage navigation and leaving stale launcher state/history. The key now uses collection identity, explicit/inferred project identity or the stable global scope. This preserves the ongoing assistant across stages and initial project loading while retaining collection isolation.
+- Strengthened the existing failure test with DOM identity and unsent-draft retention, added a collection A/B/return draft-isolation regression, and extended the browser assistant flow to retain sent preview history across a stage change. 47 focused Studio/assistant tests and the browser flow pass; lint/types/build pass. The extended browser fixture explicitly refocuses the composer before Escape, preserving the established scoped keyboard behavior. Latest-head complete Actions and final review recheck remain required before Squash merge. No visual redesign, backend/schema/version change, model call or release.
+
 ## 2026-10-20 — #363 PR preparation after user approval
 
 - User approved the final local UI and authorized submitting #363 as a PR. Final navigation follows that approval: large header title, text-only 回到书架 in the fixed sidebar footer, no top-left home button. The confirmed Gura circle/drawer, fixed editor tools, context-menu motion, category dissolve, contrasting user-right/Gura-left bubbles, hidden history scrollbar and centered 32px send button are included. Direct writing/proposal adoption, associated-work browsing and trash remain #364–#366; this PR does not close wider #301/#310/#311 scope.

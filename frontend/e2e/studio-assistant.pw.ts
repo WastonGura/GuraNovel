@@ -38,7 +38,13 @@ test('Studio Assistant drawer interaction and visual constraints in real browser
   await input.press('Enter')
   await expect(page.getByText('测试问答')).toBeVisible()
 
+  // Stage navigation keeps the same ongoing assistant session, including preview history.
+  await page.getByRole('button', { name: '正文', exact: true }).click()
+  await expect(dialog).toBeVisible()
+  await expect(page.getByText('测试问答')).toBeVisible()
+
   // Press Escape to close the drawer
+  await input.focus()
   await page.keyboard.press('Escape')
   await expect(dialog).toBeHidden()
   await expect(launcher).toBeFocused()
