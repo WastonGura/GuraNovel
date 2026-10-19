@@ -126,6 +126,7 @@ function renderWorkspace(initialUrl = '/setting-collections/col-123') {
   return render(
     <MemoryRouter initialEntries={[initialUrl]}>
       <Routes>
+        <Route path="/" element={<p data-testid="home-page">首页</p>} />
         <Route
           path="/setting-collections/:settingCollectionId"
           element={<SettingCollectionWorkspace />}
@@ -152,6 +153,7 @@ describe('SettingCollectionWorkspace', () => {
 
   afterEach(() => {
     cleanup()
+    vi.restoreAllMocks()
   })
 
   it('shows useful collection context without revision or routine saved badges', async () => {
@@ -165,7 +167,9 @@ describe('SettingCollectionWorkspace', () => {
 
     expect(screen.queryByText('r3')).not.toBeInTheDocument()
     expect(screen.getByText('关联小说 (2)')).toBeInTheDocument()
-    expect(screen.getByText('修改会影响关联作品的后续创作')).toBeInTheDocument()
+    expect(screen.queryByText('修改会影响关联作品的后续创作')).not.toBeInTheDocument()
+    expect(screen.getByRole('link', { name: '回到书架' })).toHaveAttribute('href', '/')
+    expect(screen.getByRole('button', { name: /^Gura$/ })).toBeInTheDocument()
     expect(screen.queryByText('已保存')).not.toBeInTheDocument()
   })
 
@@ -178,6 +182,38 @@ describe('SettingCollectionWorkspace', () => {
 
     const list = screen.getByLabelText('设定条目', { exact: true })
     expect(within(list).getByRole('button', { name: '陆云舟' })).toBeInTheDocument()
+  })
+
+  it('uses only collection context and the selected saved document version for Gura', async () => {
+    const conversation = { id: 'conv-world', project_id: null, setting_collection_id: 'col-123', messages: [], created_at: '', updated_at: '' }
+    const calls: { url: string; body: Record<string, unknown> }[] = []
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (url, init) => {
+      calls.push({ url: String(url), body: JSON.parse(String(init?.body)) })
+      return new Response(JSON.stringify(conversation), { status: 200 })
+    })
+    renderWorkspace('/setting-collections/col-123?note=doc-world-1&category=world')
+    await screen.findByRole('heading', { name: '天穹神域' })
+    fireEvent.click(screen.getByRole('button', { name: /^Gura$/ }))
+    await waitFor(() => expect(calls).toHaveLength(1))
+    fireEvent.change(screen.getByRole('textbox', { name: '给 Gura 的消息' }), { target: { value: '帮我理解这个世界' } })
+    await waitFor(() => expect(screen.getByRole('button', { name: '发送给 Gura' })).toBeEnabled())
+    fireEvent.click(screen.getByRole('button', { name: '发送给 Gura' }))
+    await waitFor(() => expect(calls).toHaveLength(2))
+    expect(calls[0].url).toBe('/api/v1/setting-collections/col-123/assistant/conversations')
+    expect(calls[1].body).toMatchObject({ document_id: 'doc-world-1', document_version_id: 'ver-201', content: '帮我理解这个世界' })
+    expect(calls.every(call => !call.url.includes('/projects/'))).toBe(true)
+    expect(screen.queryByText('交互预览')).not.toBeInTheDocument()
+  })
+
+  it('does not leave for home when a title update is rejected', async () => {
+    vi.mocked(client.patchDocument).mockRejectedValueOnce(new Error('offline'))
+    renderWorkspace()
+    await screen.findByText('天穹纪元设定集')
+    fireEvent.click(screen.getByRole('button', { name: /^编辑$/ }))
+    fireEvent.change(screen.getByRole('textbox', { name: '设定标题' }), { target: { value: '不能丢失的标题' } })
+    await act(async () => { fireEvent.click(screen.getByRole('link', { name: '回到书架' })) })
+    expect(screen.queryByTestId('home-page')).not.toBeInTheDocument()
+    expect(screen.getByRole('textbox', { name: '设定标题' })).toHaveValue('不能丢失的标题')
   })
 
   it('displays read-only badge and restricts editing when collection is archived', async () => {

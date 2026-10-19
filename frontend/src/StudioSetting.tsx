@@ -33,11 +33,13 @@ export interface StudioSettingProps {
   onDeleteNotes?: (noteIds: string[]) => Promise<boolean | string[]>
   onRestoreNotes?: (noteIds: string[]) => Promise<boolean | string[]>
   onViewChange?: (view: SettingView) => void
+  onAssistantContext?: (context: { documentId?: string; versionId?: string }) => void
   initialView?: Partial<SettingView>
   initialConversation?: Conversation
   syncUrlParams?: boolean
   saveStatusText?: string
   defaultPinned?: boolean
+  libraryFooter?: ReactNode
 }
 
 function LinkedText({ text, notes, references, comments, onOpen }: { text: string; notes: SettingNote[]; references: string[]; comments: OutlineComment[]; onOpen: (title: string) => void }) {
@@ -79,11 +81,13 @@ export default function StudioSetting({
   onDeleteNotes,
   onRestoreNotes,
   onViewChange,
+  onAssistantContext,
   initialView,
   initialConversation,
   syncUrlParams = false,
   saveStatusText,
   defaultPinned,
+  libraryFooter,
 }: StudioSettingProps) {
   const location = useLocation(), navigate = useNavigate()
   const searchParams = new URLSearchParams(location.search)
@@ -138,6 +142,26 @@ export default function StudioSetting({
   const [searchReturnMode, setSearchReturnMode] = useState<SettingView['mode']>(mode === 'search' ? 'note' : mode)
   const displayMode = mode === 'search' ? searchReturnMode : mode
   const [draftTitle, setDraftTitle] = useState('')
+  const titleWrites = useRef(new Map<string, { title: string; success: boolean | null; promise: Promise<boolean> }>())
+  function enqueueTitle(id: string, title: string) {
+    const previous = titleWrites.current.get(id)
+    if (previous?.title === title && previous.success !== false) return
+    const write = { title, success: null as boolean | null, promise: Promise.resolve(false) }
+    write.promise = (previous?.promise ?? Promise.resolve(true)).then(() => onRenameNote!(id, title)).then(success => {
+      write.success = success
+      if (!success) setError('标题尚未保存，请保持页面打开并重试。')
+      else if (titleWrites.current.get(id) === write) setError(value => value === '标题尚未保存，请保持页面打开并重试。' ? '' : value)
+      return success
+    }).catch(() => { write.success = false; setError('标题尚未保存，请保持页面打开并重试。'); return false })
+    titleWrites.current.set(id, write)
+  }
+  useEffect(() => {
+    const warn = (event: BeforeUnloadEvent) => {
+      if ([...titleWrites.current.values()].some(write => write.success !== true)) { event.preventDefault(); event.returnValue = '' }
+    }
+    window.addEventListener('beforeunload', warn)
+    return () => window.removeEventListener('beforeunload', warn)
+  }, [])
   const [query, setQuery] = useState('')
   const [pinned, setPinned] = useState(defaultPinned ?? false)
   const [sidebarOpen, setSidebarOpen] = useState(false)
@@ -182,6 +206,7 @@ export default function StudioSetting({
   }, [notes])
 
   const active = notes.find(note => note.id === selectedId)
+  useEffect(() => { onAssistantContext?.({ documentId: active?.documentId, versionId: active?.versionId }) }, [onAssistantContext, active?.documentId, active?.versionId])
   const readOnly = explicitReadOnly !== undefined ? explicitReadOnly : ((!preview && !onSaveNoteContent && !onApplyProposal) || Boolean(initial.error))
   const shown = notes.filter(note => note.category === category)
   const results = notes.filter(note => `${note.title}\n${note.body}`.toLocaleLowerCase().includes(query.trim().toLocaleLowerCase()))
@@ -446,8 +471,8 @@ export default function StudioSetting({
     const nextTitle = draftTitle.trim()
     if (!nextTitle || /[\]\n[]/.test(nextTitle)) { setError('请输入标题，标题不能含方括号或换行。'); return false }
     if (notes.some(note => note.id !== active.id && note.title === nextTitle)) { setError('已有同名条目，请使用不同的标题。'); return false }
-    if (onRenameNote && active.title !== nextTitle) {
-      void onRenameNote(active.id, nextTitle)
+    if (onRenameNote && (active.title !== nextTitle || titleWrites.current.get(active.id)?.success === false)) {
+      enqueueTitle(active.id, nextTitle)
     }
     // Keep existing wiki references valid when the referenced note is renamed.
     return persist(notes.map(note => {
@@ -673,6 +698,8 @@ export default function StudioSetting({
   useImperativeHandle(ref, () => ({ flush: async () => {
     if (editing && !titleCommit()) return false
     if (readOnly) return true
+    for (const [id, write] of titleWrites.current) if (write.success === false) enqueueTitle(id, write.title)
+    if (!(await Promise.all([...titleWrites.current.values()].map(write => write.promise))).every(Boolean)) return false
     if (onSaveNoteContent) {
       const ids = Array.from(saveQueues.current.keys())
       const results = await Promise.all(
@@ -710,6 +737,7 @@ export default function StudioSetting({
       {mutationBusy && <p role="status">正在同步删除或恢复…</p>}
       {deleted && <div className="setting-delete-undo" role="status"><small>已删除 {deleted.items.length} 项，正文引用保留</small><button type="button" disabled={mutationBusy} onClick={undoDelete}>撤销删除</button></div>}
       {sidebarStatus && <small className="setting-local-note" role={saveStatusText ? 'status' : undefined}>{sidebarStatus}</small>}
+      {libraryFooter && <div className="setting-library-footer">{libraryFooter}</div>}
     </aside>
     </div>
     {mode === 'search' && activePage && !hidden && <SearchDialog title="搜索内容" query={query} onQuery={setQuery}
@@ -721,13 +749,13 @@ export default function StudioSetting({
       onClose={() => { rememberView({ id: selectedId, category, mode: searchReturnMode }); setMode(searchReturnMode) }} onSelect={choose}
       emptyText="没有找到相关条目"
       renderPreview={note => note ? <><img className="search-preview-icon" src="/ui/setting/append.svg" alt="" /><h3>{note.title}</h3><span className="search-preview-kind">{categoryNames[note.category]}</span><p>{note.body.replace(/\[\[|\]\]/g, '') || '暂无正文'}</p></> : <><h3>寻找世界的细节</h3><p>搜索设定与世界观中的标题和正文。</p></>} />}
+    {displayMode !== 'chat' && displayMode !== 'graph' && active && <div className="setting-editor-tools"><button disabled={readOnly} onClick={discussNote}>交给 Agent 讨论</button><button disabled={readOnly} onClick={() => { if (editing && !titleCommit()) return; if (!editing) setDraftTitle(active.title); setEditing(!editing) }}>{editing ? '阅读' : '编辑'}</button></div>}
     <div className={`setting-main${displayMode === 'chat' ? ' is-conversation' : chatVisited ? ' has-conversation-return' : ''}`}>
       {chatVisited && displayMode !== 'chat' && <button className="setting-return-chat" onClick={() => showMode('chat')}>返回设定对话</button>}
       <SettingConversation conversation={conversation} notes={notes} visible={displayMode === 'chat' && activePage} disabled={readOnly} referencingProjects={referencingProjects} preview={preview} onPatch={patchConversation} onSend={sendMessage} onCommentChange={(noteId, commentId, text) => {
         if (!readOnly) persist(currentNotes.current.map(note => note.id === noteId ? { ...note, comments: note.comments?.map(comment => comment.id === commentId ? { ...comment, text } : comment) } : note))
       }} onExample={() => patchConversation({ messages: [...currentConversation.current.messages, settingExampleReply(currentNotes.current, currentConversation.current)] })} onAccept={acceptProposals} onChange={changeProposal} onOpen={choose} onScroll={scrollTop => { currentConversation.current = { ...currentConversation.current, scrollTop } }} />
       {displayMode === 'chat' ? null : displayMode === 'graph' ? <SettingGraph notes={notes} onOpen={openTitle} /> : active ? <>
-        <div className="setting-editor-tools"><button disabled={readOnly} onClick={discussNote}>交给 Agent 讨论</button><button disabled={readOnly} onClick={() => { if (editing && !titleCommit()) return; if (!editing) setDraftTitle(active.title); setEditing(!editing) }}>{editing ? '阅读' : '编辑'}</button></div>
         <div className="setting-document-scroll">
           <MotionFrame className="setting-document" textKey={active.id}>
             <h1 data-sweep-text>{editing ? <input aria-label="设定标题" maxLength={100} value={draftTitle} onChange={event => setDraftTitle(event.target.value)} onBlur={titleCommit} /> : active.title}</h1>

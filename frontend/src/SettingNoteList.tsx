@@ -1,7 +1,49 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useEffectEvent, useRef, useState, type RefObject } from 'react'
 import { createPortal, flushSync } from 'react-dom'
-import { MotionFrame } from './StudioMotion'
+import { TextMotionSurface } from './StudioMotion'
 import { categoryNames, type SettingCategory, type SettingNote } from './settingNotes'
+import { useDialogMotion } from './useDialogMotion'
+
+type NoteMenuState = { instance: number; context: string; ids: string[]; x: number; y: number; copyStatus?: 'done' | 'error' }
+
+function NoteContextMenu({ menu, valid, onClose, returnFocus, onCopy, onDelete }: {
+  menu: NoteMenuState; valid: boolean; onClose: () => void; returnFocus: RefObject<HTMLElement | null>
+  onCopy: () => Promise<void>; onDelete: () => void
+}) {
+  const element = useRef<HTMLDivElement>(null)
+  const requested = useRef(false), afterClose = useRef<(() => void) | undefined>(undefined), restore = useRef(false)
+  const motion = useDialogMotion(() => {
+    onClose()
+    if (valid) afterClose.current?.()
+    if (valid && restore.current && returnFocus.current?.isConnected) returnFocus.current.focus({ preventScroll: true })
+  }, undefined, false, 'setting-menu-out')
+  function close(after?: () => void, restoreFocus = false) {
+    if (requested.current) return
+    requested.current = true; afterClose.current = after; restore.current = restoreFocus
+    void motion.requestClose()
+  }
+  const dismiss = useEffectEvent(() => close())
+  useEffect(() => {
+    element.current?.querySelector<HTMLButtonElement>('button')?.focus({ preventScroll: true })
+    const outside = (event: PointerEvent) => { if (!element.current?.contains(event.target as Node)) dismiss() }
+    const blur = () => dismiss()
+    document.addEventListener('pointerdown', outside); window.addEventListener('blur', blur)
+    return () => { document.removeEventListener('pointerdown', outside); window.removeEventListener('blur', blur) }
+  }, [])
+  useEffect(() => {
+    if (!valid) { afterClose.current = undefined; restore.current = false; dismiss() }
+  }, [valid])
+  return <div ref={element} className={`setting-note-menu${motion.closing ? ' is-closing' : ''}`} role="menu" aria-label="条目操作"
+    inert={motion.closing || !valid} style={{ left: menu.x, top: menu.y }} onAnimationEnd={motion.onAnimationEnd} onKeyDown={event => {
+      if (event.key === 'Escape' || event.key === 'Tab') { event.stopPropagation(); event.preventDefault(); close(undefined, true) }
+      if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+        event.preventDefault(); event.stopPropagation()
+        const buttons = [...event.currentTarget.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')], index = buttons.indexOf(document.activeElement as HTMLButtonElement)
+        buttons[(index + (event.key === 'ArrowDown' ? 1 : -1) + buttons.length) % buttons.length]?.focus()
+      }
+    }}><button type="button" role="menuitem" onClick={onCopy}><img src="/ui/setting/copy.svg" alt="" /><span aria-live="polite">{menu.copyStatus === 'done' ? '已复制名称' : menu.copyStatus === 'error' ? '复制失败，请重试' : menu.ids.length > 1 ? '复制所选条目名称' : '复制条目名称'}</span></button>
+      <button type="button" role="menuitem" onClick={() => close(onDelete)}><img src="/ui/setting/delete.svg" alt="" />删除{menu.ids.length > 1 ? ` ${menu.ids.length} 个条目` : '条目'}</button></div>
+}
 
 export default function SettingNoteList({ notes, category, activeId, disabled, onOpen, onOrder, onDelete }: {
   notes: SettingNote[]; category: SettingCategory; activeId?: string; disabled: boolean
@@ -9,12 +51,13 @@ export default function SettingNoteList({ notes, category, activeId, disabled, o
 }) {
   const root = useRef<HTMLDivElement>(null), cancel = useRef<() => void>(() => {}), suppressClick = useRef(false)
   const [selected, setSelected] = useState<string[]>([])
-  const [menu, setMenu] = useState<{ ids: string[]; x: number; y: number; copyStatus?: 'done' | 'error' } | null>(null)
+  const [menu, setMenu] = useState<NoteMenuState | null>(null)
+  const menuInstance = useRef(0)
   const [deleting, setDeleting] = useState<string[]>([])
-  const menuElement = useRef<HTMLDivElement>(null), confirmation = useRef<HTMLDialogElement>(null)
+  const confirmation = useRef<HTMLDialogElement>(null)
   const returnFocus = useRef<HTMLElement | null>(null)
   const [menuContext, setMenuContext] = useState(`${category}:${disabled}`)
-  if (menuContext !== `${category}:${disabled}`) { setMenuContext(`${category}:${disabled}`); setMenu(null); setDeleting([]) }
+  if (menuContext !== `${category}:${disabled}`) { setMenuContext(`${category}:${disabled}`); setDeleting([]) }
   const ids = notes.map(note => note.id), chosen = selected.filter(id => ids.includes(id))
   useEffect(() => () => cancel.current(), [])
   useEffect(() => { cancel.current() }, [category, disabled])
@@ -28,14 +71,6 @@ export default function SettingNoteList({ notes, category, activeId, disabled, o
     document.addEventListener('click', clear)
     return () => document.removeEventListener('click', clear)
   }, [])
-  useEffect(() => {
-    if (!menu) return
-    menuElement.current?.querySelector<HTMLButtonElement>('button')?.focus({ preventScroll: true })
-    const dismiss = (event: PointerEvent) => { if (!menuElement.current?.contains(event.target as Node)) setMenu(null) }
-    const blur = () => setMenu(null)
-    document.addEventListener('pointerdown', dismiss); window.addEventListener('blur', blur)
-    return () => { document.removeEventListener('pointerdown', dismiss); window.removeEventListener('blur', blur) }
-  }, [menu])
   useEffect(() => { if (deleting.length) confirmation.current?.showModal() }, [deleting])
   function closeConfirmation() { confirmation.current?.close?.(); setDeleting([]); returnFocus.current?.focus({ preventScroll: true }) }
   function openMenu(target: HTMLElement, x?: number, y?: number) {
@@ -47,7 +82,7 @@ export default function SettingNoteList({ notes, category, activeId, disabled, o
     if (button) { if (!chosen.includes(button.dataset.noteId!)) setSelected([]); returnFocus.current = button }
     else returnFocus.current = root.current
     const rect = (button || root.current!).getBoundingClientRect()
-    setMenu({ ids: next, x: Math.max(8, Math.min(x || rect.left, window.innerWidth - 188)), y: Math.max(8, Math.min(y || rect.bottom, window.innerHeight - 104)) })
+    setMenu({ instance: ++menuInstance.current, context: `${category}:${disabled}`, ids: next, x: Math.max(8, Math.min(x || rect.left, window.innerWidth - 188)), y: Math.max(8, Math.min(y || rect.bottom, window.innerHeight - 104)) })
   }
   function click(note: SettingNote) {
     if (suppressClick.current) { suppressClick.current = false; return }
@@ -145,25 +180,18 @@ export default function SettingNoteList({ notes, category, activeId, disabled, o
       cancel.current = abort
       document.addEventListener('pointermove', move); document.addEventListener('pointerup', up); document.addEventListener('pointercancel', abort); document.addEventListener('keydown', escape); window.addEventListener('blur', abort)
     }}>
-      <MotionFrame className="setting-list-motion" textKey={category}>
+      <TextMotionSurface className="setting-list-motion" motionKey={category}>
         {notes.map(note => <button key={note.id} type="button" data-note-id={note.id} data-sweep-text aria-pressed={chosen.includes(note.id)} aria-current={activeId === note.id ? 'page' : undefined} aria-description="单击打开，拖动框选；拖动已选条目排序，Ctrl+A 全选，Alt 加上下方向键微调；右键或 Delete 确认删除所选" onClick={() => click(note)}>{note.title || '未命名'}</button>)}
         {!notes.length && <p className="setting-list-empty" data-sweep-text>还没有内容</p>}
-      </MotionFrame>
+      </TextMotionSurface>
     </div>
     {(menu || deleting.length > 0) && createPortal(<div className="studio setting-menu-overlay">
-      {menu && <div ref={menuElement} className="setting-note-menu" role="menu" aria-label="条目操作" style={{ left: menu.x, top: menu.y }} onKeyDown={event => {
-        if (event.key === 'Escape' || event.key === 'Tab') { event.stopPropagation(); setMenu(null); returnFocus.current?.focus({ preventScroll: true }) }
-        if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
-          event.preventDefault(); event.stopPropagation()
-          const buttons = [...event.currentTarget.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')], index = buttons.indexOf(document.activeElement as HTMLButtonElement)
-          buttons[(index + (event.key === 'ArrowDown' ? 1 : -1) + buttons.length) % buttons.length]?.focus()
-        }
-      }}><button type="button" role="menuitem" onClick={async () => {
+      {menu && <NoteContextMenu key={menu.instance} menu={menu} valid={menu.context === `${category}:${disabled}`} onClose={() => setMenu(null)} returnFocus={returnFocus} onDelete={() => setDeleting(menu.ids)} onCopy={async () => {
         let copyStatus: 'done' | 'error' = 'done'
         try { await navigator.clipboard.writeText(notes.filter(note => menu.ids.includes(note.id)).map(note => note.title).join('\n')) }
         catch { copyStatus = 'error' }
         setMenu(current => current === menu ? { ...current, copyStatus } : current)
-      }}><img src="/ui/setting/copy.svg" alt="" /><span aria-live="polite">{menu.copyStatus === 'done' ? '已复制名称' : menu.copyStatus === 'error' ? '复制失败，请重试' : menu.ids.length > 1 ? '复制所选条目名称' : '复制条目名称'}</span></button><button type="button" role="menuitem" onClick={() => { setDeleting(menu.ids); setMenu(null) }}><img src="/ui/setting/delete.svg" alt="" />删除{menu.ids.length > 1 ? ` ${menu.ids.length} 个条目` : '条目'}</button></div>}
+      }} />}
       {!!deleting.length && <dialog ref={confirmation} className="studio-confirm setting-delete-confirm" aria-labelledby="setting-delete-title" aria-describedby="setting-delete-description" onCancel={event => { event.preventDefault(); closeConfirmation() }} onClick={event => { if (event.target === event.currentTarget) closeConfirmation() }}>
         <h2 id="setting-delete-title">删除{deleting.length > 1 ? `这 ${deleting.length} 个条目` : '这个条目'}？</h2>
         <p className="setting-delete-names">{notes.filter(note => deleting.includes(note.id)).map(note => note.title).join('、')}</p>

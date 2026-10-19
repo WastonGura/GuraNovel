@@ -3,9 +3,12 @@ import { useLocation, useNavigate } from 'react-router-dom'
 import {
   getOrCreateAssistantConversation,
   sendAssistantMessage,
+  getOrCreateSettingAssistantConversation,
+  sendSettingAssistantMessage,
   type AssistantMessage,
 } from './api/studioAssistantClient'
 import './studio.css'
+import { ApiError } from './api/client'
 
 const assistantToolLabels: Record<string, string> = {
   get_project_summary: '工程状态概览',
@@ -38,7 +41,7 @@ function HideIcon() {
 
 function SendIcon() {
   return (
-    <svg width="20" height="20" viewBox="0 0 56 56" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+    <svg width="20" height="20" viewBox="15 15 20 20" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
       <path d="M33.0333 17.4667C32.7417 17.175 32.3208 17.0833 31.9375 17.225L17.8542 22.4125C17.4625 22.5542 17.1958 22.9167 17.175 23.3333C17.15 23.75 17.3792 24.1375 17.75 24.325L22.7792 26.8417L26.725 22.8958L27.6083 23.7792L23.6625 27.725L26.1792 32.7542C26.3542 33.1083 26.7167 33.3292 27.1083 33.3292H27.1667C27.5833 33.3042 27.9417 33.0375 28.0875 32.65L33.275 18.5625C33.4167 18.1792 33.325 17.7583 33.0333 17.4667Z" fill="currentColor" />
     </svg>
   )
@@ -49,7 +52,7 @@ function AssistantIconButton({ icon, label, className = '', ...props }: ButtonHT
     <button
       type="button"
       data-icon={icon}
-      className={`studio-icon is-round-asset ${className}`}
+      className={`studio-icon ${className}`}
       title={label}
       aria-label={label}
       {...props}
@@ -67,14 +70,22 @@ export interface GlobalAssistantProps {
   chapter?: { id?: string | null; stage?: string | null } | null
   currentView?: string | null
   preview?: boolean
+  collection?: { id: string; title: string; documentId?: string; versionId?: string }
 }
 
-export default function GlobalAssistant({
+export default function GlobalAssistant(props: GlobalAssistantProps = {}) {
+  const location = useLocation()
+  const scope = props.collection ? `collection:${props.collection.id}` : props.project?.id || location.pathname
+  return <AssistantSession key={scope} {...props} />
+}
+
+function AssistantSession({
   hidden = false,
   project,
   chapter,
   currentView: propCurrentView,
   preview: propPreview,
+  collection,
 }: GlobalAssistantProps = {}) {
   const location = useLocation()
   const navigate = useNavigate()
@@ -86,8 +97,23 @@ export default function GlobalAssistant({
 
   const effectiveProjectId = project?.id || (projectMatch ? projectMatch[1] : null)
   const effectiveChapterId = chapter?.id || (chapterMatch ? chapterMatch[1] : null)
-  const preview = propPreview !== undefined ? propPreview : (isStudioPreview || !effectiveProjectId)
-  const isReal = !preview && Boolean(effectiveProjectId)
+  const collectionId = collection?.id
+  const preview = propPreview !== undefined ? propPreview : (isStudioPreview || (!effectiveProjectId && !collection))
+  const isReal = !preview && Boolean(effectiveProjectId || collection)
+  const draftKey = collection ? `guranovel_assistant_draft:collection:${collection.id}` : 'guranovel_assistant_draft'
+  const pendingKey = collection ? `guranovel_assistant_pending:collection:${collection.id}` : null
+  const [pendingRecovery] = useState(() => {
+    try {
+      const value = pendingKey ? JSON.parse(sessionStorage.getItem(pendingKey) || 'null') : null
+      if (value && typeof value.id === 'string' && value.id.length > 0 && value.id.length <= 128
+        && typeof value.text === 'string' && value.text.trim().length > 0 && value.text.length <= 16384
+        && (value.documentId === undefined || typeof value.documentId === 'string')
+        && (value.versionId === undefined || typeof value.versionId === 'string')) {
+        return value as { id: string; text: string; documentId?: string; versionId?: string }
+      }
+    } catch { /* A malformed recovery record must not become a request identity. */ }
+    return null
+  })
 
   const derivedView = propCurrentView || (() => {
     const p = location.pathname
@@ -111,7 +137,7 @@ export default function GlobalAssistant({
 
   const [draft, setDraft] = useState(() => {
     try {
-      return sessionStorage.getItem('guranovel_assistant_draft') || ''
+      return sessionStorage.getItem(draftKey) || pendingRecovery?.text || ''
     } catch {
       return ''
     }
@@ -126,17 +152,20 @@ export default function GlobalAssistant({
     }
   }
 
-  const retryMessageIdRef = useRef<string | null>(null)
-  const lastSentTextRef = useRef<string | null>(null)
+  const retryMessageIdRef = useRef<string | null>(pendingRecovery?.id ?? null)
+  const lastSentTextRef = useRef<string | null>(pendingRecovery?.text ?? null)
+  const requestContext = useRef<{ documentId?: string; versionId?: string }>(pendingRecovery ?? {})
+  const sendingRef = useRef(false)
 
   const handleDraftChange = (text: string) => {
     if (lastSentTextRef.current !== null && text !== lastSentTextRef.current) {
       retryMessageIdRef.current = null
       lastSentTextRef.current = null
+      try { if (pendingKey) sessionStorage.removeItem(pendingKey) } catch { /* Preserve the live draft. */ }
     }
     setDraft(text)
     try {
-      sessionStorage.setItem('guranovel_assistant_draft', text)
+      sessionStorage.setItem(draftKey, text)
     } catch {
       // ignore
     }
@@ -150,7 +179,7 @@ export default function GlobalAssistant({
   const [pendingDraft, setPendingDraft] = useState<string | null>(null)
   const [error, setError] = useState('')
 
-  const currentKey = isReal && open && effectiveProjectId ? `${effectiveProjectId}:${effectiveChapterId || ''}` : null
+  const currentKey = isReal && open ? collection ? `collection:${collection.id}` : `${effectiveProjectId}:${effectiveChapterId || ''}` : null
   const loading = isReal && open && currentKey !== null && loadedKey !== currentKey
   const input = useRef<HTMLTextAreaElement>(null)
   const launcher = useRef<HTMLButtonElement>(null)
@@ -195,14 +224,25 @@ export default function GlobalAssistant({
   }, [previewMessages, realMessages, pendingDraft, open])
 
   useEffect(() => {
-    if (!isReal || !open || !effectiveProjectId) return
+    if (!isReal || !open || (!effectiveProjectId && !collectionId)) return
     let active = true
-    const key = `${effectiveProjectId}:${effectiveChapterId || ''}`
-    getOrCreateAssistantConversation(effectiveProjectId, effectiveChapterId || undefined)
+    const key = collectionId ? `collection:${collectionId}` : `${effectiveProjectId}:${effectiveChapterId || ''}`
+    const load = collectionId ? getOrCreateSettingAssistantConversation(collectionId)
+      : getOrCreateAssistantConversation(effectiveProjectId!, effectiveChapterId || undefined)
+    load
       .then(conv => {
         if (!active) return
         setConversationId(conv.id)
         setRealMessages(conv.messages || [])
+        const pending = retryMessageIdRef.current, pendingText = lastSentTextRef.current
+        if (pendingKey && pending && conv.messages.some(message => message.role === 'user' && message.tool_calls?.some(tool => (tool as unknown as { client_message_id?: string }).client_message_id === pending))) {
+          retryMessageIdRef.current = null; lastSentTextRef.current = null
+          setDraft(previous => previous === pendingText ? '' : previous)
+          try {
+            sessionStorage.removeItem(pendingKey)
+            if (sessionStorage.getItem(draftKey) === pendingText) sessionStorage.setItem(draftKey, '')
+          } catch { /* The live conversation still shows the acknowledged message. */ }
+        }
         setError('')
         setLoadedKey(key)
       })
@@ -212,16 +252,16 @@ export default function GlobalAssistant({
         setLoadedKey(key)
       })
     return () => { active = false }
-  }, [isReal, open, effectiveProjectId, effectiveChapterId])
+  }, [isReal, open, effectiveProjectId, effectiveChapterId, collectionId, pendingKey, draftKey])
 
   async function send() {
-    if (!draft.trim()) return
+    if (!draft.trim() || loading || sendingRef.current) return
     const text = draft.trim()
-    if (!isReal || !effectiveProjectId) {
+    if (!isReal || (!effectiveProjectId && !collection)) {
       setPreviewMessages(items => [...items, text])
       setDraft('')
       try {
-        sessionStorage.setItem('guranovel_assistant_draft', '')
+        sessionStorage.setItem(draftKey, '')
       } catch {
         // ignore
       }
@@ -229,41 +269,59 @@ export default function GlobalAssistant({
       return
     }
 
-    if (sending) return
+    sendingRef.current = true
     setSending(true)
     setPendingDraft(text)
     setDraft('')
     try {
-      sessionStorage.setItem('guranovel_assistant_draft', '')
+      sessionStorage.setItem(draftKey, '')
     } catch {
       // ignore
     }
     setError('')
     try {
-      let convId = conversationId
-      if (!convId) {
-        const conv = await getOrCreateAssistantConversation(effectiveProjectId, effectiveChapterId || undefined)
-        convId = conv.id
-        setConversationId(conv.id)
-      }
       if (!retryMessageIdRef.current || text !== lastSentTextRef.current) {
         retryMessageIdRef.current = crypto.randomUUID()
         lastSentTextRef.current = text
+        requestContext.current = { documentId: collection?.documentId, versionId: collection?.versionId }
       }
       const clientMessageId = retryMessageIdRef.current
-      const res = await sendAssistantMessage(effectiveProjectId, convId, text, effectiveChapterId || undefined, derivedView, clientMessageId)
+      if (pendingKey) {
+        const record = JSON.stringify({ id: clientMessageId, text, ...requestContext.current })
+        sessionStorage.setItem(pendingKey, record)
+        if (sessionStorage.getItem(pendingKey) !== record) throw new Error('浏览器无法保留消息重试信息，请检查本地存储后再试。')
+      }
+      let convId = conversationId
+      if (!convId) {
+        const conv = collection ? await getOrCreateSettingAssistantConversation(collection.id)
+          : await getOrCreateAssistantConversation(effectiveProjectId!, effectiveChapterId || undefined)
+        convId = conv.id
+        setConversationId(conv.id)
+      }
+      const res = collection ? await sendSettingAssistantMessage(collection.id, convId, text, clientMessageId, requestContext.current.documentId, requestContext.current.versionId)
+        : await sendAssistantMessage(effectiveProjectId!, convId, text, effectiveChapterId || undefined, derivedView, clientMessageId)
       setRealMessages(res.messages || [])
       retryMessageIdRef.current = null
       lastSentTextRef.current = null
-    } catch {
-      setError('发送失败，请稍后重试。')
-      setDraft(text)
+      try { if (pendingKey) sessionStorage.removeItem(pendingKey) } catch { /* Reconcile acknowledgements on the next load. */ }
+    } catch (cause) {
+      if (collection && cause instanceof ApiError && cause.status === 409) {
+        // A rejected version never ran the model; a deliberate retry may use the new version.
+        retryMessageIdRef.current = null
+        lastSentTextRef.current = null
+        try { if (pendingKey) sessionStorage.removeItem(pendingKey) } catch { /* Keep the message text. */ }
+      }
+      setError(collection && cause instanceof Error ? cause.message : '发送失败，请稍后重试。')
+      // Retain newer typing if a pending reply fails.
+      const retained = input.current?.value.trim() || text
+      setDraft(retained)
       try {
-        sessionStorage.setItem('guranovel_assistant_draft', text)
+        sessionStorage.setItem(draftKey, retained)
       } catch {
         // ignore
       }
     } finally {
+      sendingRef.current = false
       setPendingDraft(null)
       setSending(false)
       input.current?.focus({ preventScroll: true })
@@ -320,7 +378,7 @@ export default function GlobalAssistant({
                 </div>
               )}
               {previewMessages.map((message, index) => (
-                <div className="studio-assistant-message" key={index}>
+                <div className="studio-assistant-message is-user" key={index}>
                   <small>你 · 未发送</small>
                   <p>{message}</p>
                 </div>
@@ -388,7 +446,7 @@ export default function GlobalAssistant({
                   </div>
                   <div className="studio-assistant-message">
                     <small>Gura</small>
-                    <p className="studio-muted">正在查阅工程状态并思考…</p>
+                    <p className="studio-muted">{collection ? '正在查阅设定并思考…' : '正在查阅工程状态并思考…'}</p>
                   </div>
                 </>
               )}
@@ -423,7 +481,7 @@ export default function GlobalAssistant({
               icon="send"
               label={!isReal ? '发送给 Gura（仅预览）' : sending ? '正在思考…' : '发送给 Gura'}
               type="submit"
-              disabled={!draft.trim() || sending}
+              disabled={!draft.trim() || sending || loading}
             />
           </div>
         </form>

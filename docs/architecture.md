@@ -849,6 +849,14 @@ This design is additive and does not reinterpret completed v0.7/v0.8 data.
   they completed successfully. Migration or explicit re-review would be a separate implementation
   decision.
 
+## Collection-scoped global assistant (#363)
+
+The standalone workspace reuses `GlobalAssistant` and `StudioAssistantService`, with collection routes under `/api/v1/setting-collections/{id}/assistant/conversations`. A collection never borrows an associated project's identity. Conversation initialization and reads verify collection ownership; sends also verify the active document belongs to this collection and the supplied saved version is current. Context reads that immutable snapshot, with bounded document listings, body and history. The existing structured-output gateway/transport handles the configured real model; unavailable/configuration failures remain errors rather than fabricated successful replies. This assistant has no write tools. Direct document collaboration/proposals remain #364.
+
+Migration `0013_setting_assistant_scope` adds nullable collection scope to the existing conversation table, makes project scope nullable, enforces exactly one scope and forbids a chapter in collection scope. A partial unique index and collection row lock provide one collection conversation; the existing message store and conversation lock/row lock protect delivery. Client request identities and original document context survive uncertain responses and refresh. Server-side deduplication rejects reuse with different text/context. User and assistant messages commit atomically; model failures leave neither half-message.
+
+Upgrade with the standard `uv run alembic upgrade head` after a paired database/workspace backup. Existing project conversations/messages are preserved. Downgrade to 0012 is allowed only while no collection conversations exist; otherwise 0013 explicitly refuses to discard history. Export/migrate that history or restore the paired pre-upgrade backup into isolated volumes before switching applications. Do not delete conversations to force a production rollback. This change does not rewrite published migrations, change app versions or ship a release.
+
 ## Delivery boundaries
 
 The rollout is intentionally staged:

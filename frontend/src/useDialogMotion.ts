@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState, type AnimationEvent } from 'react'
 
-export function useDialogMotion(onClose: () => void, beforeClose?: () => Promise<boolean>, busy = false) {
+export function useDialogMotion(onClose: () => void, beforeClose?: () => Promise<boolean>, busy = false, exitAnimation = 'creation-dialog-out') {
   const [closing, setClosing] = useState(false)
   const requested = useRef(false)
   const dismissed = useRef(false)
@@ -24,7 +24,7 @@ export function useDialogMotion(onClose: () => void, beforeClose?: () => Promise
     return () => window.clearTimeout(timer)
   }, [closing, finish])
   function onAnimationEnd(event: AnimationEvent<HTMLElement>) {
-    if (closing && event.target === event.currentTarget && event.animationName === 'creation-dialog-out') finish()
+    if (closing && event.target === event.currentTarget && event.animationName === exitAnimation) finish()
   }
   return { closing, requestClose, onAnimationEnd }
 }
