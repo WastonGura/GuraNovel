@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   ApiError,
+  uploadNovelCover,
   writeStudioDraft,
   getChapterProduction,
   getProjectCreationRun,
@@ -600,3 +601,14 @@ describe('typed API client', () => {
   })
 })
 
+
+it('uploads a binary image with cancellation and rejects malformed cover references', async () => {
+  const file = new File(['image bytes'], 'cover.png', { type: 'image/png' })
+  const signal = new AbortController().signal
+  const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({ cover: 'cover-upload:' + 'a'.repeat(64) }), { status: 201 }))
+  vi.stubGlobal('fetch', fetchMock)
+  expect(await uploadNovelCover(file, signal)).toBe('cover-upload:' + 'a'.repeat(64))
+  expect(fetchMock).toHaveBeenCalledWith('/api/v1/covers', expect.objectContaining({ method: 'POST', body: file, signal, headers: { 'Content-Type': 'image/png' } }))
+  fetchMock.mockResolvedValue(new Response(JSON.stringify({ cover: '../private' }), { status: 201 }))
+  await expect(uploadNovelCover(file)).rejects.toBeInstanceOf(ApiError)
+})

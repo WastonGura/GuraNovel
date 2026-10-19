@@ -6,7 +6,7 @@ test(`bookshelf stays fixed and keeps all shelves reachable at ${viewport.width}
   await page.setViewportSize(viewport)
   await openBookshelf(page)
   const canvas = page.locator('.dashboard-canvas')
-  for (const selector of ['.recent-card', '.novel-card', '.collection-card', '.dashboard-search']) {
+  for (const selector of ['.recent-card', '.novel-card', '.collection-card', '.dashboard-search-trigger']) {
     const box = await page.locator(selector).first().boundingBox()
     expect(box!.y).toBeGreaterThanOrEqual(0)
     expect(box!.y + box!.height).toBeLessThanOrEqual(viewport.height)

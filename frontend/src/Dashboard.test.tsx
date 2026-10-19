@@ -1,6 +1,6 @@
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { MemoryRouter, Route, Routes, useLocation } from 'react-router-dom'
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import Dashboard from './Dashboard'
 import type { Chapter, Project, SettingCollection } from './api/client'
 
@@ -33,6 +33,12 @@ function renderDashboard(startPath = '/') {
       </Routes>
     </MemoryRouter>,
   )
+}
+
+function chooseCollection(dialog: HTMLElement, title: string) {
+  fireEvent.click(within(dialog).getByRole('button', { name: '选择设定集' }))
+  const picker = screen.getByRole('dialog', { name: '选择设定集' })
+  fireEvent.click(within(picker).getByRole('button', { name: title }))
 }
 
 function sampleProject(overrides: Partial<Project> = {}): Project {
@@ -92,6 +98,13 @@ function sampleChapter(overrides: Partial<Chapter> = {}): Chapter {
   }
 }
 
+beforeEach(() => {
+  vi.stubGlobal('matchMedia', vi.fn(() => ({ matches: true })))
+  sessionStorage.clear(); localStorage.clear()
+  HTMLDialogElement.prototype.showModal = function () { this.setAttribute('open', '') }
+  HTMLDialogElement.prototype.close = function () { this.removeAttribute('open'); this.dispatchEvent(new Event('close')) }
+})
+
 describe('Dashboard Setting Collections and Novel Integration', () => {
   it('offers an actionable first-novel empty state', async () => {
     mockedApi.listProjects.mockResolvedValue([])
@@ -114,7 +127,7 @@ describe('Dashboard Setting Collections and Novel Integration', () => {
     expect(within(dialog).queryByText('收好一个世界')).not.toBeInTheDocument()
     expect(within(dialog).queryByText('人物、地点与世界规则，放在一起慢慢生长。')).not.toBeInTheDocument()
     fireEvent(dialog, new Event('cancel', { cancelable: true }))
-    expect(screen.queryByRole('dialog', { name: '新建设定集' })).not.toBeInTheDocument()
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: '新建设定集' })).not.toBeInTheDocument())
     expect(trigger).toHaveFocus()
   })
 
@@ -160,7 +173,7 @@ describe('Dashboard Setting Collections and Novel Integration', () => {
     fireEvent.change(title, { target: { value: '雨停之前' } })
     fireEvent.click(within(dialog).getByRole('button', { name: '创建作品' }))
     await waitFor(() => expect(mockedApi.createProject).toHaveBeenCalledWith(expect.objectContaining({
-      title: '雨停之前', slug: expect.stringMatching(/^novel-[a-z0-9]+$/),
+      title: '雨停之前', slug: expect.stringMatching(/^novel-[a-f0-9-]{36}$/),
     })))
   })
 
@@ -188,9 +201,28 @@ describe('Dashboard Setting Collections and Novel Integration', () => {
     fireEvent.change(within(dialog).getByLabelText('标题'), { target: { value: '雨停之前' } })
     fireEvent.click(within(dialog).getByRole('button', { name: '创建作品' }))
     const error = await screen.findByRole('alert')
-    expect(error).toHaveTextContent('Slug 已被使用')
+    expect(error).toHaveTextContent('检查书架')
     expect(error).toHaveFocus()
     expect(within(dialog).getByLabelText('标题')).toHaveValue('雨停之前')
+  })
+
+  it('uses the same generated identity on creation retry and submits the neutral cover', async () => {
+    mockedApi.listProjects.mockResolvedValue([])
+    mockedApi.listSettingCollections.mockResolvedValue([])
+    mockedApi.createProject.mockRejectedValue(new Error('offline'))
+    renderDashboard()
+    fireEvent.click(await screen.findByRole('button', { name: '新建作品' }))
+    const dialog = screen.getByRole('dialog', { name: '创建作品' })
+    expect(within(dialog).queryByLabelText('Slug')).not.toBeInTheDocument()
+    expect(within(dialog).queryByRole('button', { name: '取消' })).not.toBeInTheDocument()
+    fireEvent.change(within(dialog).getByLabelText('标题'), { target: { value: 'First' } })
+    fireEvent.click(within(dialog).getByRole('button', { name: '创建作品' }))
+    await within(dialog).findByRole('alert')
+    fireEvent.change(within(dialog).getByLabelText('标题'), { target: { value: 'New title' } })
+    fireEvent.click(within(dialog).getByRole('button', { name: '创建作品' }))
+    await waitFor(() => expect(mockedApi.createProject).toHaveBeenCalledTimes(2))
+    expect(mockedApi.createProject.mock.calls[0][0].slug).toBe(mockedApi.createProject.mock.calls[1][0].slug)
+    expect(mockedApi.createProject.mock.calls[1][0].metadata).toEqual({ cover: 'cover-default' })
   })
 
   it('submits only once and keeps the pending modal open', async () => {
@@ -218,7 +250,7 @@ describe('Dashboard Setting Collections and Novel Integration', () => {
 
   afterEach(() => {
     cleanup()
-    vi.clearAllMocks()
+    vi.clearAllMocks(); vi.unstubAllGlobals()
   })
 
   it('renders setting collections carousel with revision and referencing novel count', async () => {
@@ -313,21 +345,19 @@ describe('Dashboard Setting Collections and Novel Integration', () => {
     fireEvent.click(screen.getByRole('button', { name: '新建作品' }))
     const dialog = screen.getByRole('dialog', { name: '创建作品' })
 
-    fireEvent.change(within(dialog).getByLabelText('Slug'), { target: { value: 'new-novel' } })
     fireEvent.change(within(dialog).getByLabelText('标题'), { target: { value: 'New Novel' } })
 
     // Verify setting collection selector default is 'new' (blank collection)
-    const select = within(dialog).getByLabelText('设定集') as HTMLSelectElement
-    expect(select.value).toBe('new')
+    expect(within(dialog).getByRole('button', { name: '选择设定集' })).toHaveTextContent('同时创建空白设定集')
 
     fireEvent.click(within(dialog).getByRole('button', { name: '创建作品' }))
 
     await waitFor(() => {
       expect(mockedApi.createProject).toHaveBeenCalledWith({
-        slug: 'new-novel',
+        slug: expect.stringMatching(/^novel-[a-f0-9-]{36}$/),
         title: 'New Novel',
-        genre: null,
         target_platform: null,
+        metadata: { cover: 'cover-default' },
       })
     })
     await waitFor(() => {
@@ -347,34 +377,33 @@ describe('Dashboard Setting Collections and Novel Integration', () => {
     fireEvent.click(screen.getByRole('button', { name: '新建作品' }))
     const dialog = screen.getByRole('dialog', { name: '创建作品' })
 
-    fireEvent.change(within(dialog).getByLabelText('Slug'), { target: { value: 'cyber-chronicles' } })
     fireEvent.change(within(dialog).getByLabelText('标题'), { target: { value: 'Cyber Chronicles' } })
-    fireEvent.change(within(dialog).getByLabelText('题材（可选）'), { target: { value: 'Sci-Fi' } })
     fireEvent.change(within(dialog).getByLabelText('目标平台（可选）'), { target: { value: 'Qidian' } })
-    fireEvent.change(within(dialog).getByLabelText('设定集'), { target: { value: 'col-42' } })
+    chooseCollection(dialog, 'Cyber World')
     fireEvent.change(within(dialog).getByLabelText('简介（可选）'), { target: { value: 'Neon lights and shadows.' } })
-    fireEvent.change(within(dialog).getByLabelText('标签（可选）'), { target: { value: 'Cyberpunk, Action' } })
-    fireEvent.change(within(dialog).getByLabelText('封面地址或预设（可选）'), { target: { value: 'cover-2.jpg' } })
+    fireEvent.click(within(dialog).getByText('更多作品信息'))
+    expect(within(dialog).queryByLabelText('标签（可选）')).not.toBeInTheDocument()
+    expect(within(dialog).queryByRole('group', { name: '作品标签' })).not.toBeInTheDocument()
+    fireEvent.click(within(dialog).getByRole('button', { name: '更换封面' }))
+    fireEvent.click(within(screen.getByRole('dialog', { name: '更换封面' })).getByRole('button', { name: '封面 2' }))
 
     fireEvent.click(within(dialog).getByRole('button', { name: '创建作品' }))
 
     await waitFor(() => {
       expect(mockedApi.createProject).toHaveBeenCalledWith({
-        slug: 'cyber-chronicles',
+        slug: expect.stringMatching(/^novel-[a-f0-9-]{36}$/),
         title: 'Cyber Chronicles',
-        genre: 'Sci-Fi',
         target_platform: 'Qidian',
         setting_collection_id: 'col-42',
         metadata: {
           introduction: 'Neon lights and shadows.',
-          labels: ['Cyberpunk', 'Action'],
           cover: 'cover-2.jpg',
         },
       })
     })
   })
 
-  it('displays enriched novel details including setting collection link and metadata', async () => {
+  it('displays metadata and association selection without a redundant collection navigation link', async () => {
     const col = sampleCollection({ id: 'col-1', title: 'Ash World Lore', revision: 3 })
     const proj = sampleProject({
       id: 'project-1',
@@ -398,106 +427,144 @@ describe('Dashboard Setting Collections and Novel Integration', () => {
     expect(dialog).toBeInTheDocument()
 
     // Verify metadata
-    expect(within(dialog).getByText(/字数：5.5万/)).toBeInTheDocument()
-    expect(within(dialog).getByText(/状态：草稿/)).toBeInTheDocument()
-    expect(within(dialog).getByText('Dark Fantasy')).toBeInTheDocument()
-    expect(within(dialog).getByText('WebNovel')).toBeInTheDocument()
-    expect(within(dialog).getByText('The world burned to ash, but embers remain.')).toBeInTheDocument()
-    expect(within(dialog).getByText('Grimdark')).toBeInTheDocument()
-    expect(within(dialog).getByText('Magic')).toBeInTheDocument()
+    fireEvent.click(within(dialog).getByRole('button', { name: '编辑资料' }))
+    expect(within(dialog).getByLabelText('字数：5.5万')).toBeInTheDocument()
+    expect(within(dialog).getByLabelText('状态：草稿')).toBeInTheDocument()
+    expect(within(dialog).queryByLabelText('编辑题材')).not.toBeInTheDocument()
+    expect(within(dialog).getByLabelText('编辑目标平台')).toHaveValue('WebNovel')
+    expect(within(dialog).getByLabelText('编辑简介')).toHaveValue('The world burned to ash, but embers remain.')
+    expect(within(dialog).getByRole('group', { name: '作品标签' })).toHaveTextContent('Grimdark')
+    expect(within(dialog).getByRole('group', { name: '作品标签' })).toHaveTextContent('Magic')
 
-    // Verify setting collection link badge
-    const colLink = within(dialog).getByRole('button', { name: 'Open setting collection Ash World Lore' })
-    expect(colLink).toBeInTheDocument()
-    expect(within(colLink).queryByText('r3')).not.toBeInTheDocument()
-
-    // Click setting collection link navigates to setting collection workspace
-    fireEvent.click(colLink)
-    await waitFor(() => {
-      expect(screen.getByTestId('location')).toHaveTextContent('/setting-collections/col-1')
-    })
+    fireEvent.click(within(dialog).getByText('更多作品信息'))
+    expect(within(dialog).getByRole('button', { name: '选择设定集' })).toHaveTextContent('Ash World Lore')
+    expect(within(dialog).queryByRole('button', { name: 'Open setting collection Ash World Lore' })).not.toBeInTheDocument()
   })
 
-  it('supports inline editing of novel details and saves via updateProject', async () => {
-    const col1 = sampleCollection({ id: 'col-1', title: 'Ash World Lore' })
-    const col2 = sampleCollection({ id: 'col-2', title: 'Frost Kingdom Lore', revision: 2 })
-    const proj = sampleProject({
-      id: 'project-1',
-      title: 'Archive of Ash',
-      genre: 'Fantasy',
-      setting_collection_id: 'col-1',
-      metadata: {
-        introduction: 'Old introduction.',
-        labels: ['Fantasy'],
-      },
-    })
-    const updatedProj = sampleProject({
-      id: 'project-1',
-      title: 'Archive of Ash: Reborn',
-      genre: 'Dark Fantasy',
-      target_platform: 'Kindle',
-      setting_collection_id: 'col-2',
-      metadata: {
-        introduction: 'New expanded introduction.',
-        labels: ['Dark Fantasy', 'Epic'],
-      },
-    })
+  it('previews the title immediately and automatically saves without leaving editing', async () => {
+    const project = sampleProject()
+    mockedApi.listProjects.mockResolvedValue([project])
+    mockedApi.listSettingCollections.mockResolvedValue([])
+    mockedApi.listChapters.mockResolvedValue([])
+    mockedApi.updateProject.mockImplementation(async (_id, payload) => ({ ...project, ...payload } as Project))
+    renderDashboard('/?project=project-1')
+    const dialog = await screen.findByRole('dialog', { name: project.title })
+    fireEvent.click(within(dialog).getByRole('button', { name: '编辑资料' }))
+    fireEvent.change(within(dialog).getByLabelText('编辑标题'), { target: { value: '实时更新的标题' } })
+    expect(within(dialog).getByRole('heading', { name: '实时更新的标题' })).toBeVisible()
+    expect(within(dialog).queryByRole('button', { name: '保存修改' })).not.toBeInTheDocument()
+    await waitFor(() => expect(mockedApi.updateProject).toHaveBeenCalledWith('project-1', expect.objectContaining({ title: '实时更新的标题' })))
+    expect(within(dialog).getByLabelText('编辑标题')).toHaveValue('实时更新的标题')
+  })
 
-    mockedApi.listProjects.mockResolvedValue([proj])
-    mockedApi.listSettingCollections.mockResolvedValue([col1, col2])
-    mockedApi.listChapters.mockResolvedValue([sampleChapter()])
-    mockedApi.updateProject.mockResolvedValue(updatedProj)
-
+  it('reuses the searchable label picker in metadata editing', async () => {
+    mockedApi.listProjects.mockResolvedValue([sampleProject()])
+    mockedApi.listSettingCollections.mockResolvedValue([])
+    mockedApi.listChapters.mockResolvedValue([])
     renderDashboard('/?project=project-1')
     const dialog = await screen.findByRole('dialog', { name: 'Archive of Ash' })
-
-    // Click edit toggle
     fireEvent.click(within(dialog).getByRole('button', { name: '编辑资料' }))
+    fireEvent.click(within(dialog).getByRole('button', { name: '添加标签' }))
+    const picker = screen.getByRole('dialog', { name: '添加标签' })
+    fireEvent.change(within(picker).getByRole('textbox', { name: '搜索或输入标签' }), { target: { value: '科' } })
+    expect(within(picker).getByRole('group', { name: '常用标签' })).toHaveTextContent('科幻')
+  })
 
-    // Edit inputs are displayed
-    const titleInput = within(dialog).getByLabelText('编辑标题')
-    expect(titleInput).toHaveValue('Archive of Ash')
-    fireEvent.change(titleInput, { target: { value: 'Archive of Ash: Reborn' } })
+  it('automatically saves metadata and keeps unrelated metadata when edits are combined', async () => {
+    const project = sampleProject({ metadata: { word_count: 12000, introduction: 'Old', labels: ['Fantasy'] } })
+    mockedApi.listProjects.mockResolvedValue([project])
+    mockedApi.listSettingCollections.mockResolvedValue([sampleCollection({ id: 'col-2', title: 'New World' })])
+    mockedApi.listChapters.mockResolvedValue([])
+    mockedApi.updateProject.mockImplementation(async (_id, payload) => ({ ...project, ...payload } as Project))
+    renderDashboard('/?project=project-1')
+    const dialog = await screen.findByRole('dialog', { name: project.title })
+    fireEvent.click(within(dialog).getByRole('button', { name: '编辑资料' }))
+    fireEvent.change(within(dialog).getByLabelText('编辑标题'), { target: { value: 'New Title' } })
+    fireEvent.change(within(dialog).getByLabelText('编辑目标平台'), { target: { value: 'Kindle' } })
+    fireEvent.click(within(dialog).getByText('更多作品信息'))
+    chooseCollection(dialog, 'New World')
+    fireEvent.change(within(dialog).getByLabelText('编辑简介'), { target: { value: 'New introduction' } })
+    await waitFor(() => expect(mockedApi.updateProject).toHaveBeenCalledWith('project-1', {
+      title: 'New Title', target_platform: 'Kindle', setting_collection_id: 'col-2',
+      metadata: { word_count: 12000, introduction: 'New introduction', labels: ['Fantasy'] },
+    }))
+    expect(mockedApi.updateProject).toHaveBeenCalledTimes(1)
+    expect(within(dialog).getByLabelText('编辑简介')).toHaveValue('New introduction')
+    fireEvent.click(within(dialog).getByRole('button', { name: '章节目录' }))
+    fireEvent.click(within(dialog).getByRole('button', { name: '编辑资料' }))
+    expect(within(dialog).getByLabelText('编辑标题')).toHaveValue('New Title')
+  })
 
-    const genreInput = within(dialog).getByLabelText('编辑题材')
-    fireEvent.change(genreInput, { target: { value: 'Dark Fantasy' } })
+  it('opens directly on the chapters and exposes only the edit entry', async () => {
+    mockedApi.listProjects.mockResolvedValue([sampleProject()])
+    mockedApi.listSettingCollections.mockResolvedValue([sampleCollection()])
+    mockedApi.listChapters.mockResolvedValue([sampleChapter()])
+    renderDashboard('/?project=project-1')
+    const dialog = await screen.findByRole('dialog', { name: 'Archive of Ash' })
+    expect(await within(dialog).findByRole('button', { name: /第1话.*Beginning of Ash/ })).toBeVisible()
+    expect(within(dialog).queryByRole('tablist')).not.toBeInTheDocument()
+    expect(within(dialog).queryByText('章节目录')).not.toBeInTheDocument()
+    expect(within(dialog).queryByText('作品资料')).not.toBeInTheDocument()
+    fireEvent.click(within(dialog).getByRole('button', { name: '编辑资料' }))
+    expect(within(dialog).getByLabelText('编辑简介')).toHaveValue('A tale of ash and rebirth.')
+    expect(mockedApi.updateProject).not.toHaveBeenCalled()
+  })
 
-    const platformInput = within(dialog).getByLabelText('编辑目标平台')
-    fireEvent.change(platformInput, { target: { value: 'Kindle' } })
+  it('retains failed automatic edits across directory switches and retries synchronization', async () => {
+    const project = sampleProject()
+    mockedApi.listProjects.mockResolvedValue([project])
+    mockedApi.listSettingCollections.mockResolvedValue([])
+    mockedApi.listChapters.mockResolvedValue([sampleChapter()])
+    mockedApi.updateProject.mockRejectedValueOnce(new Error('offline'))
+    mockedApi.updateProject.mockImplementationOnce(async (_id, payload) => ({ ...project, ...payload } as Project))
+    renderDashboard('/?project=project-1')
+    const dialog = await screen.findByRole('dialog', { name: project.title })
+    fireEvent.click(within(dialog).getByRole('button', { name: '编辑资料' }))
+    fireEvent.change(within(dialog).getByLabelText('编辑标题'), { target: { value: '断网时的书名' } })
+    expect(await within(dialog).findByRole('alert')).toHaveTextContent('已保留修改')
+    fireEvent.click(within(dialog).getByRole('button', { name: '章节目录' }))
+    fireEvent.click(within(dialog).getByRole('button', { name: '编辑资料' }))
+    expect(within(dialog).getByLabelText('编辑标题')).toHaveValue('断网时的书名')
+    fireEvent.click(within(dialog).getByRole('button', { name: '重试同步' }))
+    await waitFor(() => expect(within(dialog).queryByRole('alert')).not.toBeInTheDocument())
+    expect(mockedApi.updateProject).toHaveBeenCalledTimes(2)
+  })
 
-    const colSelect = within(dialog).getByLabelText('编辑关联设定集')
-    fireEvent.change(colSelect, { target: { value: 'col-2' } })
+  it('keeps a recoverable draft and allows close when synchronization fails', async () => {
+    mockedApi.listProjects.mockResolvedValue([sampleProject()])
+    mockedApi.listSettingCollections.mockResolvedValue([])
+    mockedApi.listChapters.mockResolvedValue([])
+    mockedApi.updateProject.mockRejectedValue(new Error('offline'))
+    renderDashboard('/?project=project-1')
+    const dialog = await screen.findByRole('dialog', { name: 'Archive of Ash' })
+    fireEvent.click(within(dialog).getByRole('button', { name: '编辑资料' }))
+    fireEvent.change(within(dialog).getByLabelText('编辑标题'), { target: { value: '即将关闭的修改' } })
+    fireEvent.click(within(dialog).getByRole('button', { name: '关闭作品详情' }))
+    await waitFor(() => expect(dialog).not.toBeInTheDocument())
+    expect(JSON.parse(localStorage.getItem('guranovel:novel-metadata:project-1')!).title).toBe('即将关闭的修改')
+    fireEvent.click(screen.getAllByRole('button', { name: 'Open Archive of Ash' })[0])
+    const restored = await screen.findByRole('dialog', { name: '即将关闭的修改' })
+    fireEvent.click(within(restored).getByRole('button', { name: '编辑资料' }))
+    expect(within(restored).getByLabelText('编辑标题')).toHaveValue('即将关闭的修改')
+  })
 
-    const introInput = within(dialog).getByLabelText('编辑简介')
-    fireEvent.change(introInput, { target: { value: 'New expanded introduction.' } })
-
-    const labelsInput = within(dialog).getByLabelText('编辑标签')
-    fireEvent.change(labelsInput, { target: { value: 'Dark Fantasy, Epic' } })
-
-    // Save changes
-    fireEvent.click(within(dialog).getByRole('button', { name: '保存修改' }))
-
-    await waitFor(() => {
-      expect(mockedApi.updateProject).toHaveBeenCalledWith('project-1', {
-        title: 'Archive of Ash: Reborn',
-        genre: 'Dark Fantasy',
-        target_platform: 'Kindle',
-        setting_collection_id: 'col-2',
-        metadata: {
-          introduction: 'New expanded introduction.',
-          labels: ['Dark Fantasy', 'Epic'],
-        },
-      })
-    })
-
-    // Dialog updates with new values and exits edit mode
-    expect(await within(dialog).findByRole('heading', { name: 'Archive of Ash: Reborn' })).toBeInTheDocument()
-    expect(within(dialog).getByText('New expanded introduction.')).toBeInTheDocument()
-    expect(within(dialog).getAllByText('Dark Fantasy').length).toBeGreaterThanOrEqual(1)
-    expect(within(dialog).getByText('Epic')).toBeInTheDocument()
-    expect(within(dialog).getByText('Kindle')).toBeInTheDocument()
-    expect(within(dialog).getByRole('button', { name: 'Open setting collection Frost Kingdom Lore' })).toBeInTheDocument()
-    expect(within(dialog).getByRole('button', { name: '编辑资料' })).toBeInTheDocument()
+  it('adds and removes labels through the existing picker and automatically syncs them', async () => {
+    const project = sampleProject({ metadata: { labels: ['都市', '科幻'] } })
+    mockedApi.listProjects.mockResolvedValue([project])
+    mockedApi.listSettingCollections.mockResolvedValue([])
+    mockedApi.listChapters.mockResolvedValue([])
+    mockedApi.updateProject.mockImplementation(async (_id, payload) => ({ ...project, ...payload } as Project))
+    renderDashboard('/?project=project-1')
+    const dialog = await screen.findByRole('dialog', { name: project.title })
+    fireEvent.click(within(dialog).getByRole('button', { name: '编辑资料' }))
+    const tags = within(dialog).getByRole('group', { name: '作品标签' })
+    fireEvent.click(within(tags).getByRole('button', { name: '添加标签' }))
+    const picker = screen.getByRole('dialog', { name: '添加标签' })
+    fireEvent.click(within(picker).getByRole('button', { name: '悬疑' }))
+    fireEvent.click(within(picker).getByRole('button', { name: '关闭标签选择' }))
+    fireEvent.click(within(tags).getByRole('button', { name: '删除标签：都市' }))
+    await waitFor(() => expect(mockedApi.updateProject).toHaveBeenCalledWith('project-1', expect.objectContaining({ metadata: { labels: ['科幻', '悬疑'] } })))
+    expect(within(tags).getByRole('button', { name: '删除标签：悬疑' })).toBeVisible()
   })
 
   it('searches and reveals both novels and setting collections', async () => {
@@ -509,6 +576,7 @@ describe('Dashboard Setting Collections and Novel Integration', () => {
     renderDashboard()
     await screen.findAllByRole('button', { name: 'Open Solar Empire' })
 
+    fireEvent.click(screen.getByRole('button', { name: '搜索' }))
     const search = await screen.findByRole('searchbox', { name: '搜索作品' })
     fireEvent.focus(search)
     fireEvent.change(search, { target: { value: 'Solar' } })
@@ -523,5 +591,45 @@ describe('Dashboard Setting Collections and Novel Integration', () => {
     await waitFor(() => {
       expect(screen.getByTestId('location')).toHaveTextContent('/setting-collections/col-1')
     })
+  })
+
+  it('opens a preview search from the toolbar, filters types and restores focus', async () => {
+    mockedApi.listProjects.mockResolvedValue([sampleProject({ title: 'Solar Empire' })])
+    mockedApi.listSettingCollections.mockResolvedValue([sampleCollection({ title: 'Solar Lore' })])
+    renderDashboard()
+    await screen.findAllByRole('button', { name: 'Open Solar Empire' })
+    expect(document.querySelector('.dashboard-search')).toBeNull()
+    expect(screen.queryByRole('searchbox')).not.toBeInTheDocument()
+    const trigger = screen.getByRole('button', { name: '搜索' })
+    trigger.focus(); fireEvent.click(trigger)
+    const dialog = screen.getByRole('dialog', { name: '搜索' })
+    const input = within(dialog).getByRole('searchbox', { name: '搜索作品' })
+    expect(input).toHaveFocus()
+    expect(within(dialog).getByRole('region', { name: '预览' })).toHaveTextContent('Solar Empire')
+    fireEvent.click(within(dialog).getByRole('button', { name: '设定集' }))
+    const results = within(dialog).getByRole('group', { name: '搜索结果' })
+    expect(within(results).queryByRole('button', { name: 'Solar Empire' })).not.toBeInTheDocument()
+    expect(within(results).getByRole('button', { name: 'Solar Lore' })).toBeInTheDocument()
+    fireEvent.change(input, { target: { value: 'nothing' } })
+    expect(within(results).queryByRole('button')).not.toBeInTheDocument()
+    expect(within(dialog).getByRole('region', { name: '预览' })).not.toHaveTextContent('Solar Empire')
+    fireEvent(dialog, new Event('cancel', { cancelable: true }))
+    await waitFor(() => expect(dialog).not.toBeInTheDocument())
+    expect(trigger).toHaveFocus()
+  })
+
+  it('shows clean label metadata in search rows and searches labels without displaying the introduction there', async () => {
+    mockedApi.listProjects.mockResolvedValue([sampleProject({ title: '海雾', metadata: { labels: ['科幻', 42, '', '科幻'], introduction: '一段只供预览的简介。' } })])
+    mockedApi.listSettingCollections.mockResolvedValue([])
+    renderDashboard()
+    await screen.findAllByRole('button', { name: 'Open 海雾' })
+    fireEvent.click(screen.getByRole('button', { name: '搜索' }))
+    const dialog = screen.getByRole('dialog', { name: '搜索' })
+    const row = within(dialog).getByRole('button', { name: '海雾' })
+    expect(row).toHaveTextContent('科幻')
+    expect(row).not.toHaveTextContent('一段只供预览')
+    fireEvent.change(within(dialog).getByRole('searchbox'), { target: { value: '科幻' } })
+    expect(within(dialog).getByRole('button', { name: '海雾' })).toBeInTheDocument()
+    expect(within(dialog).getByRole('region', { name: '预览' })).toHaveTextContent('一段只供预览的简介。')
   })
 })

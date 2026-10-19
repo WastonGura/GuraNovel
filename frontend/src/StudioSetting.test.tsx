@@ -5,7 +5,11 @@ import { MemoryRouter, useNavigate } from 'react-router-dom'
 import StudioSetting from './StudioSetting'
 import { applySettingChanges, buildNoteGraph, emptySettingConversation, noteLinks, readSettingNotes, readSettingWorkspace, settingExampleReply, settingStorageKey, type SettingNote } from './settingNotes'
 
-beforeEach(() => { localStorage.clear(); sessionStorage.clear(); vi.useFakeTimers(); HTMLDialogElement.prototype.showModal = function () { this.setAttribute('open', '') } })
+beforeEach(() => {
+  localStorage.clear(); sessionStorage.clear(); vi.useFakeTimers()
+  HTMLDialogElement.prototype.showModal = function () { this.setAttribute('open', '') }
+  HTMLDialogElement.prototype.close = function () { this.removeAttribute('open') }
+})
 afterEach(() => { cleanup(); vi.useRealTimers(); vi.restoreAllMocks() })
 const seed: SettingNote[] = [
   { id: 'a', title: '甲', body: '住在 [[海滨城]]，路过 [[旧街]]。再次 [[海滨城]]。', category: 'setting' },
@@ -385,13 +389,16 @@ describe('setting notes and graph', () => {
     fireEvent.click(screen.getByRole('button', { name: '搜索内容' }))
     fireEvent.change(screen.getByLabelText('搜索设定内容'), { target: { value: '路过' } })
     expect(within(screen.getByLabelText('搜索结果')).getByRole('button', { name: /甲/ })).toBeInTheDocument()
-    expect(screen.getByLabelText('搜索设定内容').closest('.setting-main')).not.toBeNull()
+    expect(screen.getByRole('dialog', { name: '搜索内容' })).toHaveClass('search-dialog')
+    expect(screen.getByRole('region', { name: '预览' })).toHaveTextContent('甲')
     fireEvent.change(screen.getByLabelText('搜索设定内容'), { target: { value: '故乡' } })
     expect(within(screen.getByLabelText('搜索结果')).getByRole('button', { name: /海滨城/ })).toBeInTheDocument()
     expect(within(screen.getByLabelText('设定条目')).getByRole('button', { name: '甲' })).toBeInTheDocument()
     fireEvent.change(screen.getByLabelText('搜索设定内容'), { target: { value: '不存在的条目' } })
     expect(screen.getByRole('status')).toHaveTextContent('没有找到相关条目')
     expect(within(screen.getByLabelText('搜索结果')).queryByRole('button')).toBeNull()
+    fireEvent(screen.getByRole('dialog', { name: '搜索内容' }), new Event('cancel', { cancelable: true }))
+    act(() => { vi.advanceTimersByTime(400) })
     fireEvent.click(screen.getByRole('button', { name: '关系图谱' }))
     fireEvent.click(screen.getByRole('button', { name: '放大图谱' }))
     expect(screen.getByRole('button', { name: '图谱归位' })).toHaveTextContent('120%')
@@ -400,6 +407,19 @@ describe('setting notes and graph', () => {
     fireEvent.keyDown(screen.getByRole('button', { name: '创建引用条目：旧街' }), { key: 'Enter' })
     expect(screen.getByLabelText('设定标题')).toHaveValue('旧街')
     expect(readSettingNotes().some(note => note.title === '旧街')).toBe(true)
+  })
+
+  it('returns to the graph underneath a cancelled content search', () => {
+    localStorage.setItem(settingStorageKey, JSON.stringify(seed))
+    render(<StudioSetting preview onTyping={() => {}} />)
+    fireEvent.click(screen.getByRole('button', { name: '关系图谱' }))
+    fireEvent.click(screen.getByRole('button', { name: '搜索内容' }))
+    expect(screen.getByRole('group', { name: '关系图谱画布' })).toBeInTheDocument()
+    fireEvent(screen.getByRole('dialog', { name: '搜索内容' }), new Event('cancel', { cancelable: true }))
+    act(() => { vi.advanceTimersByTime(400) })
+    expect(screen.queryByRole('dialog', { name: '搜索内容' })).not.toBeInTheDocument()
+    expect(screen.getByRole('group', { name: '关系图谱画布' })).toBeInTheDocument()
+    expect(readSettingNotes()).toEqual(seed)
   })
 
   it('reveals the sidebar on demand, preserves pinned visibility and returns keyboard focus on Escape', () => {

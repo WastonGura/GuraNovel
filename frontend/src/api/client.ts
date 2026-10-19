@@ -686,6 +686,7 @@ function errorFromEnvelope(status: number, value: unknown): ApiError {
 }
 
 interface RequestOptions {
+  rawBody?: Blob
   signal?: AbortSignal
   decodeError?: (status: number, value: unknown) => ApiError
 }
@@ -703,7 +704,7 @@ async function request<T>(
       method,
       credentials: 'same-origin',
       ...(options.signal === undefined ? {} : { signal: options.signal }),
-      ...(body === undefined ? {} : { headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }),
+      ...(options.rawBody ? { headers: { 'Content-Type': options.rawBody.type || 'application/octet-stream' }, body: options.rawBody } : body === undefined ? {} : { headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }),
     })
   } catch (error: unknown) {
     if (error instanceof ApiError) throw error
@@ -722,6 +723,14 @@ async function request<T>(
   }
   if (!response.ok) throw (options.decodeError ?? errorFromEnvelope)(response.status, payload)
   return decode(payload)
+}
+
+export function uploadNovelCover(file: File, signal?: AbortSignal): Promise<string> {
+  return request('POST', () => apiPath('covers'), value => {
+    const cover = string(object(value).cover)
+    if (!/^cover-upload:[a-f0-9]{64}$/.test(cover)) throw invalidResponse()
+    return cover
+  }, undefined, { rawBody: file, signal })
 }
 
 export function listProjects(): Promise<Project[]> {

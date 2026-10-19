@@ -10,6 +10,8 @@ test('creation modal contains keyboard focus, restores it and fits a small deskt
   const modal = page.getByRole('dialog', { name: '创建作品' })
   await expect(modal.getByLabel('标题', { exact: true })).toBeFocused()
   await page.keyboard.press('Shift+Tab')
+  await expect(modal.getByRole('button', { name: '更换封面', exact: true })).toBeFocused()
+  await page.keyboard.press('Shift+Tab')
   await expect(modal.getByRole('button', { name: '关闭创建作品' })).toBeFocused()
   await page.keyboard.press('Shift+Tab')
   await expect(modal.getByRole('button', { name: '创建作品', exact: true })).toBeFocused()
