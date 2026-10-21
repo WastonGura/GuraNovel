@@ -1,11 +1,48 @@
-import { act, cleanup, render, screen } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { MotionFrame, TextSweep, StreamText } from './StudioMotion'
+import { MotionFrame, TextMotionSurface, TextSweep, StreamText } from './StudioMotion'
 import { animateTextChange, DISSOLVE_MS, snapshotText, textMotionPhase, type TextSnapshot } from './studioTextParticles'
 
 afterEach(() => { cleanup(); vi.useRealTimers(); vi.restoreAllMocks(); vi.unstubAllGlobals() })
 
 describe('continuous studio motion', () => {
+  it('reveals the visible title input and reference editor instead of their measurement mirrors', () => {
+    vi.stubGlobal('CanvasRenderingContext2D', class {})
+    let tick!: FrameRequestCallback
+    vi.stubGlobal('requestAnimationFrame', vi.fn(callback => { tick = callback; return 1 }))
+    vi.stubGlobal('cancelAnimationFrame', vi.fn())
+    vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockReturnValue({ clearRect: vi.fn() } as unknown as CanvasRenderingContext2D)
+    const box = document.createElement('div')
+    box.innerHTML = '<span data-text-input><span data-sweep-text>旧港</span><input value="旧港"></span><div data-sweep-text data-text-editor contenteditable="true">港口正文</div>'
+    document.body.append(box)
+    const range = document.createRange()
+    range.getClientRects = () => [{ left: 0, right: 80, top: 0, bottom: 20, width: 80, height: 20 }] as unknown as DOMRectList
+    vi.spyOn(document, 'createRange').mockReturnValue(range)
+    const stop = animateTextChange(box, null)
+    tick(0)
+    expect(box.querySelector('input')?.style.mask).toContain('linear-gradient')
+    expect(box.querySelector<HTMLElement>('[data-text-input] [data-sweep-text]')?.style.mask).toBe('')
+    expect(box.querySelector<HTMLElement>('[data-text-editor]')?.style.mask).toContain('linear-gradient')
+    stop()
+    expect(box.querySelector('input')?.style.mask).toBe('')
+    box.remove()
+  })
+
+  it('interrupts an entry reveal as soon as the author writes without remounting the editor', () => {
+    vi.stubGlobal('CanvasRenderingContext2D', class {})
+    vi.stubGlobal('requestAnimationFrame', vi.fn(() => 1))
+    vi.stubGlobal('cancelAnimationFrame', vi.fn())
+    vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockReturnValue({ clearRect: vi.fn() } as unknown as CanvasRenderingContext2D)
+    const panel = (key: string) => <TextMotionSurface className="test-editor-motion" motionKey={key} interruptOnInput><textarea aria-label="文稿" defaultValue={key} /></TextMotionSurface>
+    const view = render(panel('first'))
+    const input = screen.getByRole('textbox', { name: '文稿' })
+    view.rerender(panel('second'))
+    expect(view.container.querySelector('[data-text-phase]')).toBeInTheDocument()
+    fireEvent.input(input)
+    expect(view.container.querySelector('[data-text-phase]')).toBeNull()
+    expect(screen.getByRole('textbox', { name: '文稿' })).toBe(input)
+  })
+
   it('dissolves only glyphs visible inside a scrolled text panel', () => {
     const box = document.createElement('div')
     box.innerHTML = '<div style="overflow-y:auto"><span data-sweep-text>可见藏</span></div>'

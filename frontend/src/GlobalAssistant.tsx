@@ -9,6 +9,8 @@ import {
 } from './api/studioAssistantClient'
 import './studio.css'
 import { ApiError } from './api/client'
+import SendIcon from './AssistantSendIcon'
+import { useAssistantResize } from './useAssistantResize'
 
 const assistantToolLabels: Record<string, string> = {
   get_project_summary: '工程状态概览',
@@ -39,13 +41,6 @@ function HideIcon() {
   )
 }
 
-function SendIcon() {
-  return (
-    <svg width="20" height="20" viewBox="15 15 20 20" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
-      <path d="M33.0333 17.4667C32.7417 17.175 32.3208 17.0833 31.9375 17.225L17.8542 22.4125C17.4625 22.5542 17.1958 22.9167 17.175 23.3333C17.15 23.75 17.3792 24.1375 17.75 24.325L22.7792 26.8417L26.725 22.8958L27.6083 23.7792L23.6625 27.725L26.1792 32.7542C26.3542 33.1083 26.7167 33.3292 27.1083 33.3292H27.1667C27.5833 33.3042 27.9417 33.0375 28.0875 32.65L33.275 18.5625C33.4167 18.1792 33.325 17.7583 33.0333 17.4667Z" fill="currentColor" />
-    </svg>
-  )
-}
 
 function AssistantIconButton({ icon, label, className = '', ...props }: ButtonHTMLAttributes<HTMLButtonElement> & { icon: 'hide' | 'send'; label: string }) {
   return (
@@ -135,6 +130,25 @@ function AssistantSession({
       return false
     }
   })
+  const resize = useAssistantResize({ enabled: open })
+  const wideOverlay = resize.width > window.innerWidth * .45
+  const expandedOverlay = window.innerWidth <= 1000
+    ? resize.height > Math.max(resize.minHeight, window.innerHeight * .56) || wideOverlay
+    : wideOverlay
+  useLayoutEffect(() => {
+    const root = document.documentElement.style
+    const previousWidth = root.getPropertyValue('--assistant-width'), previousHeight = root.getPropertyValue('--assistant-height')
+    root.setProperty('--assistant-width', `${resize.width}px`)
+    root.setProperty('--assistant-height', `${resize.height}px`)
+    return () => {
+      if (previousWidth) root.setProperty('--assistant-width', previousWidth); else root.removeProperty('--assistant-width')
+      if (previousHeight) root.setProperty('--assistant-height', previousHeight); else root.removeProperty('--assistant-height')
+    }
+  }, [resize.width, resize.height])
+  useLayoutEffect(() => {
+    document.documentElement.toggleAttribute('data-assistant-resizing', resize.isResizing)
+    return () => document.documentElement.removeAttribute('data-assistant-resizing')
+  }, [resize.isResizing])
 
   const [draft, setDraft] = useState(() => {
     try {
@@ -331,10 +345,11 @@ function AssistantSession({
 
   return (
     <aside
-      className={`studio-assistant${open ? ' is-open' : ''}${hidden && !open ? ' is-hidden' : ''}`}
+      className={`studio-assistant${open ? ' is-open' : ''}${resize.isResizing ? ' is-resizing' : ''}${expandedOverlay ? ' is-expanded-overlay' : ''}${wideOverlay ? ' is-wide' : ''}${hidden && !open ? ' is-hidden' : ''}`}
+      style={resize.style}
       aria-label="Gura 助手"
       onKeyDown={event => {
-        if (open && event.key === 'Escape') {
+        if (open && event.key === 'Escape' && !resize.isResizing) {
           event.stopPropagation()
           handleSetOpen(false)
         }
@@ -360,8 +375,8 @@ function AssistantSession({
         aria-label="与 Gura 对话"
         aria-hidden={!open}
         inert={!open}
-        onTransitionEnd={() => {
-          if (open) input.current?.focus({ preventScroll: true })
+        onTransitionEnd={event => {
+          if (open && event.target === event.currentTarget && event.propertyName === 'opacity') input.current?.focus({ preventScroll: true })
         }}
       >
         <header>
@@ -487,6 +502,7 @@ function AssistantSession({
           </div>
         </form>
       </div>
+      {open && <><div className="studio-assistant-resize is-left" {...resize.getHandleProps('left')} /><div className="studio-assistant-resize is-top" {...resize.getHandleProps('top')} /><div className="studio-assistant-resize is-corner" {...resize.getHandleProps('corner')}><svg width="12" height="12" viewBox="0 0 12 12" aria-hidden="true"><path d="M2 8 8 2M2 3 3 2" fill="none" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" /></svg></div></>}
     </aside>
   )
 }

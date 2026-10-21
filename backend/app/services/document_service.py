@@ -382,6 +382,15 @@ class DocumentService:
         )
         document.current_version = version
         self.session.add(version)
+        setting_comments = kwargs.get("setting_comments")
+        if setting_comments is not None:
+            if document.setting_collection_id is None:
+                raise ConflictError("Setting comments require a setting collection document.")
+            if version.id is None:
+                version.id = uuid4()
+            document.metadata_ = {**(document.metadata_ or {}), "comments": setting_comments,
+                                  "comments_source_version_id": str(version.id)}
+            version.metadata_ = {**(version.metadata_ or {}), "setting_comments": setting_comments}
         await self.session.flush()
         return version, (document.path, content), (version.snapshot_path or "", content)
 

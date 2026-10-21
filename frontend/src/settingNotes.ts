@@ -1,7 +1,7 @@
 import { reanchorComments, restoreOutlineComments, type OutlineComment } from './studioPreview'
 
 export type SettingCategory = 'setting' | 'world'
-export type SettingNote = { id: string; category: SettingCategory; title: string; body: string; comments?: OutlineComment[]; documentId?: string; versionId?: string }
+export type SettingNote = { id: string; category: SettingCategory; title: string; body: string; comments?: OutlineComment[]; documentId?: string; versionId?: string; localDraft?: boolean; creationRequestId?: string }
 export type SettingChangeSourceTask = {
   workflowRunId?: string
   chapterId?: string
@@ -26,6 +26,11 @@ export type SettingWorkspace = { notes: SettingNote[]; conversation: SettingConv
 export const emptySettingConversation = (): SettingConversation => ({ messages: [], draft: '', contextId: null, scrollTop: 0 })
 export const settingStorageKey = 'guranovel:setting-preview:v1'
 export const categoryNames = { setting: '设定', world: '世界观' }
+
+export function categoryFromDocument(doc: { type: string; metadata?: Record<string, unknown> }): SettingCategory {
+  if (doc.metadata?.category === 'world' || doc.metadata?.category === 'setting') return doc.metadata.category
+  return ['world_overview', 'power_system', 'factions', 'geography', 'history'].includes(doc.type) ? 'world' : 'setting'
+}
 
 export function stagedSettingComments(notes: SettingNote[], conversation: SettingConversation) {
   return (conversation.stagedComments || []).flatMap(({ noteId, commentId }) => {

@@ -54,3 +54,51 @@ it('does not open a search result when Enter confirms an IME composition', () =>
   expect(select).not.toHaveBeenCalled()
   expect(screen.getByRole('dialog')).not.toHaveClass('is-closing')
 })
+
+it('keeps a protected document and the picker open when the selection guard fails', async () => {
+  let finish!: (allowed: boolean) => void
+  const onBeforeSelect = vi.fn(() => new Promise<boolean>(resolve => { finish = resolve }))
+  const onSelect = vi.fn()
+  render(<SearchDialog title="关联作品" query="" onQuery={vi.fn()} inputLabel="查询" placeholder="查询" items={items}
+    onBeforeSelect={onBeforeSelect} onSelect={onSelect} onClose={vi.fn()} renderPreview={() => null} />)
+  const result = screen.getByRole('button', { name: '海港' })
+  result.focus()
+  fireEvent.click(result)
+  fireEvent.click(result)
+  expect(onBeforeSelect).toHaveBeenCalledTimes(1)
+  expect(screen.getByRole('dialog')).not.toHaveClass('is-closing')
+  await act(async () => { finish(false) })
+  expect(screen.getByRole('dialog')).not.toHaveClass('is-closing')
+  expect(result).toHaveFocus()
+  expect(onSelect).not.toHaveBeenCalled()
+})
+
+it('protects a document before dismissing and opening its selected destination', async () => {
+  vi.useFakeTimers()
+  let finish!: (allowed: boolean) => void
+  const onSelect = vi.fn(), onClose = vi.fn()
+  render(<SearchDialog title="关联作品" query="" onQuery={vi.fn()} inputLabel="查询" placeholder="查询" items={items}
+    onBeforeSelect={() => new Promise<boolean>(resolve => { finish = resolve })} onSelect={onSelect} onClose={onClose} renderPreview={() => null} />)
+  fireEvent.click(screen.getByRole('button', { name: '海港' }))
+  expect(screen.getByRole('dialog')).not.toHaveClass('is-closing')
+  await act(async () => { finish(true) })
+  expect(screen.getByRole('dialog')).toHaveClass('is-closing')
+  expect(onSelect).not.toHaveBeenCalled()
+  act(() => { vi.advanceTimersByTime(800) })
+  expect(onClose).toHaveBeenCalledTimes(1)
+  expect(onSelect).toHaveBeenCalledExactlyOnceWith(items[0])
+})
+
+it('ignores a late successful guard after the author dismisses the search window', async () => {
+  vi.useFakeTimers()
+  let finish!: (allowed: boolean) => void
+  const onSelect = vi.fn(), onClose = vi.fn()
+  render(<SearchDialog title="关联作品" query="" onQuery={vi.fn()} inputLabel="查询" placeholder="查询" items={items}
+    onBeforeSelect={() => new Promise<boolean>(resolve => { finish = resolve })} onSelect={onSelect} onClose={onClose} renderPreview={() => null} />)
+  fireEvent.click(screen.getByRole('button', { name: '海港' }))
+  fireEvent.click(screen.getByRole('button', { name: '关闭关联作品' }))
+  await act(async () => { finish(true) })
+  act(() => { vi.advanceTimersByTime(800) })
+  expect(onClose).toHaveBeenCalledTimes(1)
+  expect(onSelect).not.toHaveBeenCalled()
+})

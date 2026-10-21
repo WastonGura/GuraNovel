@@ -1,0 +1,43 @@
+.picker-dialog.setting-trash-dialog { border-radius: 24px; height: min(620px, calc(100dvh - 48px)); overflow: hidden; width: min(680px, calc(100vw - 32px)); }
+.picker-dialog.setting-trash-dialog > div { display: flex; flex-direction: column; height: 100%; min-height: 0; padding: 24px 28px 18px; }
+.setting-trash-dialog header { flex-shrink: 0; margin-bottom: 16px; }
+.setting-trash-search { align-items: center; border-bottom: 1px solid #eee; display: flex; flex-shrink: 0; gap: 14px; padding: 4px 0 20px; }
+.setting-trash-search > img { height: 22px; opacity: .55; width: 22px; }
+.setting-trash-search input { background: transparent; border: 0; border-radius: 0; font-size: 17px; min-width: 0; padding: 4px 0; }
+.setting-trash-search input:focus { outline: none; }
+.setting-trash-search:focus-within > img { opacity: 1; }
+.setting-trash-search input::placeholder { color: #aaa; }
+.setting-trash-search input::-webkit-search-cancel-button { appearance: none; }
+.setting-trash-content { flex: 1; min-height: 0; overflow: auto; overscroll-behavior: contain; padding-top: 12px; scrollbar-width: thin; }
+.setting-trash-select-all { align-items: center; color: #888; display: flex; font-size: 12px; gap: 12px; padding: 8px 6px 12px; }
+.setting-trash-dialog input[type="checkbox"] { accent-color: #222; border-radius: 3px; flex-shrink: 0; height: 15px; margin: 0; padding: 0; width: 15px; }
+.setting-trash-list { list-style: none; margin: 0; padding: 0; }
+.setting-trash-list > li { align-items: center; border-radius: 10px; display: flex; gap: 12px; min-height: 74px; padding: 12px 6px; }
+.setting-trash-list > li + li { border-top: 1px solid #f3f3f3; }
+.setting-trash-list > li > img { height: 22px; opacity: .5; width: 22px; }
+.setting-trash-copy { flex: 1; min-width: 0; }
+.setting-trash-copy strong { color: #333; display: block; font-size: 14px; font-weight: 500; line-height: 1.6; overflow-wrap: anywhere; }
+.setting-trash-copy > span { color: #999; display: block; font-size: 11px; line-height: 1.5; margin-top: 5px; }
+.setting-trash-dialog .setting-trash-restore, .setting-trash-empty button { background: transparent; border: 0; border-radius: 0; color: #888; flex-shrink: 0; font-size: 13px; min-height: 36px; padding: 6px 2px; transition: color 160ms; }
+.setting-trash-dialog .setting-trash-restore:hover:not(:disabled), .setting-trash-empty button:hover { background: transparent; color: #171717; text-decoration: underline; text-underline-offset: 5px; }
+.setting-trash-dialog button:disabled { cursor: default; opacity: .4; }
+.setting-trash-empty { color: #999; font-size: 14px; line-height: 1.8; margin: 0; padding: 80px 12px; text-align: center; }
+.setting-trash-empty p { margin: 0 0 10px; }
+.setting-trash-error { color: #555; font-size: 12px; line-height: 1.7; margin: 12px 0; }
+.setting-trash-footer { align-items: center; border-top: 1px solid #eee; display: flex; flex-shrink: 0; gap: 16px; justify-content: space-between; min-height: 62px; padding-top: 14px; }
+.setting-trash-footer > span { color: #999; font-size: 11px; }
+.setting-trash-dialog .setting-trash-restore-selected { background: #222; border: 0; border-radius: 24px; color: #fff; flex-shrink: 0; font-size: 12px; min-height: 36px; padding: 9px 18px; }
+.setting-trash-dialog .setting-trash-restore-selected:hover:not(:disabled) { background: #000; color: #fff; }
+.setting-undo-toast { animation: setting-toast-in 220ms cubic-bezier(.2, .75, .25, 1) both; background: #fff; border: 1px solid #e8e8e8; border-radius: 14px; bottom: 28px; box-shadow: 0 8px 32px #0001, 0 2px 6px #0001; color: #555; font-size: 13px; left: 50%; max-width: calc(100vw - 32px); padding: 8px 12px 8px 18px; position: fixed; transform: translateX(-50%); z-index: 35; }
+.setting-undo-toast > div { align-items: center; display: flex; gap: 10px; min-height: 32px; }
+.setting-undo-toast button { background: transparent; border: 0; border-radius: 0; color: #555; font: inherit; min-height: 32px; padding: 5px 2px; white-space: nowrap; }
+.setting-undo-toast button:hover:not(:disabled) { background: transparent; color: #111; text-decoration: underline; text-underline-offset: 4px; }
+.setting-undo-toast button:focus-visible { outline: 1px solid #888; outline-offset: 3px; }
+.setting-undo-toast button:disabled { cursor: wait; opacity: .5; }
+.setting-undo-toast .setting-undo-dismiss { color: #999; font-size: 19px; margin-left: 6px; min-width: 28px; }
+.setting-undo-toast p { color: #777; font-size: 11px; line-height: 1.6; margin: 4px 0 6px; max-width: 320px; }
+.setting-undo-toast.is-closing { animation: setting-toast-out 180ms ease both; pointer-events: none; }
+@keyframes setting-toast-in { from { opacity: 0; transform: translate(-50%, 8px); } to { opacity: 1; transform: translate(-50%, 0); } }
+@keyframes setting-toast-out { from { opacity: 1; transform: translate(-50%, 0); } to { opacity: 0; transform: translate(-50%, 6px); } }
+@media (max-width: 540px) { .picker-dialog.setting-trash-dialog > div { padding: 20px 18px 14px; } .setting-trash-list > li { gap: 9px; } .setting-trash-list > li > img { display: none; } .setting-trash-footer { gap: 8px; } }
+@media (prefers-reduced-motion: reduce) { .setting-undo-toast, .setting-undo-toast.is-closing { animation: none; } .setting-trash-restore { transition: none; } }

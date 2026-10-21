@@ -104,7 +104,7 @@ function useTextMotion(frame: RefObject<HTMLElement | null>, key?: string) {
   useLayoutEffect(() => () => stop.current(), [])
 }
 
-type TextMotionSurfaceProps = { children: ReactNode; className: string; motionKey?: string; revealAfter?: number }
+type TextMotionSurfaceProps = { children: ReactNode; className: string; motionKey?: string; revealAfter?: number; interruptOnInput?: boolean }
 
 export class TextMotionSurface extends Component<TextMotionSurfaceProps, Record<string, never>, TextSnapshot | null> {
   private frame = createRef<HTMLDivElement>()
@@ -126,8 +126,10 @@ export class TextMotionSurface extends Component<TextMotionSurfaceProps, Record<
   componentWillUnmount() { this.stop() }
 
   render() {
-    const { children, className, motionKey } = this.props
-    return <div ref={this.frame} data-sweep-group={motionKey === undefined ? undefined : ''} className={className}>{children}</div>
+    const { children, className, motionKey, interruptOnInput } = this.props
+    return <div ref={this.frame} data-sweep-group={motionKey === undefined ? undefined : ''} className={className}
+      onPointerDownCapture={interruptOnInput ? () => this.stop() : undefined} onKeyDownCapture={interruptOnInput ? () => this.stop() : undefined}
+      onBeforeInputCapture={interruptOnInput ? () => this.stop() : undefined} onInputCapture={interruptOnInput ? () => this.stop() : undefined}>{children}</div>
   }
 }
 

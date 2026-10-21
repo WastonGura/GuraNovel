@@ -209,7 +209,6 @@ describe('SettingCollectionWorkspace', () => {
     vi.mocked(client.patchDocument).mockRejectedValueOnce(new Error('offline'))
     renderWorkspace()
     await screen.findByText('天穹纪元设定集')
-    fireEvent.click(screen.getByRole('button', { name: /^编辑$/ }))
     fireEvent.change(screen.getByRole('textbox', { name: '设定标题' }), { target: { value: '不能丢失的标题' } })
     await act(async () => { fireEvent.click(screen.getByRole('link', { name: '回到书架' })) })
     expect(screen.queryByTestId('home-page')).not.toBeInTheDocument()
@@ -228,7 +227,7 @@ describe('SettingCollectionWorkspace', () => {
       expect(screen.getAllByText('已归档 · 只读').length).toBeGreaterThan(0)
     })
 
-    const manualAddBtn = screen.getByRole('button', { name: '手动新建条目' })
+    const manualAddBtn = screen.getByRole('button', { name: '新建内容' })
     expect(manualAddBtn).toBeDisabled()
   })
 
@@ -239,17 +238,13 @@ describe('SettingCollectionWorkspace', () => {
       expect(screen.getByText('天穹纪元设定集')).toBeInTheDocument()
     })
 
-    // Click edit button
-    const editButton = screen.getByRole('button', { name: '编辑' })
-    fireEvent.click(editButton)
-
     // Simulate 409 conflict upon saving content
     mockedWriteDocument.mockRejectedValueOnce(
       new client.ApiError(409, 'conflict', 'The document has a newer version.')
     )
 
-    const textarea = screen.getByLabelText('设定正文')
-    fireEvent.change(textarea, { target: { value: '本地未提交修改内容' } })
+    const editor = screen.getByLabelText('设定正文')
+    fireEvent.input(editor, { target: { textContent: '本地未提交修改内容' } })
 
     await waitFor(() => {
       expect(screen.getByRole('alert')).toBeInTheDocument()
@@ -269,14 +264,13 @@ describe('SettingCollectionWorkspace', () => {
       expect(screen.getByText('天穹纪元设定集')).toBeInTheDocument()
     })
 
-    fireEvent.click(screen.getByRole('button', { name: '编辑' }))
 
     mockedWriteDocument.mockRejectedValueOnce(
       new client.ApiError(409, 'conflict', 'The document has a newer version.')
     )
 
-    const textarea = screen.getByLabelText('设定正文')
-    fireEvent.change(textarea, { target: { value: '冲突草稿' } })
+    const editor = screen.getByLabelText('设定正文')
+    fireEvent.input(editor, { target: { textContent: '冲突草稿' } })
 
     await waitFor(() => {
       expect(screen.getByRole('alert')).toBeInTheDocument()
@@ -302,7 +296,7 @@ describe('SettingCollectionWorkspace', () => {
       expect(screen.queryByText(/版本冲突/)).not.toBeInTheDocument()
     })
 
-    expect(screen.getByRole('textbox', { name: '设定正文' })).toHaveValue('服务端更新后的最新内容。')
+    expect(screen.getByRole('textbox', { name: '设定正文' })).toHaveTextContent('服务端更新后的最新内容。')
     expect(sessionStorage.getItem('guranovel:setting-draft-recovery:doc-char-1')).toBeNull()
     expect(screen.queryByText('已保存')).not.toBeInTheDocument()
   })
@@ -329,18 +323,102 @@ describe('SettingCollectionWorkspace', () => {
       expect(screen.getByText('天穹纪元设定集')).toBeInTheDocument()
     })
 
-    const manualAddBtn = screen.getByRole('button', { name: '手动新建条目' })
+    const manualAddBtn = screen.getByRole('button', { name: '新建内容' })
     await act(async () => {
       fireEvent.click(manualAddBtn)
     })
+    expect(mockedCreateCollectionDocument).not.toHaveBeenCalled()
+    fireEvent.change(screen.getByRole('textbox', { name: '设定标题' }), { target: { value: '叶清寒' } })
+    await waitFor(() => expect(mockedCreateCollectionDocument).toHaveBeenCalled())
 
     expect(mockedCreateCollectionDocument).toHaveBeenCalledWith(
       'col-123',
       expect.objectContaining({
         type: 'character_profile',
-        metadata: { category: 'setting' },
+        client_request_id: expect.any(String),
+        metadata: { category: 'setting', comments: [] },
       })
     )
+  })
+
+  it.each(['reload', 'overwrite'] as const)('resolves a newly created entry conflict with its stable local identity using %s', async action => {
+    const created = { ...mockDocs[0], id: 'doc-new-stable', title: '新角色', current_version_id: 'ver-created' }
+    mockedListCollectionDocuments.mockResolvedValue([])
+    mockedCreateCollectionDocument.mockResolvedValue(created)
+    renderWorkspace()
+    await screen.findByText('天穹纪元设定集')
+    fireEvent.click(screen.getByRole('button', { name: '新建内容' }))
+    fireEvent.change(screen.getByLabelText('设定标题'), { target: { value: created.title } })
+    fireEvent.input(screen.getByLabelText('设定正文'), { target: { textContent: '创建时的原文' } })
+    await waitFor(() => expect(mockedCreateCollectionDocument).toHaveBeenCalledTimes(1))
+    await act(async () => { await Promise.resolve() })
+    mockedWriteDocument.mockRejectedValueOnce(new client.ApiError(409, 'conflict', 'newer version'))
+    fireEvent.input(screen.getByLabelText('设定正文'), { target: { textContent: '冲突时的本地草稿' } })
+    await screen.findByText('版本冲突')
+    mockedGetDocument.mockResolvedValue({ ...created, current_version_id: 'ver-remote' })
+    mockedReadDocumentContent.mockResolvedValue({ document_id: created.id, version_id: 'ver-remote', content: '远端最新正文' })
+    const recoveredVersion = action === 'reload' ? 'ver-remote' : 'ver-overwritten'
+    if (action === 'overwrite') mockedWriteDocument.mockResolvedValueOnce(documentVersion({ id: recoveredVersion, document_id: created.id }))
+    fireEvent.click(screen.getByRole('button', { name: action === 'reload' ? '拉取最新版本覆盖草稿' : '以本地草稿覆盖服务端' }))
+    await waitFor(() => expect(screen.queryByText('版本冲突')).not.toBeInTheDocument())
+    expect(screen.getByLabelText('设定正文')).toHaveTextContent(action === 'reload' ? '远端最新正文' : '冲突时的本地草稿')
+    fireEvent.input(screen.getByLabelText('设定正文'), { target: { textContent: '解决冲突后继续写' } })
+    await waitFor(() => expect(mockedWriteDocument).toHaveBeenLastCalledWith(created.id, expect.objectContaining({
+      content: '解决冲突后继续写', expected_current_version_id: recoveredVersion,
+    })))
+  })
+
+  it('overwrites with the latest local draft and preserves further writing while the overwrite response is pending', async () => {
+    renderWorkspace()
+    await screen.findByText('天穹纪元设定集')
+    mockedWriteDocument.mockRejectedValueOnce(new client.ApiError(409, 'conflict', 'newer version'))
+    fireEvent.input(screen.getByLabelText('设定正文'), { target: { textContent: '第一次保存失败的草稿' } })
+    await screen.findByText('版本冲突')
+    mockedGetDocument.mockResolvedValue({ ...mockDocs[0], current_version_id: 'ver-remote' })
+    let finishOverwrite!: () => void
+    mockedWriteDocument.mockImplementationOnce(() => new Promise(resolve => { finishOverwrite = () => resolve(documentVersion({ id: 'ver-overwritten' })) }))
+    fireEvent.input(screen.getByLabelText('设定正文'), { target: { textContent: '点击覆盖前继续写的最新草稿' } })
+    fireEvent.click(screen.getByRole('button', { name: '以本地草稿覆盖服务端' }))
+    await waitFor(() => expect(mockedWriteDocument).toHaveBeenNthCalledWith(2, 'doc-char-1', expect.objectContaining({
+      content: '点击覆盖前继续写的最新草稿', expected_current_version_id: 'ver-remote',
+    })))
+    fireEvent.input(screen.getByLabelText('设定正文'), { target: { textContent: '覆盖请求期间继续写的内容' } })
+    await act(async () => { finishOverwrite() })
+    expect(screen.getByLabelText('设定正文')).toHaveTextContent('覆盖请求期间继续写的内容')
+    await waitFor(() => expect(mockedWriteDocument).toHaveBeenLastCalledWith('doc-char-1', expect.objectContaining({
+      content: '覆盖请求期间继续写的内容', expected_current_version_id: 'ver-overwritten',
+    })))
+  })
+
+  it('ignores an older autosave acknowledgement after an explicit overwrite and a newer save have completed', async () => {
+    renderWorkspace()
+    await screen.findByText('天穹纪元设定集')
+    mockedWriteDocument.mockRejectedValueOnce(new client.ApiError(409, 'conflict', 'newer version'))
+    fireEvent.input(screen.getByLabelText('设定正文'), { target: { textContent: '首次冲突草稿' } })
+    await screen.findByText('版本冲突')
+    let finishLookup!: () => void, finishOldAcknowledgement!: () => void
+    mockedGetDocument.mockImplementationOnce(() => new Promise(resolve => {
+      finishLookup = () => resolve({ ...mockDocs[0], current_version_id: 'ver-ordinary-committed' })
+    }))
+    mockedWriteDocument.mockImplementationOnce(() => new Promise(resolve => {
+      // The write committed before the overwrite lookup; only its response is delayed.
+      finishOldAcknowledgement = () => resolve(documentVersion({ id: 'ver-ordinary-committed' }))
+    })).mockResolvedValueOnce(documentVersion({ id: 'ver-overwritten' }))
+      .mockResolvedValueOnce(documentVersion({ id: 'ver-newer-saved' }))
+    fireEvent.input(screen.getByLabelText('设定正文'), { target: { textContent: '点击覆盖时的草稿' } })
+    fireEvent.click(screen.getByRole('button', { name: '以本地草稿覆盖服务端' }))
+    fireEvent.input(screen.getByLabelText('设定正文'), { target: { textContent: '覆盖等待期间继续写' } })
+    await waitFor(() => expect(mockedWriteDocument).toHaveBeenNthCalledWith(2, 'doc-char-1', expect.objectContaining({ content: '覆盖等待期间继续写' })))
+    await act(async () => { finishLookup() })
+    await waitFor(() => expect(mockedWriteDocument).toHaveBeenNthCalledWith(4, 'doc-char-1', expect.objectContaining({
+      content: '覆盖等待期间继续写', expected_current_version_id: 'ver-overwritten',
+    })))
+    await act(async () => { finishOldAcknowledgement() })
+    expect(screen.getByLabelText('设定正文')).toHaveTextContent('覆盖等待期间继续写')
+    fireEvent.input(screen.getByLabelText('设定正文'), { target: { textContent: '迟到响应之后继续写' } })
+    await waitFor(() => expect(mockedWriteDocument).toHaveBeenLastCalledWith('doc-char-1', expect.objectContaining({
+      content: '迟到响应之后继续写', expected_current_version_id: 'ver-newer-saved',
+    })))
   })
 
   it('supports deep linking via url search params', async () => {
@@ -363,7 +441,7 @@ describe('SettingCollectionWorkspace', () => {
       expect(screen.getByText('天穹纪元设定集')).toBeInTheDocument()
     })
 
-    expect(screen.getByText('本地暂存的未提交草稿。')).toBeInTheDocument()
+    expect(screen.getByRole('textbox', { name: '设定正文' })).toHaveTextContent('本地暂存的未提交草稿。')
     sessionStorage.removeItem('guranovel:setting-draft-recovery:doc-char-1')
   })
 
@@ -421,6 +499,7 @@ describe('SettingCollectionWorkspace', () => {
     expect(screen.queryByRole('button', { name: '示例回复' })).not.toBeInTheDocument()
     expect(screen.queryByRole('button', { name: '接受此条' })).not.toBeInTheDocument()
     expect(mockedApplySettingProposal).not.toHaveBeenCalled()
-    expect(screen.getByPlaceholderText('设定对话暂不可用')).toBeDisabled()
+    expect(screen.getByRole('textbox', { name: '设定正文' })).toBeEnabled()
+    expect(screen.queryByPlaceholderText('设定对话暂不可用')).not.toBeVisible()
   })
 })

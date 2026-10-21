@@ -44,6 +44,7 @@ class DocumentResponse(BaseModel):
     metadata_: dict = Field(default_factory=dict, serialization_alias="metadata")
     created_at: datetime
     updated_at: datetime
+    deleted_at: datetime | None = None
 
 
 class DocumentContentResponse(BaseModel):

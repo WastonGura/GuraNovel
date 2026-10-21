@@ -16,6 +16,13 @@ const seed: SettingNote[] = [
   { id: 'b', title: '海滨城', body: '[[甲]] 的故乡。', category: 'world' },
 ]
 const render = (ui: ReactElement) => renderView(ui, { wrapper: MemoryRouter })
+function inputBodyAtEnd(editor: HTMLElement, text: string) {
+  editor.focus()
+  editor.textContent = text
+  const range = document.createRange(); range.selectNodeContents(editor); range.collapse(false)
+  const selection = window.getSelection()!; selection.removeAllRanges(); selection.addRange(range)
+  fireEvent.input(editor)
+}
 function marquee(list: HTMLElement, first: number, last = first) {
   const rows = [...list.querySelectorAll<HTMLElement>('[data-note-id]')]
   vi.spyOn(list, 'getBoundingClientRect').mockReturnValue(new DOMRect(0, 0, 200, 300))
@@ -33,12 +40,11 @@ describe('setting notes and graph', () => {
       .mockImplementationOnce(() => new Promise<boolean>(resolve => { finishSecond = resolve }))
     const ref = createRef<{ flush: () => Promise<boolean> }>()
     render(<StudioSetting preview={false} ref={ref} backendNotes={[seed[0]]} onRenameNote={rename} onSaveNoteContent={vi.fn()} />)
-    fireEvent.click(screen.getByRole('button', { name: '编辑' }))
     const title = screen.getByRole('textbox', { name: '设定标题' })
     fireEvent.change(title, { target: { value: '第一次标题' } }); fireEvent.blur(title)
-    await act(async () => {})
+    await act(async () => { vi.advanceTimersByTime(450) })
     fireEvent.change(title, { target: { value: '最终标题' } }); fireEvent.blur(title)
-    await act(async () => {})
+    await act(async () => { vi.advanceTimersByTime(450) })
     expect(rename).toHaveBeenCalledTimes(1)
     let done = false
     const flushed = ref.current!.flush().then(result => { done = result })
@@ -71,8 +77,7 @@ describe('setting notes and graph', () => {
     const save = vi.fn().mockResolvedValue({ versionId: 'saved-v2' })
     const ref = createRef<{ flush: () => Promise<boolean> }>()
     render(<StudioSetting preview={false} ref={ref} backendNotes={[{ ...seed[0], versionId: 'v1', comments: [comment] }]} onSaveNoteContent={save} />)
-    fireEvent.click(screen.getByRole('button', { name: '编辑' }))
-    fireEvent.change(screen.getByLabelText('设定正文'), { target: { value: seed[0].body.slice(1) } })
+    fireEvent.input(screen.getByLabelText('设定正文'), { target: { textContent: seed[0].body.slice(1) } })
     await act(async () => { await ref.current!.flush() })
     expect(save).toHaveBeenCalledWith('a', seed[0].body.slice(1), 'v1', [expect.objectContaining({ text: '保留此意见', quote: '住', orphaned: true })])
   })
@@ -91,8 +96,7 @@ describe('setting notes and graph', () => {
     const save = vi.fn().mockResolvedValue({ versionId: 'saved-v2' })
     const ref = createRef<{ flush: () => Promise<boolean> }>()
     render(<StudioSetting preview={false} ref={ref} backendNotes={[{ ...seed[0], versionId: 'v1', comments }]} onSaveNoteContent={save} />)
-    fireEvent.click(screen.getByRole('button', { name: '编辑' }))
-    fireEvent.change(screen.getByLabelText('设定正文'), { target: { value: seed[0].body + '新增' } })
+    fireEvent.input(screen.getByLabelText('设定正文'), { target: { textContent: seed[0].body + '新增' } })
     await act(async () => { expect(await ref.current!.flush()).toBe(true) })
     expect(save).toHaveBeenCalledWith('a', seed[0].body + '新增', 'v1', comments)
   })
@@ -123,13 +127,14 @@ describe('setting notes and graph', () => {
     expect(document.querySelector('.setting-note-menu')).toHaveClass('is-closing')
     act(() => { vi.advanceTimersByTime(400) })
     await act(async () => { fireEvent.click(screen.getByRole('button', { name: '确认删除' })) })
-    await act(async () => { fireEvent.click(screen.getByRole('button', { name: '撤销删除' })) })
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: '撤销' })) })
     expect(restore).toHaveBeenCalledWith(['a'])
     expect(within(list).queryByRole('button', { name: '甲' })).not.toBeInTheDocument()
-    expect(screen.getByRole('alert')).toHaveTextContent('恢复失败')
-    await act(async () => { fireEvent.click(screen.getByRole('button', { name: '撤销删除' })) })
+    expect(screen.getByRole('alert')).toHaveTextContent('未能确认')
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: '重试撤销' })) })
     expect(within(list).getByRole('button', { name: '甲' })).toBeInTheDocument()
-    expect(screen.queryByRole('button', { name: '撤销删除' })).not.toBeInTheDocument()
+    act(() => { vi.advanceTimersByTime(400) })
+    expect(screen.queryByRole('button', { name: '重试撤销' })).not.toBeInTheDocument()
   })
 
   it('retains server-backed notes when deletion fails instead of offering a false undo', async () => {
@@ -184,7 +189,12 @@ describe('setting notes and graph', () => {
     expect(within(list).getByRole('button', { name: '甲' })).toHaveAttribute('aria-pressed', 'false')
     fireEvent.click(screen.getByRole('button', { name: '编辑' }))
     const editor = screen.getByRole('textbox', { name: '设定正文' })
-    fireEvent.change(editor, { target: { value: '@' } })
+    expect(screen.queryByRole('button', { name: /引用条目 @/ })).not.toBeInTheDocument()
+    inputBodyAtEnd(editor, '[[')
+    expect(screen.queryByRole('listbox')).not.toBeInTheDocument()
+    fireEvent.keyDown(editor, { key: ' ', ctrlKey: true })
+    expect(screen.queryByRole('listbox')).not.toBeInTheDocument()
+    inputBodyAtEnd(editor, '@')
     fireEvent.keyDown(editor, { key: 'ArrowUp' })
     const search = screen.getByRole('textbox', { name: '检索引用条目' })
     expect(search).toHaveFocus()
@@ -195,7 +205,7 @@ describe('setting notes and graph', () => {
     expect(within(screen.getByRole('listbox')).queryByRole('button', { name: '关闭' })).not.toBeInTheDocument()
     fireEvent.keyDown(search, { key: 'Enter' })
     expect(readSettingNotes()[0].body).toBe('[[乙]]')
-    fireEvent.click(screen.getByRole('button', { name: /引用条目 @/ }))
+    inputBodyAtEnd(editor, '@')
     fireEvent.pointerDown(document.body)
     expect(screen.queryByRole('listbox')).not.toBeInTheDocument()
   })
@@ -210,7 +220,7 @@ describe('setting notes and graph', () => {
     fireEvent.click(within(document.querySelector('.setting-note-body') as HTMLElement).getAllByRole('button', { name: '海滨城' })[0])
     expect(screen.getByRole('heading', { name: '海滨城' })).toBeInTheDocument()
     fireEvent.click(screen.getByRole('button', { name: '编辑' }))
-    fireEvent.change(screen.getByRole('textbox', { name: '设定正文' }), { target: { value: '保留编辑内容。' } })
+    fireEvent.input(screen.getByRole('textbox', { name: '设定正文' }), { target: { textContent: '保留编辑内容。' } })
     fireEvent.click(screen.getByRole('button', { name: '历史后退' }))
     expect(screen.getByRole('heading', { name: '甲' })).toBeInTheDocument()
     expect(readSettingNotes()[1].body).toBe('保留编辑内容。')
@@ -232,8 +242,8 @@ describe('setting notes and graph', () => {
     expect(readSettingNotes()[0].comments?.[0]).toMatchObject({ quote: '在 [[海滨城]]，路', start: 1, text: '说明这个地点' })
     selection.removeAllRanges()
     fireEvent.click(screen.getByRole('button', { name: '编辑' }))
-    const editor = screen.getByRole('textbox', { name: '设定正文' }) as HTMLTextAreaElement
-    fireEvent.change(editor, { target: { value: `${seed[0].body}@海` } })
+    const editor = screen.getByRole('textbox', { name: '设定正文' })
+    inputBodyAtEnd(editor, `${seed[0].body}@海`)
     expect(screen.getByRole('option', { name: '海滨城' })).toBeInTheDocument()
     fireEvent.keyDown(editor, { key: 'Enter' })
     expect(readSettingNotes()[0].body).toBe(`${seed[0].body}[[海滨城]]`)
@@ -298,14 +308,18 @@ describe('setting notes and graph', () => {
     localStorage.setItem(settingStorageKey, JSON.stringify({ notes: seed, conversation: { ...emptySettingConversation(), draft: '另一段还没发送的想法' } }))
     const view = render(<StudioSetting preview hidden={false} onTyping={() => {}} />)
     fireEvent.click(screen.getByRole('button', { name: '编辑' }))
-    const editor = screen.getByRole('textbox', { name: '设定正文' }) as HTMLTextAreaElement
-    editor.focus(); editor.setSelectionRange(3, 6); fireEvent.pointerUp(editor)
+    const editor = screen.getByRole('textbox', { name: '设定正文' })
+    editor.focus()
+    const firstText = document.createTreeWalker(editor, NodeFilter.SHOW_TEXT).nextNode()!
+    const range = document.createRange(); range.setStart(firstText, 0); range.setEnd(firstText, 2)
+    const selection = window.getSelection()!; selection.removeAllRanges(); selection.addRange(range)
+    fireEvent.pointerUp(editor)
     expect(readSettingNotes()[0].comments).toBeUndefined()
     fireEvent.click(screen.getByRole('button', { name: '评论' }))
     fireEvent.change(screen.getByRole('textbox', { name: '给 Agent 的修改意见' }), { target: { value: '解释这个地方与角色的联系' } })
-    const original = editor.value
-    fireEvent.change(editor, { target: { value: `新增。${original}` } })
-    expect(readSettingNotes()[0].comments?.[0]).toMatchObject({ start: 6, end: 9, quote: original.slice(3, 6), text: '解释这个地方与角色的联系' })
+    const original = readSettingNotes()[0].body
+    fireEvent.input(editor, { target: { textContent: `新增。${original}` } })
+    expect(readSettingNotes()[0].comments?.[0]).toMatchObject({ start: 3, end: 5, quote: original.slice(0, 2), text: '解释这个地方与角色的联系' })
     view.unmount()
     const stagedView = render(<StudioSetting preview hidden={false} onTyping={() => {}} />)
     fireEvent.click(screen.getByRole('button', { name: '编辑' }))
@@ -327,7 +341,7 @@ describe('setting notes and graph', () => {
     expect(sent.conversation.stagedComments).toEqual([])
     expect(sent.notes[0].comments?.[0].submitted).toBe(true)
     expect(sent.conversation.messages).toHaveLength(1)
-    expect(sent.conversation.messages[0].text).toContain(`引用：${original.slice(3, 6)}`)
+    expect(sent.conversation.messages[0].text).toContain(`引用：${original.slice(0, 2)}`)
     expect(sent.conversation.messages[0].text).toContain('并补充他的童年')
     expect(sent.conversation.messages[0].text).toContain('另一段还没发送的想法')
     fireEvent.click(screen.getByRole('button', { name: '正在讨论 · 甲' }))
@@ -406,7 +420,7 @@ describe('setting notes and graph', () => {
     fireEvent.click(screen.getByRole('button', { name: '编辑' }))
     fireEvent.change(screen.getByLabelText('设定标题'), { target: { value: '海风城' } })
     fireEvent.blur(screen.getByLabelText('设定标题'))
-    fireEvent.change(screen.getByLabelText('设定正文'), { target: { value: '新的内容，提到 [[甲]]。' } })
+    fireEvent.input(screen.getByLabelText('设定正文'), { target: { textContent: '新的内容，提到 [[甲]]。' } })
     fireEvent.click(screen.getByRole('button', { name: '阅读' }))
     const saved = readSettingNotes()
     expect(saved[0].body).toBe('住在 [[海风城]]，路过 [[旧街]]。再次 [[海风城]]。')
@@ -499,11 +513,11 @@ describe('setting notes and graph', () => {
     expect(screen.getByLabelText('设定标题')).toBeInTheDocument()
     fireEvent.change(screen.getByLabelText('设定标题'), { target: { value: '甲' } })
     vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => { throw new Error('quota') })
-    fireEvent.change(screen.getByLabelText('设定正文'), { target: { value: '不能丢掉的本地文字' } })
+    fireEvent.input(screen.getByLabelText('设定正文'), { target: { textContent: '不能丢掉的本地文字' } })
     let result = true
     await act(async () => { result = await ref.current!.flush() })
     expect(result).toBe(false)
-    expect(screen.getByLabelText('设定正文')).toHaveValue('不能丢掉的本地文字')
+    expect(screen.getByLabelText('设定正文')).toHaveTextContent('不能丢掉的本地文字')
   })
 
   it('keeps invalid stored data and real project data untouched', () => {
@@ -563,7 +577,7 @@ describe('setting notes and graph', () => {
     localStorage.setItem(settingStorageKey, JSON.stringify(seed))
     render(<StudioSetting preview hidden={false} onTyping={() => {}} />)
     fireEvent.click(screen.getByRole('button', { name: '编辑' }))
-    fireEvent.change(screen.getByLabelText('设定正文'), { target: { value: '用户亲自写的设定' } })
+    fireEvent.input(screen.getByLabelText('设定正文'), { target: { textContent: '用户亲自写的设定' } })
     fireEvent.click(screen.getByRole('button', { name: '交给 Agent 讨论' }))
     expect(readSettingWorkspace().conversation.contextId).toBe('a')
     fireEvent.click(screen.getByRole('button', { name: '示例回复' }))
@@ -807,7 +821,7 @@ describe('setting notes and graph', () => {
         onTyping={() => {}}
       />
     )
-    expect(screen.getByText('从sessionStorage恢复的本地草稿')).toBeInTheDocument()
+    expect(screen.getByRole('textbox', { name: '设定正文' })).toHaveTextContent('从sessionStorage恢复的本地草稿')
     sessionStorage.removeItem('guranovel:setting-draft-recovery:a')
   })
 
@@ -825,11 +839,10 @@ describe('setting notes and graph', () => {
       />
     )
 
-    fireEvent.click(screen.getByRole('button', { name: '编辑' }))
-    const textarea = screen.getByLabelText('设定正文')
+    const editor = screen.getByLabelText('设定正文')
 
     await act(async () => {
-      fireEvent.change(textarea, { target: { value: '连续编辑草稿内容' } })
+      fireEvent.input(editor, { target: { textContent: '连续编辑草稿内容' } })
     })
 
     // Immediately in sessionStorage

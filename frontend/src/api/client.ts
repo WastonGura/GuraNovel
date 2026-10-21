@@ -183,6 +183,7 @@ export interface Document {
   metadata?: Metadata
   created_at: string
   updated_at: string
+  deleted_at?: string | null
 }
 
 export interface SettingCollection {
@@ -214,6 +215,7 @@ export interface UpdateSettingCollectionRequest {
 }
 
 export interface CreateSettingDocumentRequest {
+  client_request_id?: string
   type: DocumentType
   title?: string | null
   path: string
@@ -605,7 +607,7 @@ function decodeDocumentVersion(value: unknown): DocumentVersion {
   }
 }
 
-function decodeDocument(value: unknown): Document {
+export function decodeDocument(value: unknown): Document {
   const data = object(value)
   const type = string(data.type)
   if (!documentTypes.has(type as DocumentType)) throw invalidResponse()
@@ -622,6 +624,7 @@ function decodeDocument(value: unknown): Document {
     metadata: isRecord(data.metadata) ? metadata(data.metadata) : {},
     created_at: string(data.created_at),
     updated_at: string(data.updated_at),
+    ...(data.deleted_at === undefined ? {} : { deleted_at: nullableString(data.deleted_at) }),
   }
 }
 
@@ -1044,8 +1047,8 @@ export function listCollectionProjects(collectionId: string): Promise<Project[]>
   })
 }
 
-export function listCollectionDocuments(collectionId: string): Promise<Document[]> {
-  return request('GET', () => apiPath('setting-collections', collectionId, 'documents'), (value) => {
+export function listCollectionDocuments(collectionId: string, options?: { deleted?: boolean }): Promise<Document[]> {
+  return request('GET', () => `${apiPath('setting-collections', collectionId, 'documents')}${options?.deleted ? '?deleted=true' : ''}`, (value) => {
     if (!Array.isArray(value)) throw invalidResponse()
     return value.map(decodeDocument)
   })

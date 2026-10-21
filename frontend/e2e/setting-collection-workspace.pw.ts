@@ -102,7 +102,7 @@ test.describe('Setting Collection Standalone Workspace Chromium E2E', () => {
     await input.press('ArrowDown')
     await page.keyboard.press('Enter')
     await expect(search).not.toBeAttached()
-    await expect(page.locator('.setting-document h1')).toHaveText('海滨城')
+    await expect(page.getByRole('textbox', { name: '设定标题' })).toHaveValue('海滨城')
     expect(writes).toBe(0)
     await expect(page).not.toHaveURL(/mode=search/)
   })
@@ -122,7 +122,7 @@ test.describe('Setting Collection Standalone Workspace Chromium E2E', () => {
     await page.goto(`/setting-collections/${collectionId}`)
 
     // Wait for document to render
-    const heading = page.locator('h1', { hasText: '海滨城' })
+    const heading = page.getByRole('heading', { name: '海滨城', exact: true })
     await expect(heading).toBeVisible()
 
     // 1. Verify widths are not collapsed to 0px
@@ -200,7 +200,7 @@ test.describe('Setting Collection Standalone Workspace Chromium E2E', () => {
 
     // Error banner disappears and content renders
     await expect(errorAlert).not.toBeVisible()
-    await expect(page.getByText('重试成功恢复的正文内容。')).toBeVisible()
+    await expect(page.getByLabel('设定正文')).toHaveText('重试成功恢复的正文内容。')
   })
 
   test('P1 Draft Recovery & 409 Conflict: preserves draft in sessionStorage and restores on reload', async ({ page }) => {
@@ -228,10 +228,8 @@ test.describe('Setting Collection Standalone Workspace Chromium E2E', () => {
     })
 
     await page.goto(`/setting-collections/${collectionId}`)
-    await expect(page.getByText('初始设定正文。')).toBeVisible()
+    await expect(page.getByLabel('设定正文')).toHaveText('初始设定正文。')
 
-    // Enter edit mode
-    await page.getByRole('button', { name: '编辑' }).click()
     const textarea = page.getByLabel('设定正文')
     await expect(textarea).toBeVisible()
 
@@ -250,13 +248,13 @@ test.describe('Setting Collection Standalone Workspace Chromium E2E', () => {
 
     // Reload the page: draft must be recovered from sessionStorage
     await page.reload()
-    await expect(page.locator('h1', { hasText: '海滨城' })).toBeVisible()
+    await expect(page.getByRole('textbox', { name: '设定标题' })).toHaveValue('海滨城')
 
     // Verify the recovered text is displayed on screen
-    await expect(page.getByText('用户正在编辑的重要未保存设定。')).toBeVisible()
+    await expect(page.getByLabel('设定正文')).toHaveText('用户正在编辑的重要未保存设定。')
   })
 
-  test('formal discussion makes unavailable actions explicit and never offers preview proposals', async ({ page }) => {
+  test('old chat links open the document without preview proposals or a dead composer', async ({ page }) => {
     let applied = false
     await page.route(`**/api/v1/setting-collections/${collectionId}`, route => json(route, mockCollection))
     await page.route(`**/api/v1/setting-collections/${collectionId}/projects`, route => json(route, mockProjects))
@@ -270,7 +268,8 @@ test.describe('Setting Collection Standalone Workspace Chromium E2E', () => {
     })
     await page.goto(`/setting-collections/${collectionId}?mode=chat`)
     await expect(page.locator('button.setting-example')).toHaveCount(0)
-    await expect(page.getByPlaceholder('设定对话暂不可用')).toBeDisabled()
+    await expect(page.getByLabel('设定正文')).toBeEditable()
+    await expect(page.getByPlaceholder('设定对话暂不可用')).not.toBeVisible()
     await expect(page.locator('.setting-change')).toHaveCount(0)
     expect(applied).toBe(false)
   })

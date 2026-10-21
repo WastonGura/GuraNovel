@@ -1,0 +1,6 @@
+.studio .setting-note-prose .setting-reference-editor { background: transparent; border: 0; border-radius: 0; box-shadow: none; caret-color: #171717; font: inherit; font-size: clamp(18px, 1.25vw, 24px); letter-spacing: normal; line-height: 2; outline: none; overflow-wrap: anywhere; padding: 0; position: relative; tab-size: 8; white-space: pre-wrap; }
+.setting-reference-editor:empty::before { color: #aaa; content: attr(data-placeholder); pointer-events: none; }
+.setting-reference-token { color: #666; cursor: text; transition: color 160ms; }
+.setting-reference-token:hover { color: #171717; text-decoration: underline; text-decoration-thickness: 1px; text-underline-offset: 4px; }
+.setting-reference-token:focus-visible { color: #171717; outline: 1px solid #999; outline-offset: 2px; }
+@media (max-width: 760px) { .studio .setting-note-prose .setting-reference-editor { font-size: 16px; } }

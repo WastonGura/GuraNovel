@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
+from hashlib import sha256
+import json
 from uuid import UUID
 
 from sqlalchemy import or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from app.core.errors import AppError, ConflictError, ForbiddenError, NotFoundError
+from app.core.errors import AppError, ConflictError, ForbiddenError, NotFoundError, ValidationError
 from app.models import (
     Document,
     DocumentSource,
@@ -268,6 +270,7 @@ class SettingCollectionService:
         workflow_run_id: UUID | None = None,
         change_summary: str | None = None,
         metadata: dict[str, object] | None = None,
+        client_request_id: UUID | None = None,
     ) -> Document:
         collection = await self.get_setting_collection(
             collection_id, actor_user_id=actor_user_id
@@ -278,6 +281,30 @@ class SettingCollectionService:
             raise ConflictError(
                 f"Document type '{document_type.value}' is not permitted for setting collections."
             )
+
+        metadata = dict(metadata or {})
+        if any(key.startswith("__creation_") for key in metadata):
+            raise ValidationError("Creation identity metadata is server-owned.")
+        if client_request_id is not None:
+            fingerprint = sha256(json.dumps({
+                "type": document_type.value, "title": title, "path": path, "content": content,
+                "source": source.value, "actor_user_id": actor_user_id, "agent_role": agent_role,
+                "workflow_run_id": workflow_run_id, "change_summary": change_summary, "metadata": metadata,
+            }, sort_keys=True, default=str, ensure_ascii=False).encode()).hexdigest()
+            await self.session.execute(text("SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))"),
+                                       {"key": f"setting_create:{collection_id}:{client_request_id}"})
+            existing = await self.session.scalar(select(Document).options(selectinload(Document.current_version)).where(
+                Document.setting_collection_id == collection_id,
+                Document.metadata_["__creation_request_id"].astext == str(client_request_id),
+            ).execution_options(populate_existing=True))
+            if existing is not None:
+                if existing.metadata_.get("__creation_request_fingerprint") != fingerprint:
+                    raise ConflictError("This creation identity was already used for different content.")
+                if (existing.deleted_at is not None or existing.current_version is None
+                        or existing.current_version.version_number != 1 or existing.title != title):
+                    raise ConflictError("The created document changed after the initial request; reconcile its current version before saving the local draft.")
+                return existing
+            metadata.update(__creation_request_id=str(client_request_id), __creation_request_fingerprint=fingerprint)
 
         doc_service = DocumentService(self.session)
         document = await doc_service.create_document(
@@ -320,20 +347,8 @@ class SettingCollectionService:
                 source = DocumentSource.USER
 
         if proposal.target_document_id is not None:
-            document = await self.session.get(Document, proposal.target_document_id)
-            if document is None or document.setting_collection_id != collection_id:
-                raise NotFoundError("Target setting document not found in collection.")
-
-            await doc_service.write_document(
-                document_id=proposal.target_document_id,
-                content=proposal.proposed_content,
-                source=source,
-                expected_current_version_id=proposal.base_version_id,
-                actor_user_id=actor_user_id,
-                agent_role=proposal.source_task.agent_role,
-                workflow_run_id=proposal.source_task.workflow_run_id,
-                change_summary=proposal.reason,
-            )
+            document, writes = await self.stage_setting_change_proposal(collection_id, proposal, actor_user_id=actor_user_id)
+            await doc_service.commit_staged_document(document, writes)
             return await self.session.scalar(
                 select(Document)
                 .options(
@@ -378,6 +393,46 @@ class SettingCollectionService:
                 )
                 .where(Document.id == document.id)
             )
+
+    async def stage_setting_change_proposal(
+        self, collection_id: UUID, proposal: SettingChangeProposal, *, actor_user_id: UUID | None = None,
+    ) -> tuple[Document, tuple[tuple[str, str], tuple[str, str]]]:
+        """Stage the existing proposal operation so its decision and version commit together."""
+        if proposal.setting_collection_id != collection_id:
+            raise ConflictError("Proposal does not target this setting collection.")
+        collection = await self.get_setting_collection(collection_id, actor_user_id=actor_user_id)
+        if collection.status == "archived":
+            raise ConflictError("Archived setting collection cannot be modified.")
+        source = DocumentSource.USER
+        if proposal.source_task.agent_role:
+            try:
+                source = DocumentSource(proposal.source_task.agent_role)
+            except ValueError:
+                pass
+        doc_service = DocumentService(self.session)
+        if proposal.target_document_id is None:
+            document_type = DocumentType.WORLD_OVERVIEW if proposal.category in ("world", "world_overview") else DocumentType.CHARACTER_PROFILE
+            document, working, snapshot = await doc_service.stage_create_document(
+                setting_collection_id=collection_id, document_type=document_type, title=proposal.title,
+                path=f"{proposal.category}/proposal-{proposal.id}.md", content=proposal.proposed_content, source=source,
+                actor_user_id=actor_user_id, agent_role=proposal.source_task.agent_role,
+                workflow_run_id=proposal.source_task.workflow_run_id, change_summary=proposal.reason,
+                metadata={"category": proposal.category},
+            )
+            return document, (working, snapshot)
+        document = await self.session.get(Document, proposal.target_document_id)
+        if document is None or document.setting_collection_id != collection_id:
+            raise NotFoundError("Target setting document not found in collection.")
+        from app.services.studio_feedback import project_anchors
+        before = await doc_service.read_version_content(document.id, proposal.base_version_id)
+        comments = project_anchors((document.metadata_ or {}).get("comments", []), before, proposal.proposed_content, True)
+        _, working, snapshot = await doc_service.stage_write_document(
+            document_id=document.id, content=proposal.proposed_content, source=source,
+            expected_current_version_id=proposal.base_version_id, actor_user_id=actor_user_id,
+            agent_role=proposal.source_task.agent_role, workflow_run_id=proposal.source_task.workflow_run_id,
+            change_summary=proposal.reason, setting_comments=comments,
+        )
+        return document, (working, snapshot)
 
     async def _lock_slug(self, slug: str) -> None:
         await self.session.execute(
