@@ -255,7 +255,7 @@ async def test_unknown_commit_outcome_preserves_workspace_and_is_named(
 
 @pytest.mark.integration
 @pytest.mark.anyio
-async def test_uploaded_cover_reference_roundtrips_project_metadata(project_client):
+async def test_uploaded_cover_reference_roundtrips_project_metadata(project_client, async_session):
     import io
     from PIL import Image
 
@@ -265,14 +265,34 @@ async def test_uploaded_cover_reference_roundtrips_project_metadata(project_clie
     uploaded = await client.post("/api/v1/covers", content=stream.getvalue())
     assert uploaded.status_code == 201
     cover = uploaded.json()["cover"]
-    created = await client.post("/api/v1/projects", json={"slug": "uploaded-cover", "title": "Cover"})
+    created = await client.post("/api/v1/projects", json={
+        "slug": "uploaded-cover",
+        "title": "Cover",
+        "metadata": {"introduction": "First introduction", "custom": {"keep": True}},
+    })
+    assert created.status_code == 201
     project_id = created.json()["id"]
     updated = await client.patch(f"/api/v1/projects/{project_id}", json={"metadata": {"cover": cover}})
     assert updated.status_code == 200
+    revised = await client.patch(f"/api/v1/projects/{project_id}", json={
+        "metadata": {"introduction": "Revised introduction"},
+    })
+    assert revised.status_code == 200
+    renamed = await client.patch(f"/api/v1/projects/{project_id}", json={"title": "Renamed cover"})
+    assert renamed.status_code == 200
+    # Force a database read instead of accepting this fixture's cached ORM identity.
+    async_session.expire_all()
     fetched = await client.get(f"/api/v1/projects/{project_id}")
-    assert fetched.json()["metadata"]["cover"] == cover
+    assert fetched.status_code == 200
+    expected_metadata = {
+        "cover": cover,
+        "introduction": "Revised introduction",
+        "custom": {"keep": True},
+    }
+    assert fetched.json()["metadata"] == expected_metadata
+    assert fetched.json()["title"] == "Renamed cover"
     listed = await client.get("/api/v1/projects")
-    assert listed.json()[0]["metadata"]["cover"] == cover
+    assert listed.json()[0]["metadata"] == expected_metadata
     asset = await client.get("/api/v1/covers/" + cover.split(":")[1])
     assert asset.status_code == 200
     assert asset.headers["content-type"] == "image/webp"
@@ -280,7 +300,7 @@ async def test_uploaded_cover_reference_roundtrips_project_metadata(project_clie
 
 @pytest.mark.integration
 @pytest.mark.anyio
-async def test_metadata_patch_omits_binding_and_preserves_legacy_genre(project_client):
+async def test_metadata_patch_omits_binding_and_preserves_legacy_genre(project_client, async_session):
     client, _ = project_client
     created = await client.post(
         "/api/v1/projects", json={"slug": "metadata-recovery", "title": "Original", "genre": "Fantasy"}
@@ -298,10 +318,24 @@ async def test_metadata_patch_omits_binding_and_preserves_legacy_genre(project_c
     assert fetched["genre"] == "Fantasy"
     assert fetched["setting_collection_id"] == original["setting_collection_id"]
     assert fetched["metadata"]["labels"] == ["Fantasy"]
-    await client.patch(path, json={"metadata": {"introduction": "Old intro", "word_count": 42}})
+    written = await client.patch(path, json={"metadata": {"introduction": "Old intro", "word_count": 42}})
+    assert written.status_code == 200
+    revised = await client.patch(path, json={"metadata": {"introduction": "Revised intro"}})
+    assert revised.status_code == 200
+    async_session.expire_all()
+    assert (await client.get(path)).json()["metadata"]["introduction"] == "Revised intro"
     cleared = await client.patch(path, json={"metadata": {"introduction": ""}})
     assert cleared.status_code == 200
+    # A legacy title-only PATCH must not reintroduce the old value or drop metadata.
+    renamed = await client.patch(path, json={"title": "After clearing"})
+    assert renamed.status_code == 200
+    async_session.expire_all()
     reloaded = (await client.get(path)).json()
+    assert reloaded["title"] == "After clearing"
+    assert reloaded["genre"] == "Fantasy"
+    assert reloaded["setting_collection_id"] == original["setting_collection_id"]
     assert reloaded["metadata"]["introduction"] == ""
     assert reloaded["metadata"]["word_count"] == 42
     assert reloaded["metadata"]["labels"] == ["Fantasy"]
+    listed = (await client.get("/api/v1/projects")).json()
+    assert listed[0]["metadata"] == reloaded["metadata"]

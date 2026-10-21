@@ -34,10 +34,48 @@ it('clears an existing introduction through the server metadata merge contract',
   const hook = renderHook(() => useNovelMetadata(original, vi.fn()))
   act(() => hook.result.current.change({ introduction: '' }))
   await act(async () => { expect(await hook.result.current.flush()).toBe(true) })
+  expect(write).toHaveBeenCalledWith('one', expect.objectContaining({ metadata: expect.objectContaining({ introduction: '' }) }))
   hook.unmount()
   const reopened = renderHook(() => useNovelMetadata(server, vi.fn()))
   expect(reopened.result.current.values.introduction).toBe('')
   expect(server.metadata.word_count).toBe(42)
+})
+
+it('keeps an absent introduction absent when editing a legacy project title', async () => {
+  const original: Project = { ...project, metadata: { ...project.metadata, custom: { language: 'zh' } } }
+  let server = original
+  write.mockImplementation(async (_id, payload) => {
+    server = { ...server, ...payload, metadata: { ...server.metadata, ...payload.metadata } } as Project
+    return server
+  })
+  const hook = renderHook(() => useNovelMetadata(original, vi.fn()))
+  act(() => hook.result.current.change({ title: 'Renamed legacy novel' }))
+  await act(async () => { expect(await hook.result.current.flush()).toBe(true) })
+  expect(write.mock.calls[0][1].metadata).not.toHaveProperty('introduction')
+  expect(server.metadata).toEqual(original.metadata)
+  hook.unmount()
+  const reopened = renderHook(() => useNovelMetadata(server, vi.fn()))
+  expect(reopened.result.current.values.title).toBe('Renamed legacy novel')
+  expect(reopened.result.current.values.introduction).toBe('')
+  expect(write).toHaveBeenCalledTimes(1)
+})
+
+it('persists returning to the neutral cover without removing other metadata', async () => {
+  const original: Project = { ...project, metadata: { ...project.metadata, cover: 'cover-2.jpg', introduction: 'Existing introduction', custom: { language: 'zh' } } }
+  let server = original
+  write.mockImplementation(async (_id, payload) => {
+    server = { ...server, ...payload, metadata: { ...server.metadata, ...payload.metadata } } as Project
+    return server
+  })
+  const hook = renderHook(() => useNovelMetadata(original, vi.fn()))
+  act(() => hook.result.current.change({ cover: 'cover-default' }))
+  await act(() => vi.advanceTimersByTimeAsync(400))
+  expect(server.metadata).toEqual({ ...original.metadata, cover: 'cover-default' })
+  expect(write).toHaveBeenCalledTimes(1)
+  hook.unmount()
+  const reopened = renderHook(() => useNovelMetadata(server, vi.fn()))
+  expect(reopened.result.current.values.cover).toBe('cover-default')
+  expect(reopened.result.current.values.introduction).toBe('Existing introduction')
 })
 
 it('serializes writes and never replaces newer input with an older response', async () => {
