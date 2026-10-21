@@ -229,7 +229,15 @@ it('restores actual review reports without treating missing reviewers as PASS', 
   expect(screen.getByText('正文已进入审阅，请通过修改流程继续写作。')).toBeInTheDocument()
   fireEvent.click(screen.getByRole('button', { name: '大纲' }))
   await screen.findByRole('region', { name: '本章大纲' })
+  // The section mounts before the idea's load effect installs its save queue.
+  // Wait for the editor to finish loading before asking navigation to flush it.
+  const idea = await screen.findByRole('textbox', { name: '大纲思路' })
+  await waitFor(() => expect(idea).not.toHaveAttribute('readonly'))
   fireEvent.click(screen.getByRole('button', { name: '审阅' }))
+  await waitFor(() => {
+    expect(screen.getByRole('button', { name: '审阅' })).toHaveAttribute('aria-current', 'step')
+    expect(screen.getByTestId('url')).toHaveTextContent('?stage=Review')
+  })
   await screen.findByText('时间线存在矛盾。')
 })
 

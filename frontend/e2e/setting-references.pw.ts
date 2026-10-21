@@ -1,4 +1,5 @@
 import { expect, test, type Page } from '@playwright/test'
+import { DISSOLVE_MS } from '../src/studioTextParticles'
 
 const collectionId = 'c1111111-1111-4111-8111-111111111111'
 const docId = 'd1111111-1111-4111-8111-111111111111'
@@ -163,17 +164,22 @@ test('plain text paste and cut each preserve an undoable canonical edit', async 
 })
 
 test('document switches dissolve and reveal real editable text, and pointer input immediately dismisses the reveal', async ({ page }) => {
+  await page.clock.install()
   await workspace(page)
+  await page.clock.pauseAt(await page.evaluate(() => Date.now() + 1000))
   const motion = page.locator('.setting-document-motion')
   await page.getByRole('button', { name: /^世界观$/ }).click()
   await expect(motion).toHaveAttribute('data-text-phase', 'dissolve')
   await expect(motion.locator('.studio-text-particles')).toHaveCount(1)
+  // Advance every RAF, then hold inside reveal so CI polling cannot skip this short phase.
+  await page.clock.runFor(DISSOLVE_MS + 48)
   await expect(motion).toHaveAttribute('data-text-phase', 'reveal')
   const editor = page.getByLabel('设定正文', { exact: true })
   await editor.click()
   await expect(motion).not.toHaveAttribute('data-text-phase')
   await expect(editor).toBeFocused()
   await expect(editor).toHaveCSS('opacity', '1')
+  await expect(editor).toHaveText('这是被引用的世界观正文。')
   await page.getByRole('button', { name: /^设定$/, exact: true }).click()
   await expect(motion).toHaveAttribute('data-text-phase', 'dissolve')
   await editor.click()
