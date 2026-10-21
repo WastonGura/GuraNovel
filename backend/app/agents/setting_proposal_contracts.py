@@ -107,7 +107,11 @@ class SettingChangeProposal(BaseModel):
     @field_validator("proposed_content", mode="before")
     @classmethod
     def validate_proposed_content(cls, value: object) -> str:
-        return _bounded_text(str(value), "proposed_content", min_len=1, max_len=65_536)
+        if not isinstance(value, str) or len(value) > 65_536:
+            raise ValueError("invalid proposed_content")
+        _bounded_text(value, "proposed_content", min_len=1, max_len=65_536)
+        # Complete document proposals must retain Markdown indentation and final newlines.
+        return value
 
     @field_validator("status", mode="before")
     @classmethod

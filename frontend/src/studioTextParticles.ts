@@ -58,7 +58,9 @@ function revealRows(box: HTMLElement) {
   box.querySelectorAll<HTMLElement>('[data-sweep-text]').forEach(textSurface => {
     if (textSurface.closest('[data-text-inactive="true"]')) return
     // The input's layout mirror supplies line measurements, but the input itself is revealed.
-    const surface = textSurface.closest('.studio-context-body.is-input, .studio-prose, .studio-idea-card')?.querySelector<HTMLTextAreaElement>('textarea') || textSurface
+    const surface = textSurface.matches('[data-text-editor]') ? textSurface
+      : textSurface.closest('[data-text-input]')?.querySelector<HTMLInputElement | HTMLTextAreaElement>('input, textarea')
+        || textSurface.closest('.studio-context-body.is-input, .studio-prose, .studio-idea-card')?.querySelector<HTMLTextAreaElement>('textarea') || textSurface
     const origin = surface.getBoundingClientRect()
     const walker = document.createTreeWalker(textSurface, NodeFilter.SHOW_TEXT)
     for (let text = walker.nextNode(); text; text = walker.nextNode()) {

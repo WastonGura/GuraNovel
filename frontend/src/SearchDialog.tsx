@@ -1,4 +1,4 @@
-import { useRef, useState, type ReactNode } from 'react'
+import { useEffect, useRef, useState, type ReactNode } from 'react'
 import PickerDialog, { type PickerDialogHandle } from './PickerDialog'
 import './SearchDialog.css'
 import CoverImage from './CoverImage'
@@ -19,23 +19,41 @@ export interface SearchChoice {
 /** Shared search surface: keyboard results, an independent preview and animated dismissal. */
 export default function SearchDialog<T extends SearchChoice>({ title, closeLabel, query, onQuery, inputLabel, placeholder,
   inputType = 'search', items, onSelect, onClose, renderPreview, filters, footer, emptyText = '没有找到匹配的内容',
-  resultsLabel = '搜索结果', dismissOnSelect = true, onSubmitQuery, meta }: {
+  resultsLabel = '搜索结果', dismissOnSelect = true, onSubmitQuery, onBeforeSelect, meta }: {
   title: string; closeLabel?: string; query: string; onQuery: (query: string) => void; inputLabel: string; placeholder: string
   inputType?: 'search' | 'text'; items: T[]; onSelect: (item: T) => void; onClose: () => void
   renderPreview: (item: T | undefined) => ReactNode; filters?: ReactNode; footer?: ReactNode; emptyText?: string
   resultsLabel?: string; dismissOnSelect?: boolean; onSubmitQuery?: () => void; meta?: ReactNode
+  onBeforeSelect?: (item: T) => boolean | Promise<boolean>
 }) {
   const picker = useRef<PickerDialogHandle>(null)
   const frame = useRef<HTMLDivElement>(null)
   const [activeId, setActiveId] = useState('')
+  const [selectingId, setSelectingId] = useState('')
   const active = items.find(item => item.id === activeId) ?? items[0]
   const pending = useRef<T | null>(null)
-  function select(item: T) {
-    if (item.disabled) return
+  const selecting = useRef(false)
+  const closing = useRef(false)
+  const alive = useRef(true)
+  useEffect(() => { alive.current = true; return () => { alive.current = false } }, [])
+  async function select(item: T) {
+    if (item.disabled || selecting.current || closing.current) return
+    if (onBeforeSelect) {
+      selecting.current = true
+      setSelectingId(item.id)
+      const focused = document.activeElement as HTMLElement | null
+      let allowed = false
+      try { allowed = await onBeforeSelect(item) } catch { /* The caller retains its document and exposes the failure. */ }
+      if (!alive.current || closing.current) return
+      selecting.current = false
+      setSelectingId('')
+      if (!allowed) { focused?.focus(); return }
+    }
     if (dismissOnSelect) { pending.current = item; picker.current?.close() }
     else { onSelect(item); frame.current?.querySelector('input')?.focus() }
   }
   return <PickerDialog ref={picker} title={title} closeLabel={closeLabel} className="search-dialog" meta={meta}
+    onClosing={() => { closing.current = true }}
     onClose={() => { onClose(); if (pending.current) onSelect(pending.current) }}>
     <div ref={frame} className="search-window" onKeyDown={event => {
       if (event.nativeEvent.isComposing || event.keyCode === 229) return
@@ -64,9 +82,10 @@ export default function SearchDialog<T extends SearchChoice>({ title, closeLabel
       </form>
       {filters && <div className="search-window-filters">{filters}</div>}
       <div className="search-window-body">
-        <div className="search-window-results" role="group" aria-label={resultsLabel}>
+        <div className="search-window-results" role="group" aria-label={resultsLabel} aria-busy={!!selectingId}>
           {items.map(item => <button type="button" key={item.id} className={`search-choice${active?.id === item.id ? ' is-active' : ''}`}
             aria-label={item.title} disabled={item.disabled} aria-pressed={item.selected}
+            aria-disabled={item.disabled || !!selectingId} aria-busy={selectingId === item.id}
             onPointerEnter={() => setActiveId(item.id)} onFocus={() => setActiveId(item.id)} onClick={() => select(item)}>
             <span className={`search-choice-leading${item.cover ? ' is-cover' : ''}`}>{item.cover ? <CoverImage source={item.cover} widthHint={40} mode="picker" /> : <img src={item.icon ?? '/ui/icons/akar-icons_book.svg'} alt="" />}</span>
             <span className="search-choice-copy"><strong>{item.title}</strong>{item.labels?.length ? <SearchTags labels={item.labels} limit={3} /> : item.description && <small>{item.description}</small>}</span>

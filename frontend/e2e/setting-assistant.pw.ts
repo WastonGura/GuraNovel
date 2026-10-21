@@ -34,8 +34,9 @@ for (const viewport of [{ width: 1440, height: 900 }, { width: 1062, height: 660
     await expect(page.getByRole('textbox', { name: '给 Gura 的消息' })).toBeFocused()
     await expect.poll(async () => {
       const content = await main.boundingBox(), panel = await drawer.boundingBox()
-      return viewport.width > 1000 ? content!.x + content!.width <= panel!.x - 16 : content!.y + content!.height <= panel!.y
+      return viewport.width >= 800 ? content!.x + content!.width <= panel!.x - 16 : content!.y + content!.height <= panel!.y
     }).toBe(true)
+    if (viewport.width >= 800) await expect.poll(async () => (await page.getByLabel('设定标题').boundingBox())!.width).toBeGreaterThan(160)
     const toolsAfter = await page.locator('.setting-editor-tools').boundingBox()
     expect(toolsAfter!.x).toBeCloseTo(toolsBefore!.x, 0)
     expect(toolsAfter!.y).toBeCloseTo(toolsBefore!.y, 0)

@@ -28,6 +28,7 @@ from app.models.enums import (
     WorkflowType,
 )
 from app.models.maintenance import MaintenanceAffectedItem, MaintenanceChange
+from app.models.setting_collaboration import SettingCollaboration, SettingCollaborationMessage
 from app.models.studio import (
     StudioAssistantConversation,
     StudioAssistantMessage,
@@ -60,6 +61,8 @@ __all__ = [
     "MaintenanceChange",
     "Project",
     "SettingCollection",
+    "SettingCollaboration",
+    "SettingCollaborationMessage",
     "StudioAssistantConversation",
     "StudioAssistantMessage",
     "StudioRestorePoint",

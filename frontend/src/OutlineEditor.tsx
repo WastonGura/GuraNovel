@@ -4,15 +4,18 @@ import { commentColors as colors, commentLimit, reanchorComments, type OutlineCo
 import { dissolvePanel } from './studioPanelParticles'
 import { useFloatingComment } from './useFloatingComment'
 import { useCommentDrag } from './useCommentDrag'
+import ReferenceTextInput, { type OutlineInputHandle } from './ReferenceTextInput'
+import './ReferenceTextInput.css'
 
 const tint = (color: string) => ({ '--comment-color': color }) as CSSProperties
+const getInputElement = (input: RefObject<OutlineInputHandle | null>) => input.current && ('element' in input.current ? input.current.element : input.current as HTMLTextAreaElement)
 
 export default function OutlineEditor({ outline, comments, readOnly, textReadOnly = false, onChange, onCommentsChange, onSend, prepareSend, confirm, draftInput }: {
   outline: string; comments: OutlineComment[]; readOnly: boolean; textReadOnly?: boolean
   prepareSend?: (animate?: () => Promise<void>) => Promise<boolean>
   onChange: (outline: string, comments: OutlineComment[]) => void
   onCommentsChange: (comments: OutlineComment[]) => void; onSend: (panel?: HTMLElement) => void; confirm?: ReactNode
-  draftInput?: { ref: RefObject<HTMLTextAreaElement | null>; onTyping: () => void; ready?: boolean; visible?: boolean; onSubmittedSelect?: (id: string) => void; label?: string; className?: string; maxLength?: number; sendLabel?: string; sendEffect?: 'handoff'; stagedIds?: string[]; reading?: ReactNode; linkOptions?: string[]; animateText?: boolean }
+  draftInput?: { ref: RefObject<OutlineInputHandle | null>; onTyping: () => void; ready?: boolean; visible?: boolean; onSubmittedSelect?: (id: string) => void; label?: string; className?: string; maxLength?: number; sendLabel?: string; sendEffect?: 'handoff'; stagedIds?: string[]; reading?: ReactNode; linkOptions?: string[]; onOpenReference?: (title: string) => void; animateText?: boolean }
 }) {
   const outlineInput = useRef<HTMLTextAreaElement>(null)
   const input = draftInput?.ref || outlineInput
@@ -33,19 +36,19 @@ export default function OutlineEditor({ outline, comments, readOnly, textReadOnl
   const completion = useRef<HTMLDivElement>(null)
   const linkSearch = useRef<HTMLInputElement>(null)
   const linkMatches = draftInput?.linkOptions?.filter(title => title.toLocaleLowerCase().includes(link?.query.toLocaleLowerCase() || '')).slice(0, 8) || []
-  function suggestLinks(force = false) {
+  const richInput = Boolean(draftInput?.linkOptions)
+  function suggestLinks() {
     const textarea = input.current
     if (!textarea || !draftInput?.linkOptions || readOnly) return
     const end = textarea.selectionStart, prefix = textarea.value.slice(0, end)
-    const match = /(?:@|\[\[)([^\n[\]@]*)$/.exec(prefix)
-    setLink(match ? { start: match.index, end, query: match[1] } : force ? { start: end, end, query: '' } : null); setLinkIndex(0)
+    const match = /@([^\n[\]@]*)$/.exec(prefix)
+    setLink(match ? { start: match.index, end, query: match[1] } : null); setLinkIndex(0)
   }
   function insertLink(title: string) {
-    if (!link) return
-    const suffix = outline.slice(link.end).startsWith(']]') ? link.end + 2 : link.end
-    const value = `${outline.slice(0, link.start)}[[${title}]]${outline.slice(suffix)}`
-    onChange(value, reanchorComments(comments, outline, value)); setLink(null)
-    requestAnimationFrame(() => { input.current?.focus(); input.current?.setSelectionRange(link.start + title.length + 4, link.start + title.length + 4) })
+    const editor = input.current
+    if (!link || !editor || !('replaceText' in editor) || !editor.replaceText) return
+    editor.replaceText(`[[${title}]]`, link.start, link.end); setLink(null)
+    editor.focus({ preventScroll: true })
   }
   function linkKeyDown(event: React.KeyboardEvent) {
     if (!link || event.nativeEvent.isComposing) return false
@@ -71,19 +74,21 @@ export default function OutlineEditor({ outline, comments, readOnly, textReadOnl
   useEffect(() => {
     if (!link) return
     const dismiss = (event: PointerEvent) => {
-      if (!completion.current?.contains(event.target as Node) && event.target !== input.current && !(event.target as HTMLElement).closest('.setting-insert-link')) setLink(null)
+      if (!completion.current?.contains(event.target as Node) && !getInputElement(input)?.contains(event.target as Node)) setLink(null)
     }
     document.addEventListener('pointerdown', dismiss)
     return () => document.removeEventListener('pointerdown', dismiss)
   }, [link, input])
   useLayoutEffect(() => {
-    if (!link || !completion.current || !mirror.current || !input.current) return
-    const walker = document.createTreeWalker(mirror.current, NodeFilter.SHOW_TEXT)
-    let offset = link.end, node = walker.nextNode()
-    while (node && offset > (node.textContent?.length || 0)) { offset -= node.textContent?.length || 0; node = walker.nextNode() }
+    if (!link || !completion.current || !input.current) return
+    const selected = window.getSelection(), element = getInputElement(input)
     let rect = input.current.getBoundingClientRect()
-    if (node) { const range = document.createRange(); range.setStart(node, offset); range.collapse(true); rect = range.getBoundingClientRect?.() || rect }
-    Object.assign(completion.current.style, { left: `${Math.max(12, Math.min(rect.left, input.current.getBoundingClientRect().right - 320, window.innerWidth - 332))}px`, top: `${Math.max(85, Math.min(rect.bottom + 8, window.innerHeight - 320))}px` })
+    if (selected?.rangeCount && element?.contains(selected.getRangeAt(0).commonAncestorContainer)) {
+      const range = selected.getRangeAt(0).cloneRange(); range.collapse(false)
+      const caret = range.getBoundingClientRect?.()
+      if (caret?.height) rect = caret
+    }
+    Object.assign(completion.current.style, { left: `${Math.max(12, Math.min(rect.left, window.innerWidth - 332))}px`, top: `${Math.max(85, Math.min(rect.bottom + 8, window.innerHeight - 320))}px` })
   }, [link, outline, input, draftInput?.visible, draftInput?.ready])
   const [selection, setSelection] = useState<{ start: number; end: number; x: number; y: number } | null>(null)
   const pending = draftInput ? comments.filter(comment => !comment.submitted && !draftInput.stagedIds?.includes(comment.id)) : comments
@@ -104,7 +109,7 @@ export default function OutlineEditor({ outline, comments, readOnly, textReadOnl
   useEffect(() => () => { stopDissolve.current(); motions.current.forEach(animation => animation.cancel()) }, [])
 
   useLayoutEffect(() => {
-    const layer = mirror.current
+    const layer = richInput ? getInputElement(input) : mirror.current
     if (!isDraft || !layer) return
     const measure = () => {
       const origin = layer.parentElement!.getBoundingClientRect()
@@ -120,7 +125,7 @@ export default function OutlineEditor({ outline, comments, readOnly, textReadOnl
     observer?.observe(layer); input.current?.addEventListener('scroll', measure)
     const textarea = input.current
     return () => { observer?.disconnect(); textarea?.removeEventListener('scroll', measure) }
-  }, [outline, comments, input, isDraft, isReading])
+  }, [outline, comments, input, isDraft, isReading, richInput])
 
   useEffect(() => {
     const nav = commentNav.current
@@ -136,7 +141,7 @@ export default function OutlineEditor({ outline, comments, readOnly, textReadOnl
 
   useEffect(() => {
     const dismiss = (event: PointerEvent) => {
-      if (event.target !== input.current && !selectionAction.current?.contains(event.target as Node)) setSelection(null)
+      if (!getInputElement(input)?.contains(event.target as Node) && !selectionAction.current?.contains(event.target as Node)) setSelection(null)
     }
     const escape = (event: KeyboardEvent) => { if (event.key === 'Escape') setSelection(null) }
     document.addEventListener('pointerdown', dismiss)
@@ -146,17 +151,18 @@ export default function OutlineEditor({ outline, comments, readOnly, textReadOnl
 
   useEffect(() => {
     const textarea = input.current, layer = mirror.current
-    if (!textarea || !layer) return
+    if (!textarea || !layer || richInput) return
     const sync = () => {
       layer.style.width = `${textarea.clientWidth}px`
       layer.style.transform = `translate(${-textarea.scrollLeft}px, ${-textarea.scrollTop}px)`
     }
     sync()
     const observer = typeof ResizeObserver !== 'undefined' ? new ResizeObserver(sync) : null
-    observer?.observe(textarea)
+    const element = getInputElement(input)
+    if (element) observer?.observe(element)
     textarea.addEventListener('scroll', sync)
     return () => { observer?.disconnect(); textarea.removeEventListener('scroll', sync) }
-  }, [input, isReading])
+  }, [input, isReading, richInput])
 
   function selectComment(index: number) {
     wakePanel.current()
@@ -208,7 +214,13 @@ export default function OutlineEditor({ outline, comments, readOnly, textReadOnl
     } else if (!textarea) return
     if (!outline.slice(start, end).trim()) { setSelection(null); return }
     let x = point ? point.clientX - bounds.left : 26, y = point ? point.clientY - bounds.top + 12 : 60
-    if (!point && mirror.current) {
+    if (!point && richInput) {
+      const selected = window.getSelection()
+      const range = selected?.rangeCount ? selected.getRangeAt(0).cloneRange() : null
+      range?.collapse(false)
+      const rect = range?.getBoundingClientRect?.()
+      if (rect?.height) { x = rect.left - bounds.left; y = rect.bottom - bounds.top + 8 }
+    } else if (!point && mirror.current) {
       const walker = document.createTreeWalker(mirror.current, NodeFilter.SHOW_TEXT)
       let remaining = end, node = walker.nextNode()
       while (node && remaining > (node.textContent?.length || 0)) { remaining -= node.textContent?.length || 0; node = walker.nextNode() }
@@ -284,7 +296,7 @@ export default function OutlineEditor({ outline, comments, readOnly, textReadOnl
   return <div className={`studio-outline-edit${draftInput ? ' is-draft' : ''}`}>
     <div className="studio-outline-sheet" ref={sheet}>
       <div className="studio-annotated-outline">
-        {!draftInput?.reading && <div className="studio-outline-mirror" data-sweep-text={draftInput?.animateText ? '' : undefined} aria-hidden="true" ref={mirror}>
+        {!draftInput?.reading && !richInput && <div className="studio-outline-mirror" data-sweep-text={draftInput?.animateText ? '' : undefined} aria-hidden="true" ref={mirror}>
           {boundaries.slice(0, -1).map((start, index) => {
             const end = boundaries[index + 1]
             const attached = comments.filter(comment => comment.start <= start && comment.end >= end && comment.start !== comment.end)
@@ -311,19 +323,20 @@ export default function OutlineEditor({ outline, comments, readOnly, textReadOnl
           const index = pending.findIndex(comment => comment.id === id)
           if (index < 0) draftInput.onSubmittedSelect?.(id)
           else { selectComment(index); commentInput.current?.focus({ preventScroll: true }) }
-        }}>{draftInput.reading}</div> : <textarea ref={input} className={draftInput?.className} maxLength={draftInput?.maxLength} aria-label={draftInput?.label || (draftInput ? '章节正文' : '编辑大纲')} placeholder={draftInput ? '从第一句话开始…' : undefined} spellCheck={false} readOnly={readOnly || textReadOnly} value={outline}
+        }}>{draftInput.reading}</div> : richInput && draftInput ? <ReferenceTextInput ref={input} value={outline} label={draftInput.label || '设定正文'} className={draftInput.className} maxLength={draftInput.maxLength} readOnly={readOnly || textReadOnly} animateText={draftInput.animateText} comments={comments} activeCommentId={active?.id} onOpenReference={draftInput.onOpenReference}
+          onTyping={draftInput.onTyping} onChange={value => { setSelection(null); onChange(value, reanchorComments(comments, outline, value)); suggestLinks() }}
+          onKeyDown={event => { linkKeyDown(event) }} onPointerUp={event => offerComment(event)} onKeyUp={event => { if (event.key === 'Shift' || event.shiftKey) offerComment() }}
+          onBlur={event => { if (event.relatedTarget !== selectionAction.current) setSelection(null) }} onScroll={() => setSelection(null)}
+        /> : <textarea ref={input as RefObject<HTMLTextAreaElement | null>} className={draftInput?.className} maxLength={draftInput?.maxLength} aria-label={draftInput?.label || (draftInput ? '章节正文' : '编辑大纲')} placeholder={draftInput ? '从第一句话开始…' : undefined} spellCheck={false} readOnly={readOnly || textReadOnly} value={outline}
           onKeyDown={event => {
             if (event.nativeEvent.isComposing) return
-            if (event.ctrlKey && event.code === 'Space' && draftInput?.linkOptions) { event.preventDefault(); suggestLinks(true); return }
-            if (linkKeyDown(event)) return
             if (draftInput && !readOnly && !event.ctrlKey && !event.metaKey && !event.altKey && (event.key.length === 1 || ['Enter', 'Backspace', 'Delete', 'Process'].includes(event.key))) draftInput.onTyping()
           }}
           onCompositionStart={() => { if (!readOnly) draftInput?.onTyping() }} onPaste={() => { if (!readOnly) draftInput?.onTyping() }}
           onPointerUp={event => offerComment(event)} onKeyUp={event => { if (event.key === 'Shift' || event.shiftKey) offerComment() }}
           onBlur={event => { if (event.relatedTarget !== selectionAction.current) setSelection(null) }}
           onScroll={() => setSelection(null)}
-          onChange={event => { setSelection(null); onChange(event.target.value, reanchorComments(comments, outline, event.target.value)); if (!(event.nativeEvent as InputEvent).isComposing) suggestLinks() }} />}
-        {draftInput?.linkOptions && !draftInput.reading && <button className="setting-insert-link" type="button" disabled={readOnly} onClick={() => suggestLinks(true)}>引用条目 <small>@ / Ctrl+Space</small></button>}
+          onChange={event => { setSelection(null); onChange(event.target.value, reanchorComments(comments, outline, event.target.value)) }} />}
         {link && draftInput?.visible !== false && draftInput?.ready !== false && createPortal(<div className="studio studio-link-overlay"><div ref={completion} className="setting-link-completion" role="listbox" aria-label="引用条目建议" onKeyDown={linkKeyDown}><input ref={linkSearch} aria-label="检索引用条目" placeholder="检索条目…" value={link.query} onFocus={() => setLinkIndex(-1)} onChange={event => { setLink({ ...link, query: event.target.value }); setLinkIndex(-1) }} />{linkMatches.map((title, index) => <button key={title} type="button" role="option" data-link-index={index} aria-selected={index === linkIndex} onPointerDown={event => event.preventDefault()} onClick={() => insertLink(title)}>{title}</button>)}{!linkMatches.length && <small>没有找到相关条目</small>}</div></div>, document.body)}
       </div>
       {selection && <button ref={selectionAction} type="button" className="studio-selection-action" style={{ left: selection.x, top: selection.y }}

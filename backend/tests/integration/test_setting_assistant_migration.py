@@ -35,11 +35,12 @@ async def test_upgrade_preserves_project_messages_and_downgrade_protects_collect
             assert await connection.scalar(text("SELECT content FROM studio_assistant_messages WHERE id = :id"), {"id": message}) == "Keep this novel history"
             await connection.execute(text("INSERT INTO studio_assistant_conversations (id, setting_collection_id) VALUES (:id, :collection)"), {"id": world_conv, "collection": collection})
             await connection.execute(text("INSERT INTO studio_assistant_messages (id, conversation_id, role, content) VALUES (:id, :conv, 'assistant', 'Keep this world history')"), {"id": world_message, "conv": world_conv})
+            head_before_refused_downgrade = await connection.scalar(text("SELECT version_num FROM alembic_version"))
         refused = migrate("downgrade", "0012_setting_document_trash", check=False)
         assert refused.returncode != 0
         assert "refusing to discard messages" in refused.stderr
         async with engine.begin() as connection:
-            assert await connection.scalar(text("SELECT version_num FROM alembic_version")) == "0013_setting_assistant_scope"
+            assert await connection.scalar(text("SELECT version_num FROM alembic_version")) == head_before_refused_downgrade
             assert await connection.scalar(text("SELECT content FROM studio_assistant_messages WHERE id = :id"), {"id": world_message}) == "Keep this world history"
             # Explicit test-only cleanup permits a non-lossy downgrade; no application purge is added.
             await connection.execute(text("DELETE FROM studio_assistant_conversations WHERE id = :id"), {"id": world_conv})

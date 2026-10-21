@@ -41,6 +41,11 @@ async def test_context_is_read_only_data_and_uses_shared_transport(monkeypatch):
     assert "已保存" in sent[0]["messages"][0]["content"]
     assert "侧栏底部" in sent[0]["messages"][0]["content"]
     assert "回到书架" in sent[0]["messages"][0]["content"]
+    assert "与设定 Agent 协作" in sent[0]["messages"][0]["content"]
+    assert "中央的设定集 Agent 工作区" in sent[0]["messages"][0]["content"]
+    assert "整个设定集及全部世界观条目" in sent[0]["messages"][0]["content"]
+    assert "返回文稿" in sent[0]["messages"][0]["content"]
+    assert "你是全局助手，不冒充写作 Agent" in sent[0]["messages"][0]["content"]
     assert "左上角房屋图标" not in sent[0]["messages"][0]["content"]
 
 

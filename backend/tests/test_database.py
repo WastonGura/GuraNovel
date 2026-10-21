@@ -106,6 +106,8 @@ def test_mvp_models_are_imported_and_registered() -> None:
         "studio_feedback_submissions",
         "studio_assistant_conversations",
         "studio_assistant_messages",
+        "setting_collaborations",
+        "setting_collaboration_messages",
     }
     assert SettingCollection.__table__.c.slug.unique is True
     assert SettingCollection.__table__.c.metadata.name == "metadata"

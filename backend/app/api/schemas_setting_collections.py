@@ -68,3 +68,4 @@ class CreateSettingDocumentRequest(BaseModel):
     workflow_run_id: UUID | None = None
     change_summary: str | None = None
     metadata_: dict = Field(default_factory=dict, validation_alias="metadata")
+    client_request_id: UUID | None = None

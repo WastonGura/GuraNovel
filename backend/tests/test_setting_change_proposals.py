@@ -83,6 +83,13 @@ def test_proposal_schema_valid_update_document() -> None:
     assert proposal.base_version_id == base_ver_id
 
 
+def test_proposal_preserves_markdown_indentation_and_terminal_newline() -> None:
+    content = "    an indented code paragraph\n\n[[unchanged reference]]\n"
+    proposal = SettingChangeProposal(id=uuid4(), setting_collection_id=uuid4(), title="Code", category="setting",
+                                     proposed_content=content, reason="Preserve formatting")
+    assert proposal.proposed_content == content
+
+
 def test_proposal_schema_requires_base_version_for_existing_doc() -> None:
     with pytest.raises(ValidationError) as exc_info:
         SettingChangeProposal(
@@ -270,6 +277,7 @@ async def test_apply_proposal_update_existing_doc_occ_success() -> None:
     doc.id = doc_id
     doc.setting_collection_id = col_id
     doc.current_version_id = base_ver_id
+    doc.metadata_ = {"comments": []}
 
     session.get.side_effect = lambda model, ident: {
         (SettingCollection, col_id): col,
@@ -290,7 +298,12 @@ async def test_apply_proposal_update_existing_doc_occ_success() -> None:
         source_task=SettingProposalSourceTask(agent_role="writer_agent"),
     )
 
-    with patch.object(DocumentService, "write_document", new_callable=AsyncMock) as mock_write:
+    writes = (("setting/neo.md", "Cyberdeck updated."), (".versions/neo/2.md", "Cyberdeck updated."))
+    with (
+        patch.object(DocumentService, "read_version_content", new_callable=AsyncMock, return_value="Before"),
+        patch.object(DocumentService, "stage_write_document", new_callable=AsyncMock, return_value=(MagicMock(), *writes)) as mock_write,
+        patch.object(DocumentService, "commit_staged_document", new_callable=AsyncMock) as commit,
+    ):
         res = await service.apply_setting_change_proposal(col_id, proposal, actor_user_id=actor_id)
         assert res == doc
         mock_write.assert_awaited_once_with(
@@ -302,7 +315,9 @@ async def test_apply_proposal_update_existing_doc_occ_success() -> None:
             agent_role="writer_agent",
             workflow_run_id=None,
             change_summary="Equipment upgrade in chapter 2.",
+            setting_comments=[],
         )
+        commit.assert_awaited_once_with(doc, writes)
 
 
 @pytest.mark.anyio
@@ -321,6 +336,7 @@ async def test_apply_proposal_update_existing_doc_occ_conflict() -> None:
     doc.id = doc_id
     doc.setting_collection_id = col_id
     doc.current_version_id = uuid4()  # Newer version!
+    doc.metadata_ = {"comments": []}
 
     session.get.side_effect = lambda model, ident: {
         (SettingCollection, col_id): col,
@@ -339,13 +355,14 @@ async def test_apply_proposal_update_existing_doc_occ_conflict() -> None:
         reason="Stale update attempt.",
     )
 
-    with patch.object(
-        DocumentService,
-        "write_document",
-        side_effect=DocumentVersionConflictError("The document has a newer version."),
+    with (
+        patch.object(DocumentService, "read_version_content", new_callable=AsyncMock, return_value="Before"),
+        patch.object(DocumentService, "stage_write_document", side_effect=DocumentVersionConflictError("The document has a newer version.")),
+        patch.object(DocumentService, "commit_staged_document", new_callable=AsyncMock) as commit,
     ):
         with pytest.raises(DocumentVersionConflictError, match="The document has a newer version"):
             await service.apply_setting_change_proposal(col_id, proposal)
+        commit.assert_not_awaited()
 
 
 @pytest.mark.anyio

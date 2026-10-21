@@ -1,19 +1,31 @@
-import { useEffect, useEffectEvent, useImperativeHandle, useRef, useState, type CSSProperties, type ReactNode, type Ref } from 'react'
+import { useEffect, useEffectEvent, useImperativeHandle, useLayoutEffect, useRef, useState, type CSSProperties, type ReactNode, type Ref } from 'react'
 import { useLocation, useNavigate } from 'react-router-dom'
 import { flushSync } from 'react-dom'
-import { MotionFrame } from './StudioMotion'
+import { TextMotionSurface } from './StudioMotion'
 import OutlineEditor from './OutlineEditor'
+import type { OutlineInputHandle } from './ReferenceTextInput'
 import { useCommentDrag } from './useCommentDrag'
 import { reanchorComments, reanchorFeedbackComments, restoreOutlineComments, type OutlineComment } from './studioPreview'
 import SettingGraph from './SettingGraph'
 import SearchDialog from './SearchDialog'
 import SettingConversation from './SettingConversation'
 import SettingNoteList from './SettingNoteList'
-import { applySettingChanges, categoryNames, emptySettingConversation, noteLinks, readSettingWorkspace, resolveNote, settingExampleReply, settingStorageKey, stagedSettingComments, type SettingCategory, type SettingChange, type SettingConversation as Conversation, type SettingNote } from './settingNotes'
+import SettingTrashDialog, { type SettingTrashEntry } from './SettingTrashDialog'
+import SettingUndoToast from './SettingUndoToast'
+import SettingCollaborationPanel from './SettingCollaborationPanel'
+import type { SettingCollaborationAcceptance } from './api/settingCollaborationClient'
+import { readCreationDrafts, writeCreationDrafts, type CreationDraft } from './settingDrafts'
+import { applySettingChanges, categoryNames, categoryFromDocument, emptySettingConversation, noteLinks, readSettingWorkspace, resolveNote, settingExampleReply, settingStorageKey, stagedSettingComments, type SettingCategory, type SettingChange, type SettingConversation as Conversation, type SettingNote } from './settingNotes'
 import type { SettingCollection, SettingChangeProposal } from './api/client'
 import './studioSetting.css'
 
 export type SettingView = { id: string; category: SettingCategory; mode: 'note' | 'graph' | 'search' | 'chat' }
+
+export interface StudioSettingHandle {
+  flush: () => Promise<boolean>
+  getNoteSnapshot?: (documentId: string) => SettingNote | undefined
+  replaceSavedNote?: (documentId: string, body: string, versionId: string, comments: OutlineComment[], expected?: Pick<SettingNote, 'body' | 'comments'>) => void
+}
 
 export interface StudioSettingProps {
   preview?: boolean
@@ -21,7 +33,7 @@ export interface StudioSettingProps {
   activePage?: boolean
   ready?: boolean
   onTyping?: () => void
-  ref?: Ref<{ flush: () => Promise<boolean> }>
+  ref?: Ref<StudioSettingHandle>
   collection?: SettingCollection | null
   backendNotes?: SettingNote[]
   readOnly?: boolean
@@ -29,9 +41,11 @@ export interface StudioSettingProps {
   onSaveNoteContent?: (noteId: string, content: string, expectedVersionId?: string, comments?: OutlineComment[]) => Promise<{ versionId: string } | 'conflict' | false>
   onApplyProposal?: (proposal: SettingChangeProposal) => Promise<{ versionId: string; documentId: string } | 'conflict' | false>
   onRenameNote?: (noteId: string, newTitle: string) => Promise<boolean>
-  onCreateNote?: (category: SettingCategory, title: string, tempId: string) => Promise<SettingNote | null>
+  onCreateNote?: (category: SettingCategory, title: string, tempId: string, body?: string, comments?: OutlineComment[]) => Promise<SettingNote | null>
   onDeleteNotes?: (noteIds: string[]) => Promise<boolean | string[]>
   onRestoreNotes?: (noteIds: string[]) => Promise<boolean | string[]>
+  onLoadTrash?: () => Promise<SettingTrashEntry[]>
+  onCollaborationApplied?: (result: SettingCollaborationAcceptance, stableId: string) => void
   onViewChange?: (view: SettingView) => void
   onAssistantContext?: (context: { documentId?: string; versionId?: string }) => void
   initialView?: Partial<SettingView>
@@ -42,7 +56,7 @@ export interface StudioSettingProps {
   libraryFooter?: ReactNode
 }
 
-function LinkedText({ text, notes, references, comments, onOpen }: { text: string; notes: SettingNote[]; references: string[]; comments: OutlineComment[]; onOpen: (title: string) => void }) {
+function LinkedText({ text, notes, comments, onOpen }: { text: string; notes: SettingNote[]; comments: OutlineComment[]; onOpen: (title: string) => void }) {
   const parts: ReactNode[] = []
   const source = (value: string, start: number) => {
     const boundaries = [...new Set([start, start + value.length, ...comments.flatMap(comment => [comment.start, comment.end]).filter(point => point > start && point < start + value.length)])].sort((a, b) => a - b)
@@ -56,7 +70,7 @@ function LinkedText({ text, notes, references, comments, onOpen }: { text: strin
     const title = match[1].trim()
     parts.push(...source(text.slice(last, match.index), last))
     const target = resolveNote(notes, title)
-    parts.push(title ? <button key={`link-${match.index}`} className={`setting-inline-link${target ? '' : ' is-missing'}`} aria-label={title} title={target ? `${title}：${target.body.replace(/\[\[|\]\]/g, '').slice(0, 100)}` : `创建引用条目：${title}`} onClick={event => { if (window.getSelection()?.isCollapsed !== false && !(event.target as HTMLElement).closest('[data-reading-comment]')) onOpen(title) }}>{source(title, match.index + 2 + match[1].indexOf(title))}<sup aria-hidden="true">{references.indexOf(title) + 1}</sup></button> : match[0])
+    parts.push(title ? <button key={`link-${match.index}`} className={`setting-inline-link${target ? '' : ' is-missing'}`} aria-label={title} title={target ? `${title}：${target.body.replace(/\[\[|\]\]/g, '').slice(0, 100)}` : `创建引用条目：${title}`} onClick={event => { if (window.getSelection()?.isCollapsed !== false && !(event.target as HTMLElement).closest('[data-reading-comment]')) onOpen(title) }}>{source(title, match.index + 2 + match[1].indexOf(title))}</button> : match[0])
     last = match.index + match[0].length
   }
   parts.push(...source(text.slice(last), last))
@@ -80,6 +94,8 @@ export default function StudioSetting({
   onCreateNote,
   onDeleteNotes,
   onRestoreNotes,
+  onLoadTrash,
+  onCollaborationApplied,
   onViewChange,
   onAssistantContext,
   initialView,
@@ -89,6 +105,24 @@ export default function StudioSetting({
   defaultPinned,
   libraryFooter,
 }: StudioSettingProps) {
+  const directEditing = !preview
+  const draftScope = collection?.id || 'studio'
+  const [creationDrafts] = useState(() => readCreationDrafts(draftScope))
+  const [pendingCreations, setPendingCreations] = useState(creationDrafts)
+  const creationRequests = useRef(new Map(creationDrafts.flatMap(draft => draft.request ? [[draft.note.id, draft.request] as const] : [])))
+  const creationJournal = useRef<CreationDraft[]>(creationDrafts)
+  function journalCreation(note: SettingNote, request?: SettingNote) {
+    const entry = { note, request: request || creationRequests.current.get(note.id) }
+    const next = [...creationJournal.current.filter(item => item.note.id !== note.id), entry]
+    try { writeCreationDrafts(draftScope, next); creationJournal.current = next; setPendingCreations(next) }
+    catch { setError('草稿备份失败，请保持页面打开并复制内容。') }
+  }
+  function clearCreation(id: string) {
+    creationJournal.current = creationJournal.current.filter(item => item.note.id !== id)
+    setPendingCreations(creationJournal.current)
+    writeCreationDrafts(draftScope, creationJournal.current)
+    creationRequests.current.delete(id)
+  }
   const location = useLocation(), navigate = useNavigate()
   const searchParams = new URLSearchParams(location.search)
   const initialCategoryParam = searchParams.get('category') as SettingCategory | null
@@ -97,8 +131,10 @@ export default function StudioSetting({
 
   const [initial] = useState(() => {
     if (backendNotes) {
-      const restored = backendNotes.map(n => {
+      const restored = backendNotes.filter(n => !creationDrafts.some(draft => draft.note.id === n.id || draft.note.id === n.creationRequestId || draft.note.documentId === n.id || draft.note.documentId && draft.note.documentId === n.documentId)).map(n => {
         try {
+          const recoveredTitle = sessionStorage.getItem(`guranovel:setting-title-recovery:${n.documentId || n.id}`)
+          if (recoveredTitle !== null) n = { ...n, title: recoveredTitle }
           const feedback = JSON.parse(sessionStorage.getItem(`guranovel:setting-feedback-recovery:${n.id}`) || 'null')
           if (feedback && typeof feedback.body === 'string' && typeof feedback.versionId === 'string') {
             return { ...n, body: feedback.body as string, versionId: feedback.versionId as string,
@@ -113,7 +149,7 @@ export default function StudioSetting({
         }
         return n
       })
-      return { notes: restored, conversation: initialConversation || emptySettingConversation(), error: '' }
+      return { notes: [...restored, ...creationDrafts.map(draft => draft.note)], conversation: initialConversation || emptySettingConversation(), error: '' }
     }
     if (!preview) return { notes: [] as SettingNote[], conversation: initialConversation || emptySettingConversation(), error: '' }
     try {
@@ -132,13 +168,16 @@ export default function StudioSetting({
   const [category, setCategory] = useState<SettingCategory>(
     initialCategoryParam || location.state?.settingView?.category || initialView?.category || 'setting'
   )
-  const [selectedId, setSelectedId] = useState(
-    initialNoteParam || location.state?.settingView?.id || initialView?.id || initial.notes[0]?.id || ''
-  )
+  const [selectedId, setSelectedId] = useState(() => {
+    const requested = initialNoteParam || location.state?.settingView?.id || initialView?.id
+    return initial.notes.find(note => note.id === requested || note.documentId === requested || note.creationRequestId === requested)?.id
+      || initial.notes.find(note => note.category === (initialCategoryParam || initialView?.category || 'setting'))?.id || initial.notes[0]?.id || ''
+  })
   const [mode, setMode] = useState<SettingView['mode']>(
-    initialModeParam || location.state?.settingView?.mode || initialView?.mode || 'note'
+    !preview && initialModeParam === 'chat' ? 'note' : initialModeParam || location.state?.settingView?.mode || initialView?.mode || 'note'
   )
-  const [editing, setEditing] = useState(false)
+  const [manualEditing, setEditing] = useState(false)
+  const editing = directEditing || manualEditing
   const [searchReturnMode, setSearchReturnMode] = useState<SettingView['mode']>(mode === 'search' ? 'note' : mode)
   const displayMode = mode === 'search' ? searchReturnMode : mode
   const [draftTitle, setDraftTitle] = useState('')
@@ -150,7 +189,10 @@ export default function StudioSetting({
     write.promise = (previous?.promise ?? Promise.resolve(true)).then(() => onRenameNote!(id, title)).then(success => {
       write.success = success
       if (!success) setError('标题尚未保存，请保持页面打开并重试。')
-      else if (titleWrites.current.get(id) === write) setError(value => value === '标题尚未保存，请保持页面打开并重试。' ? '' : value)
+      else if (titleWrites.current.get(id) === write) {
+        if (sessionStorage.getItem(`guranovel:setting-title-recovery:${id}`)?.trim() === title) sessionStorage.removeItem(`guranovel:setting-title-recovery:${id}`)
+        setError(value => value === '标题尚未保存，请保持页面打开并重试。' ? '' : value)
+      }
       return success
     }).catch(() => { write.success = false; setError('标题尚未保存，请保持页面打开并重试。'); return false })
     titleWrites.current.set(id, write)
@@ -168,14 +210,33 @@ export default function StudioSetting({
   const [sweep, setSweep] = useState(0)
   const [error, setError] = useState(initial.error)
   const [deleted, setDeleted] = useState<{ items: { note: SettingNote; index: number }[]; staged: NonNullable<Conversation['stagedComments']> } | null>(null)
+  const [trashOpen, setTrashOpen] = useState(false)
+  const [undoOperation, setUndoOperation] = useState<{ id: string; ids: string[] } | null>(null)
+  const [collaborationOpen, setCollaborationOpen] = useState(false)
+  const previousCollaborationOpen = useRef(false)
+  const [sentFeedback, setSentFeedback] = useState<Record<string, string>>(() => {
+    try {
+      const value: unknown = JSON.parse(sessionStorage.getItem(`guranovel:setting-feedback-sent:${draftScope}`) || '{}')
+      return value && typeof value === 'object' && !Array.isArray(value) ? Object.fromEntries(Object.entries(value).filter((entry): entry is [string, string] => typeof entry[1] === 'string')) : {}
+    }
+    catch { return {} }
+  })
   const mutationPending = useRef(false)
   const [mutationBusy, setMutationBusy] = useState(false)
-  const noteInput = useRef<HTMLTextAreaElement>(null)
+  const noteInput = useRef<OutlineInputHandle>(null)
+  const documentScroll = useRef<HTMLDivElement>(null)
+  const editorBookmarks = useRef(new Map<string, { start: number; end: number; scrollTop: number }>())
+  const titleInput = useRef<HTMLInputElement>(null)
+  const titleTimers = useRef(new Map<string, ReturnType<typeof setTimeout>>())
 
   const [prevBackendNotes, setPrevBackendNotes] = useState(backendNotes)
   if (backendNotes && backendNotes !== prevBackendNotes) {
     setPrevBackendNotes(backendNotes)
-    const restored = backendNotes.map(n => {
+    const restored = backendNotes.filter(n => !pendingCreations.some(draft => draft.note.id === n.id || draft.note.id === n.creationRequestId || draft.note.documentId === n.id || draft.note.documentId && draft.note.documentId === n.documentId)).map(n => {
+      const local = notes.find(item => item.id === n.id)
+      if (local && sessionStorage.getItem(`guranovel:setting-draft-recovery:${n.id}`) !== null) return local
+      const titleRecovery = sessionStorage.getItem(`guranovel:setting-title-recovery:${n.documentId || n.id}`)
+      if (titleRecovery !== null) n = { ...n, title: titleRecovery }
       try {
         const draft = sessionStorage.getItem(`guranovel:setting-draft-recovery:${n.id}`)
         if (draft !== null && draft !== n.body) {
@@ -186,15 +247,16 @@ export default function StudioSetting({
       }
       return n
     })
-    setNotes(restored)
-    if (restored.length > 0) {
-      if (!selectedId || !restored.some(n => n.id === selectedId)) {
-        const initialTarget = initialNoteParam && restored.find(n => n.id === initialNoteParam)
+    const merged = [...restored, ...pendingCreations.map(draft => draft.note)]
+    setNotes(merged)
+    if (merged.length > 0) {
+      if (!selectedId || !merged.some(n => n.id === selectedId)) {
+        const initialTarget = initialNoteParam && merged.find(n => n.id === initialNoteParam)
         if (initialTarget) {
           setSelectedId(initialTarget.id)
         } else {
           const cat = initialCategoryParam || category
-          const found = restored.find(n => n.category === cat) || restored[0]
+          const found = merged.find(n => n.category === cat) || merged[0]
           setSelectedId(found.id)
         }
       }
@@ -206,13 +268,42 @@ export default function StudioSetting({
   }, [notes])
 
   const active = notes.find(note => note.id === selectedId)
+  useLayoutEffect(() => {
+    const returning = previousCollaborationOpen.current && !collaborationOpen
+    previousCollaborationOpen.current = collaborationOpen
+    if (returning) noteInput.current?.focus({ preventScroll: true })
+  }, [collaborationOpen])
+  useLayoutEffect(() => {
+    const input = noteInput.current, scroll = documentScroll.current, id = active?.id
+    if (!input || !scroll || !id || displayMode !== 'note') return
+    const saved = editorBookmarks.current.get(id)
+    if (saved) { input.setSelectionRange(saved.start, saved.end); scroll.scrollTop = saved.scrollTop }
+    else scroll.scrollTop = 0
+    const bookmarks = editorBookmarks.current
+    return () => { bookmarks.set(id, { start: input.selectionStart, end: input.selectionEnd, scrollTop: scroll.scrollTop }) }
+  }, [active?.id, displayMode])
+  const canonicalizeNote = useEffectEvent(() => {
+    if (!syncUrlParams || !active?.documentId) return
+    const params = new URLSearchParams(location.search)
+    if (params.get('note') === active.documentId) return
+    params.set('note', active.documentId)
+    navigate({ pathname: location.pathname, search: `?${params}` }, { replace: true, state: { ...location.state, settingView: { id: active.id, category, mode } } })
+  })
+  useEffect(() => { canonicalizeNote() }, [active?.documentId])
   useEffect(() => { onAssistantContext?.({ documentId: active?.documentId, versionId: active?.versionId }) }, [onAssistantContext, active?.documentId, active?.versionId])
   const readOnly = explicitReadOnly !== undefined ? explicitReadOnly : ((!preview && !onSaveNoteContent && !onApplyProposal) || Boolean(initial.error))
   const shown = notes.filter(note => note.category === category)
   const results = notes.filter(note => `${note.title}\n${note.body}`.toLocaleLowerCase().includes(query.trim().toLocaleLowerCase()))
   const sidebarVisible = pinned || (sidebarOpen && !hidden)
   const references = active ? noteLinks(active.body) : []
-  const stagedIds = (conversation.stagedComments || []).filter(item => item.noteId === active?.id).map(item => item.commentId)
+  const feedbackKey = active?.documentId || active?.id || ''
+  const feedbackSignature = (active?.comments || []).filter(comment => !comment.submitted).map(comment => `引用：${comment.quote}\n修改意见：${comment.text}`).join('\n\n')
+  const stagedIds = [...(conversation.stagedComments || []).filter(item => item.noteId === active?.id).map(item => item.commentId), ...(feedbackSignature && sentFeedback[feedbackKey] === feedbackSignature ? (active?.comments || []).map(comment => comment.id) : [])]
+  const collectionFeedback = notes.flatMap(note => {
+    const key = note.documentId || note.id
+    const signature = (note.comments || []).filter(comment => !comment.submitted).map(comment => `引用：${comment.quote}\n修改意见：${comment.text}`).join('\n\n')
+    return signature && sentFeedback[key] !== signature ? [{ key, signature, text: `条目：${note.title || `未命名${categoryNames[note.category]}`}\n${signature}` }] : []
+  })
   const submitted = active?.comments?.filter(comment => comment.submitted || stagedIds.includes(comment.id)) || []
 
   function rememberView(next: SettingView) {
@@ -220,7 +311,7 @@ export default function StudioSetting({
     if (JSON.stringify(current) === JSON.stringify(next)) return
     if (syncUrlParams) {
       const params = new URLSearchParams(location.search)
-      if (next.id) params.set('note', next.id); else params.delete('note')
+      if (next.id) params.set('note', currentNotes.current.find(note => note.id === next.id)?.documentId || next.id); else params.delete('note')
       params.set('category', next.category)
       params.set('mode', next.mode)
       navigate({ pathname: location.pathname, search: `?${params.toString()}` }, {
@@ -239,7 +330,24 @@ export default function StudioSetting({
     lastSavedBody: string | null
     waiters: Array<(success: boolean) => void>
   }
-  const saveQueues = useRef<Map<string, NoteSaveQueue>>(new Map())
+  const [initialSavedSnapshots] = useState(() => new Map((backendNotes || initial.notes).map(note => [note.id, JSON.stringify([note.body, note.comments || []])])))
+  const savedSnapshots = useRef(initialSavedSnapshots)
+  const saveQueues = useRef<Map<string, NoteSaveQueue>>(new Map(initial.notes.map(note => [note.id, { timer: null, inFlight: false, lastSavedBody: initialSavedSnapshots.get(note.id) ?? null, waiters: [] }])))
+  useEffect(() => {
+    const timers = titleTimers.current
+    if (onRenameNote) for (const note of initial.notes) {
+      const title = sessionStorage.getItem(`guranovel:setting-title-recovery:${note.documentId || note.id}`)
+      if (title?.trim()) enqueueTitle(note.documentId || note.id, title.trim())
+    }
+    const warn = (event: BeforeUnloadEvent) => {
+      if ([...saveQueues.current.values()].some(queue => queue.timer || queue.inFlight) || creationJournal.current.length
+        || currentNotes.current.some(note => JSON.stringify([note.body, note.comments || []]) !== savedSnapshots.current.get(note.id))) { event.preventDefault(); event.returnValue = '' }
+    }
+    window.addEventListener('beforeunload', warn)
+    return () => { window.removeEventListener('beforeunload', warn); timers.forEach(clearTimeout) }
+  // Recovery is loaded once for this editor session.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
 
   useEffect(() => {
     const queues = saveQueues.current
@@ -254,7 +362,7 @@ export default function StudioSetting({
     if (!onSaveNoteContent) return true
     let q = saveQueues.current.get(id)
     if (!q) {
-      q = { timer: null, inFlight: false, lastSavedBody: null, waiters: [] }
+      q = { timer: null, inFlight: false, lastSavedBody: savedSnapshots.current.get(id) ?? null, waiters: [] }
       saveQueues.current.set(id, q)
     }
     if (q.timer) {
@@ -266,6 +374,8 @@ export default function StudioSetting({
     }
     const note = currentNotes.current.find(n => n.id === id)
     if (!note) return true
+    if (note.localDraft && !note.title.trim() && !note.body.trim()) return true
+    if (note.localDraft && /[\]\n[]/.test(note.title)) { setError('标题不能含方括号或换行，草稿已保留。'); return false }
     const snapshot = JSON.stringify([note.body, note.comments || []])
     if (q.lastSavedBody === snapshot) {
       try {
@@ -274,16 +384,46 @@ export default function StudioSetting({
       } catch (_err: unknown) {
         void _err
       }
+      if (creationJournal.current.some(item => item.note.id === id) && ![...titleWrites.current.values()].some(write => write.success !== true)) clearCreation(id)
       return true
     }
 
     q.inFlight = true
     const bodyToSave = note.body
     const expectedVersion = note.versionId
+    const finishSuperseded = async () => {
+      q!.inFlight = false
+      const waiters = q!.waiters.splice(0)
+      const saved = await runSave(id)
+      waiters.forEach(resolve => resolve(saved))
+      return saved
+    }
 
     try {
-      const res = note.comments === undefined ? await onSaveNoteContent(id, bodyToSave, expectedVersion)
-        : await onSaveNoteContent(id, bodyToSave, expectedVersion, note.comments)
+      if (note.localDraft && onCreateNote) {
+        const request = creationRequests.current.get(id) || { ...note, title: note.title.trim() || `未命名${categoryNames[note.category]}` }
+        creationRequests.current.set(id, request)
+        journalCreation(note, request)
+        const created = await onCreateNote(request.category, request.title, id, request.body, request.comments || [])
+        if (!created?.versionId) throw new Error('create failed')
+        const latest = currentNotes.current.find(n => n.id === id) || note
+        const updated = { ...latest, documentId: created.documentId || created.id, versionId: created.versionId, localDraft: false }
+        currentNotes.current = currentNotes.current.map(n => n.id === id ? updated : n)
+        setNotes(currentNotes.current)
+        if (latest.title.trim() && latest.title !== request.title && onRenameNote) enqueueTitle(updated.documentId!, latest.title.trim())
+        q.lastSavedBody = JSON.stringify([request.body, request.comments || []])
+        savedSnapshots.current.set(id, q.lastSavedBody)
+        q.inFlight = false
+        journalCreation(updated, request)
+        const saved = await runSave(id)
+        const waiters = q.waiters.splice(0); waiters.forEach(resolve => resolve(saved))
+        return saved
+      }
+      const documentId = note.documentId || id
+      const res = await onSaveNoteContent(documentId, bodyToSave, expectedVersion, note.comments || [])
+      // Explicit replacement or Agent adoption retires the old queue. A delayed
+      // acknowledgement must not restore its older version or clear new recovery.
+      if (saveQueues.current.get(id) !== q) return finishSuperseded()
       if (res === 'conflict') {
         q.inFlight = false
         const w = q.waiters
@@ -292,6 +432,7 @@ export default function StudioSetting({
         return false
       } else if (res && typeof res === 'object' && res.versionId) {
         q.lastSavedBody = snapshot
+        savedSnapshots.current.set(id, snapshot)
         const updated = currentNotes.current.map(n => n.id === id ? { ...n, versionId: res.versionId } : n)
         currentNotes.current = updated
         setNotes(updated)
@@ -299,6 +440,7 @@ export default function StudioSetting({
 
         const latestNote = currentNotes.current.find(n => n.id === id)
         if (latestNote && JSON.stringify([latestNote.body, latestNote.comments || []]) !== snapshot) {
+          sessionStorage.setItem(`guranovel:setting-feedback-recovery:${id}`, JSON.stringify({ body: latestNote.body, comments: latestNote.comments || [], versionId: res.versionId }))
           return runSave(id)
         } else {
           try {
@@ -308,12 +450,14 @@ export default function StudioSetting({
             void _err
           }
           setError('')
+          if (creationJournal.current.some(item => item.note.id === id)) clearCreation(id)
           const w = q.waiters
           q.waiters = []
           w.forEach(resolve => resolve(true))
           return true
         }
       } else {
+        setError('内容尚未保存，草稿已保留，请重试。')
         q.inFlight = false
         const w = q.waiters
         q.waiters = []
@@ -321,6 +465,8 @@ export default function StudioSetting({
         return false
       }
     } catch {
+      if (saveQueues.current.get(id) !== q) return finishSuperseded()
+      setError('内容尚未保存，草稿已保留，请重试。')
       q.inFlight = false
       const w = q.waiters
       q.waiters = []
@@ -332,7 +478,7 @@ export default function StudioSetting({
   function enqueueSave(id: string, debounceMs = 400) {
     let q = saveQueues.current.get(id)
     if (!q) {
-      q = { timer: null, inFlight: false, lastSavedBody: null, waiters: [] }
+      q = { timer: null, inFlight: false, lastSavedBody: savedSnapshots.current.get(id) ?? null, waiters: [] }
       saveQueues.current.set(id, q)
     }
     if (q.timer) {
@@ -356,7 +502,10 @@ export default function StudioSetting({
       setConversation(chat)
       for (const changed of next) {
         const before = previous.find(note => note.id === changed.id)
-        if (!before || before.body === changed.body && before.comments === changed.comments) continue
+        if (changed.localDraft || creationJournal.current.some(item => item.note.id === changed.id)) {
+          if (changed.title.trim() || changed.body.trim()) journalCreation(changed)
+        }
+        if (!before || before.body === changed.body && before.comments === changed.comments && (!changed.localDraft || before.title === changed.title)) continue
         try {
           sessionStorage.setItem(`guranovel:setting-draft-recovery:${changed.id}`, changed.body)
           sessionStorage.setItem(`guranovel:setting-feedback-recovery:${changed.id}`, JSON.stringify({
@@ -397,17 +546,19 @@ export default function StudioSetting({
       const chat = currentConversation.current, staged = (chat.stagedComments || []).filter(item => succeeded.includes(item.noteId))
       const next = currentNotes.current.filter(note => !succeeded.includes(note.id))
       if (!persist(next, { ...chat, contextId: succeeded.includes(chat.contextId || '') ? null : chat.contextId, stagedComments: chat.stagedComments?.filter(item => !succeeded.includes(item.noteId)) }, true)) return
-      setDeleted(previous => ({ items: [...(previous?.items || []), ...items.filter(item => succeeded.includes(item.note.id))], staged: [...(previous?.staged || []), ...staged] }))
+      setDeleted({ items: items.filter(item => succeeded.includes(item.note.id)), staged })
+      setUndoOperation({ id: crypto.randomUUID(), ids: succeeded })
       if (succeeded.includes(selectedId)) { setSelectedId(next.find(note => note.category === category)?.id || ''); setEditing(false) }
-      setError(succeeded.length === ids.length ? '' : '部分删除失败，失败条目仍保留，可重试。')
+      setError(succeeded.length === ids.length ? '' : '部分删除失败或结果尚未确认，条目仍保留，可重试核对。')
     }
     if (onDeleteNotes) {
       mutationPending.current = true; setMutationBusy(true)
       void (async () => {
         try {
-          for (const id of ids) { if (!await runSave(id)) { setError('内容尚未保存，已暂停删除。'); return } }
-          const result = await onDeleteNotes(ids)
-          commit(result === true ? ids : Array.isArray(result) ? result.filter(id => ids.includes(id)) : [])
+          if (!await flushAll()) { setError('内容尚未保存，已暂停删除。'); return }
+          const remoteIds = ids.map(id => currentNotes.current.find(note => note.id === id)?.documentId || id)
+          const result = await onDeleteNotes(remoteIds)
+          commit(result === true ? ids : Array.isArray(result) ? ids.filter((_, index) => result.includes(remoteIds[index])) : [])
         } catch { setError('删除失败，条目仍保留，请重试。') }
         finally { mutationPending.current = false; setMutationBusy(false) }
       })()
@@ -435,15 +586,31 @@ export default function StudioSetting({
     } else if (preview) commit(ids)
     else setError('恢复失败，服务端恢复功能尚未接入。')
   }
+  async function restoreEntries(ids: string[]): Promise<string[]> {
+    if (readOnly || mutationPending.current) return []
+    mutationPending.current = true; setMutationBusy(true)
+    try {
+      const remoteIds = ids.map(id => deleted?.items.find(item => item.note.id === id)?.note.documentId || id)
+      const result = onRestoreNotes ? await onRestoreNotes(remoteIds) : preview ? remoteIds : []
+      const succeeded = result === true ? ids : Array.isArray(result) ? ids.filter((_, index) => result.includes(remoteIds[index])) : []
+      if (deleted) {
+        const next = [...currentNotes.current]
+        deleted.items.filter(item => succeeded.includes(item.note.id)).forEach(({ note, index }) => { if (!next.some(item => item.id === note.id || item.documentId && item.documentId === note.documentId)) next.splice(Math.min(index, next.length), 0, note) })
+        persist(next, currentConversation.current, true)
+      }
+      setDeleted(previous => previous ? { ...previous, items: previous.items.filter(item => !succeeded.includes(item.note.id)) } : null)
+      return succeeded
+    } finally { mutationPending.current = false; setMutationBusy(false) }
+  }
   function create(title?: string) {
     if (readOnly) return
     if (editing && !titleCommit()) return
     const current = currentNotes.current
-    let name = title || `未命名${categoryNames[category]}`, suffix = 2
-    while (current.some(note => note.title === name)) name = `${title || `未命名${categoryNames[category]}`} ${suffix++}`
+    let name = title || (directEditing ? '' : `未命名${categoryNames[category]}`), suffix = 2
+    while (name && current.some(note => note.title === name)) name = `${title || `未命名${categoryNames[category]}`} ${suffix++}`
     const tempId = crypto.randomUUID()
-    const note: SettingNote = { id: tempId, category, title: name, body: '' }
-    if (onCreateNote) {
+    const note: SettingNote = { id: tempId, category, title: name, body: '', comments: [], localDraft: directEditing && Boolean(onCreateNote) }
+    if (onCreateNote && !directEditing) {
       void onCreateNote(category, name, tempId).then(createdNote => {
         if (createdNote) {
           const updated = currentNotes.current.map(n => n.id === tempId ? { ...n, id: createdNote.id, documentId: createdNote.id, versionId: createdNote.versionId } : n)
@@ -456,9 +623,10 @@ export default function StudioSetting({
         }
       })
     }
-    if (!persist([...current, note])) return
+    if (!persist([...current.filter(item => !(item.localDraft && !item.title.trim() && !item.body.trim())), note])) return
     rememberView({ id: note.id, category, mode: 'note' })
     setSelectedId(note.id); setMode('note'); setEditing(true); setDraftTitle(name); setQuery('')
+    if (directEditing) { setCollaborationOpen(false); if (name) { journalCreation(note); enqueueSave(note.id) }; queueMicrotask(() => titleInput.current?.focus()) }
   }
   function openTitle(title: string) {
     const target = resolveNote(notes, title)
@@ -468,6 +636,7 @@ export default function StudioSetting({
   }
   function titleCommit() {
     if (!active || readOnly) return true
+    if (directEditing) return true
     const nextTitle = draftTitle.trim()
     if (!nextTitle || /[\]\n[]/.test(nextTitle)) { setError('请输入标题，标题不能含方括号或换行。'); return false }
     if (notes.some(note => note.id !== active.id && note.title === nextTitle)) { setError('已有同名条目，请使用不同的标题。'); return false }
@@ -480,6 +649,25 @@ export default function StudioSetting({
       return { ...note, title: note.id === active.id ? nextTitle : note.title, body, ...(note.comments ? { comments: reanchorComments(note.comments, note.body, body) } : {}) }
     }))
   }
+  function updateDirectTitle(value: string) {
+    if (!active || readOnly) return
+    const old = active.title
+    persist(currentNotes.current.map(note => {
+      const body = old.trim() && value.trim() && !/[\]\n[]/.test(value) ? note.body.replace(/\[\[([^\]\n[]+)\]\]/g, (match, title: string) => title.trim() === old.trim() ? `[[${value.trim()}]]` : match) : note.body
+      return { ...note, title: note.id === active.id ? value : note.title, body, comments: body === note.body ? note.comments : reanchorComments(note.comments || [], note.body, body) }
+    }))
+    if (active.localDraft) return
+    const previous = titleTimers.current.get(active.id)
+    if (previous) clearTimeout(previous)
+    const id = active.id, documentId = active.documentId || id
+    try { sessionStorage.setItem(`guranovel:setting-title-recovery:${documentId}`, value) }
+    catch { setError('标题备份失败，请保持页面打开并复制内容。') }
+    titleTimers.current.set(id, setTimeout(() => {
+      titleTimers.current.delete(id)
+      if (!value.trim() || /[\]\n[]/.test(value)) { setError('请输入标题，标题不能含方括号或换行。'); return }
+      if (onRenameNote) enqueueTitle(documentId, value.trim())
+    }, 400))
+  }
   const restoreView = useEffectEvent(() => {
     const view = location.state?.settingView as SettingView | undefined
     if (!view || (view.id === selectedId && view.category === category && view.mode === mode)) return
@@ -487,7 +675,7 @@ export default function StudioSetting({
       navigate(location, { replace: true, state: { ...location.state, settingView: { id: selectedId, category, mode } } })
       return
     }
-    const note = currentNotes.current.find(note => note.id === view.id)
+    const note = currentNotes.current.find(note => note.id === view.id || note.documentId === view.id || note.creationRequestId === view.id)
     setSelectedId(note?.id || currentNotes.current.find(note => note.category === view.category)?.id || '')
     setCategory(view.category); setMode(view.mode); setEditing(false)
     if (view.mode === 'chat') setChatVisited(true)
@@ -660,6 +848,11 @@ export default function StudioSetting({
     }
   }
   function discussNote() {
+    if (directEditing) {
+      if (displayMode !== 'note') { rememberView({ id: selectedId, category, mode: 'note' }); setMode('note') }
+      setCollaborationOpen(true)
+      return
+    }
     if (!active || (editing && !titleCommit())) return
     if (!persist(currentNotes.current, { ...currentConversation.current, contextId: active.id })) return
     setMode('chat'); setEditing(false); setChatVisited(true)
@@ -675,6 +868,7 @@ export default function StudioSetting({
     const note = currentNotes.current.find(note => note.id === active.id)!
     const pending = note.comments?.filter(comment => !comment.submitted && !stagedIds.includes(comment.id)) || []
     if (!pending.length || pending.some(comment => !comment.text.trim())) return
+    if (directEditing) { setCollaborationOpen(true); return }
     const chat = currentConversation.current
     const commit = () => {
       if (!persist(currentNotes.current, { ...chat, contextId: note.id, stagedComments: [...(chat.stagedComments || []), ...pending.map(comment => ({ noteId: note.id, commentId: comment.id }))] }, true)) return
@@ -695,9 +889,25 @@ export default function StudioSetting({
   const commentDots = useCommentDrag(!readOnly && mode === 'note' && submitted.length > 0, ids => updateNoteComments([
     ...(active?.comments || []).filter(comment => !submitted.some(item => item.id === comment.id)), ...ids.map(id => submitted.find(comment => comment.id === id)!),
   ]))
-  useImperativeHandle(ref, () => ({ flush: async () => {
+  async function flushAll(): Promise<boolean> {
     if (editing && !titleCommit()) return false
     if (readOnly) return true
+    for (const note of currentNotes.current) {
+      if (note.localDraft || sessionStorage.getItem(`guranovel:setting-title-recovery:${note.documentId || note.id}`) !== null) {
+        if ((note.title.trim() || !note.localDraft) && (!note.title.trim() || /[\]\n[]/.test(note.title) || currentNotes.current.some(other => other.id !== note.id && other.title.trim() === note.title.trim()))) {
+          setError('标题不能为空、重复或含方括号与换行，草稿已保留。'); return false
+        }
+      }
+    }
+    for (const [id, timer] of titleTimers.current) {
+      clearTimeout(timer)
+      const note = currentNotes.current.find(note => note.id === id)
+      if (note && onRenameNote) {
+        if (!note.title.trim() || /[\]\n[]/.test(note.title)) { setError('请输入标题，标题不能含方括号或换行。'); return false }
+        enqueueTitle(note.documentId || id, note.title.trim())
+      }
+    }
+    titleTimers.current.clear()
     for (const [id, write] of titleWrites.current) if (write.success === false) enqueueTitle(id, write.title)
     if (!(await Promise.all([...titleWrites.current.values()].map(write => write.promise))).every(Boolean)) return false
     if (onSaveNoteContent) {
@@ -715,7 +925,63 @@ export default function StudioSetting({
       return results.every(Boolean)
     }
     return persist(currentNotes.current)
-  } }))
+  }
+  function getNoteSnapshot(documentId: string) {
+    return currentNotes.current.find(note => note.id === documentId || note.documentId === documentId)
+  }
+  function replaceSavedNote(documentId: string, body: string, versionId: string, comments: OutlineComment[], expected?: Pick<SettingNote, 'body' | 'comments'>) {
+    const target = currentNotes.current.find(note => note.id === documentId || note.documentId === documentId)
+    if (!target) return
+    const newerWriting = expected && JSON.stringify([target.body, target.comments || []]) !== JSON.stringify([expected.body, expected.comments || []])
+    const next = { ...target, documentId, body: newerWriting ? target.body : body, versionId, comments: newerWriting ? target.comments || [] : comments, localDraft: false }
+    const queue = saveQueues.current.get(target.id)
+    if (queue?.timer) clearTimeout(queue.timer)
+    saveQueues.current.delete(target.id)
+    savedSnapshots.current.set(target.id, JSON.stringify([body, comments]))
+    currentNotes.current = currentNotes.current.map(note => note.id === target.id ? next : note)
+    setNotes(currentNotes.current)
+    // An explicit conflict choice supersedes both the editing recovery copy and
+    // any first-creation journal still retaining a newer, previously failed save.
+    clearCreation(target.id)
+    for (const id of new Set([target.id, documentId])) {
+      sessionStorage.removeItem(`guranovel:setting-draft-recovery:${id}`)
+      sessionStorage.removeItem(`guranovel:setting-feedback-recovery:${id}`)
+    }
+    if (newerWriting) {
+      sessionStorage.setItem(`guranovel:setting-draft-recovery:${target.id}`, next.body)
+      sessionStorage.setItem(`guranovel:setting-feedback-recovery:${target.id}`, JSON.stringify({ body: next.body, comments: next.comments, versionId }))
+      enqueueSave(target.id)
+    }
+    setError('')
+  }
+  useImperativeHandle(ref, () => ({ flush: flushAll, getNoteSnapshot, replaceSavedNote }))
+
+  async function prepareCollaboration(): Promise<boolean> {
+    // The main Agent reads the collection. Opening or sending must not manufacture
+    // an empty target document; only actual author writing is flushed here.
+    return await flushAll()
+  }
+  function applyCollaboration(result: SettingCollaborationAcceptance, base?: SettingNote): boolean {
+    if (base && result.document.id !== (base.documentId || base.id)) return false
+    const current = currentNotes.current.find(note => note.documentId === result.document.id || note.id === result.document.id || base && note.id === base.id)
+    if (current && current.versionId === result.document.current_version_id && current.body === result.content && current.title === result.document.title) return true
+    if (base ? !current || current.body !== base.body || current.title !== base.title || current.versionId !== base.versionId : current) return false
+    const category = categoryFromDocument(result.document)
+    const next: SettingNote = { ...current, id: current?.id || result.document.id, documentId: result.document.id, title: result.document.title || '未命名设定', category,
+      versionId: result.document.current_version_id || undefined, body: result.content, comments: reanchorFeedbackComments(current?.comments || [], current?.body || '', result.content) }
+    const queue = saveQueues.current.get(next.id)
+    if (queue?.timer) clearTimeout(queue.timer)
+    saveQueues.current.delete(next.id)
+    savedSnapshots.current.set(next.id, JSON.stringify([next.body, next.comments || []]))
+    currentNotes.current = current ? currentNotes.current.map(note => note.id === current.id ? next : note) : [...currentNotes.current, next]
+    setNotes(currentNotes.current)
+    sessionStorage.removeItem(`guranovel:setting-draft-recovery:${next.id}`)
+    sessionStorage.removeItem(`guranovel:setting-feedback-recovery:${next.id}`)
+    onCollaborationApplied?.(result, next.id)
+    setSelectedId(next.id); setCategory(next.category); setMode('note')
+    rememberView({ id: next.id, category: next.category, mode: 'note' })
+    return true
+  }
 
   const sidebarStatus = saveStatusText ?? (collection?.status === 'archived' ? '已归档 · 只读' : preview ? '交互预览' : '')
   return <div className="studio-setting" aria-label="作品设定">
@@ -729,17 +995,19 @@ export default function StudioSetting({
         <button className="studio-icon" aria-label={pinned ? '取消固定设定侧边栏' : '固定设定侧边栏'} aria-pressed={pinned} onClick={() => setPinned(!pinned)}><img src={`/ui/studio/${pinned ? 'pin' : 'unpin'}.svg`} alt="" /></button>
       </div>
       <div className="setting-library-actions">
-        <div className="setting-new-row"><button className="setting-new" aria-pressed={mode === 'chat'} onClick={() => { setSweep(value => value + 1); showMode('chat') }} disabled={readOnly}>{sweep > 0 && <span key={sweep} className="setting-action-sweep" aria-hidden="true" />}<img src="/ui/setting/append.svg" alt="" />新建内容</button><button className="setting-manual-new" aria-label="手动新建条目" title="手动新建条目" disabled={readOnly} onClick={() => create()}><img src="/ui/studio/add.svg" alt="" /></button></div>
+        <div className="setting-new-row"><button className="setting-new" aria-pressed={mode === 'chat'} onClick={() => { setSweep(value => value + 1); if (directEditing) create(); else showMode('chat') }} disabled={readOnly}>{sweep > 0 && <span key={sweep} className="setting-action-sweep" aria-hidden="true" />}<img src="/ui/setting/append.svg" alt="" />新建内容</button>{!directEditing && <button className="setting-manual-new" aria-label="手动新建条目" title="手动新建条目" disabled={readOnly} onClick={() => create()}><img src="/ui/studio/add.svg" alt="" /></button>}</div>
         <button className={mode === 'graph' ? 'is-active' : ''} aria-pressed={mode === 'graph'} onClick={() => showMode('graph')}><img src="/ui/setting/commit.svg" alt="" />关系图谱</button>
         <button className={mode === 'search' ? 'is-active' : ''} aria-pressed={mode === 'search'} onClick={() => showMode('search')}><img src="/ui/setting/search.svg" alt="" />搜索内容</button>
       </div>
-      <SettingNoteList notes={shown} category={category} activeId={displayMode === 'note' ? active?.id : undefined} disabled={readOnly || !activePage} onOpen={choose} onOrder={orderNotes} onDelete={deleteNotes} />
+      <SettingNoteList notes={shown.map(note => note.title ? note : { ...note, title: `未命名${categoryNames[note.category]}` })} category={category} activeId={displayMode === 'note' ? active?.id : undefined} disabled={readOnly || !activePage} onOpen={choose} onOrder={orderNotes} onDelete={deleteNotes} />
       {mutationBusy && <p role="status">正在同步删除或恢复…</p>}
-      {deleted && <div className="setting-delete-undo" role="status"><small>已删除 {deleted.items.length} 项，正文引用保留</small><button type="button" disabled={mutationBusy} onClick={undoDelete}>撤销删除</button></div>}
+      {!directEditing && deleted && <div className="setting-delete-undo" role="status"><small>已删除 {deleted.items.length} 项，正文引用保留</small><button type="button" disabled={mutationBusy} onClick={undoDelete}>撤销删除</button></div>}
       {sidebarStatus && <small className="setting-local-note" role={saveStatusText ? 'status' : undefined}>{sidebarStatus}</small>}
-      {libraryFooter && <div className="setting-library-footer">{libraryFooter}</div>}
+      {(libraryFooter || onLoadTrash) && <div className="setting-library-footer">{libraryFooter}{onLoadTrash && <button type="button" className="setting-trash-launcher" aria-label="回收站" title="回收站" onClick={() => setTrashOpen(true)}><img src="/ui/setting/delete.svg" alt="" /></button>}</div>}
     </aside>
     </div>
+    {directEditing && <SettingUndoToast operation={undoOperation} onUndo={restoreEntries} onDismiss={() => setUndoOperation(null)} />}
+    {trashOpen && onLoadTrash && <SettingTrashDialog collectionId={collection?.id || draftScope} readOnly={readOnly} onLoad={onLoadTrash} onRestore={entries => restoreEntries(entries.map(entry => entry.id))} onClose={() => setTrashOpen(false)} />}
     {mode === 'search' && activePage && !hidden && <SearchDialog title="搜索内容" query={query} onQuery={setQuery}
       inputType="text" inputLabel="搜索设定内容" placeholder="搜索设定与世界观中的标题、正文…"
       items={results.map(note => {
@@ -749,30 +1017,34 @@ export default function StudioSetting({
       onClose={() => { rememberView({ id: selectedId, category, mode: searchReturnMode }); setMode(searchReturnMode) }} onSelect={choose}
       emptyText="没有找到相关条目"
       renderPreview={note => note ? <><img className="search-preview-icon" src="/ui/setting/append.svg" alt="" /><h3>{note.title}</h3><span className="search-preview-kind">{categoryNames[note.category]}</span><p>{note.body.replace(/\[\[|\]\]/g, '') || '暂无正文'}</p></> : <><h3>寻找世界的细节</h3><p>搜索设定与世界观中的标题和正文。</p></>} />}
-    {displayMode !== 'chat' && displayMode !== 'graph' && active && <div className="setting-editor-tools"><button disabled={readOnly} onClick={discussNote}>交给 Agent 讨论</button><button disabled={readOnly} onClick={() => { if (editing && !titleCommit()) return; if (!editing) setDraftTitle(active.title); setEditing(!editing) }}>{editing ? '阅读' : '编辑'}</button></div>}
-    <div className={`setting-main${displayMode === 'chat' ? ' is-conversation' : chatVisited ? ' has-conversation-return' : ''}`}>
+    {displayMode !== 'chat' && displayMode !== 'graph' && (active || directEditing && collection) && !(directEditing && collaborationOpen) && <div className="setting-editor-tools"><button disabled={readOnly && !directEditing} onClick={discussNote}>{directEditing ? '与设定 Agent 协作' : '交给 Agent 讨论'}</button>{!directEditing && active && <button disabled={readOnly} onClick={() => { if (editing && !titleCommit()) return; if (!editing) setDraftTitle(active.title); setEditing(!editing) }}>{editing ? '阅读' : '编辑'}</button>}</div>}
+    <div className={`setting-main${displayMode === 'chat' ? ' is-conversation' : chatVisited ? ' has-conversation-return' : ''}${directEditing && collaborationOpen && displayMode === 'note' ? ' is-generation' : ''}`}>
       {chatVisited && displayMode !== 'chat' && <button className="setting-return-chat" onClick={() => showMode('chat')}>返回设定对话</button>}
       <SettingConversation conversation={conversation} notes={notes} visible={displayMode === 'chat' && activePage} disabled={readOnly} referencingProjects={referencingProjects} preview={preview} onPatch={patchConversation} onSend={sendMessage} onCommentChange={(noteId, commentId, text) => {
         if (!readOnly) persist(currentNotes.current.map(note => note.id === noteId ? { ...note, comments: note.comments?.map(comment => comment.id === commentId ? { ...comment, text } : comment) } : note))
       }} onExample={() => patchConversation({ messages: [...currentConversation.current.messages, settingExampleReply(currentNotes.current, currentConversation.current)] })} onAccept={acceptProposals} onChange={changeProposal} onOpen={choose} onScroll={scrollTop => { currentConversation.current = { ...currentConversation.current, scrollTop } }} />
-      {displayMode === 'chat' ? null : displayMode === 'graph' ? <SettingGraph notes={notes} onOpen={openTitle} /> : active ? <>
-        <div className="setting-document-scroll">
-          <MotionFrame className="setting-document" textKey={active.id}>
-            <h1 data-sweep-text>{editing ? <input aria-label="设定标题" maxLength={100} value={draftTitle} onChange={event => setDraftTitle(event.target.value)} onBlur={titleCommit} /> : active.title}</h1>
+      {displayMode === 'chat' ? null : displayMode === 'graph' ? <SettingGraph notes={notes} onOpen={openTitle} /> : <TextMotionSurface className={`setting-document-motion${directEditing && collaborationOpen ? ' is-hidden' : ''}`} motionKey={directEditing && collaborationOpen ? undefined : `${category}:${active?.id || 'empty'}`} interruptOnInput>
+        <div className="setting-document-scroll" ref={documentScroll} hidden={directEditing && collaborationOpen}>
+          {active ? <><div className="setting-document">
+            <h1 data-sweep-text={editing && !readOnly ? undefined : ''} aria-label={active.title || `未命名${categoryNames[active.category]}`}>{editing && !readOnly ? <span className="setting-title-input" data-text-input><span className="setting-title-mirror" data-sweep-text aria-hidden="true">{directEditing ? active.title : draftTitle}</span><input ref={titleInput} readOnly={mutationBusy} autoFocus={active.localDraft} aria-label="设定标题" placeholder={`未命名${categoryNames[active.category]}`} maxLength={100} value={directEditing ? active.title : draftTitle} onChange={event => directEditing ? updateDirectTitle(event.target.value) : setDraftTitle(event.target.value)} onScroll={event => { const mirror = event.currentTarget.previousElementSibling as HTMLElement | null; if (mirror) mirror.style.textIndent = `${-event.currentTarget.scrollLeft}px` }} onBlur={titleCommit} /></span> : active.title}</h1>
             {!!submitted.length && <div className="setting-note-comments" data-comment-frame><small>{stagedIds.length ? '评论暂存中' : '已加入对话'}</small><div ref={commentDots} className="studio-comment-dots studio-submitted-dots" role="group" aria-label="条目已发送评论">
               {submitted.map(comment => <button key={comment.id} type="button" data-comment-id={comment.id} disabled={readOnly} style={{ '--comment-color': comment.color } as CSSProperties} aria-label={`查看条目评论讨论：${comment.quote}`} title={`${comment.quote} · ${comment.text}`} aria-description="点击进入设定对话；拖动排序，拖出此栏删除；Alt 加左右方向键排序，Delete 移除" onClick={discussNote} />)}
             </div></div>}
-            <div className={`studio-prose setting-note-prose${editing ? '' : ' is-reading'}`} key={active.id}><OutlineEditor outline={active.body} comments={active.comments || []} readOnly={readOnly}
-              draftInput={{ ref: noteInput, onTyping, ready: activePage && ready, visible: activePage, label: '设定正文', className: 'setting-note-editor', maxLength: 30000, sendLabel: '暂存评论并继续讨论', sendEffect: 'handoff', stagedIds, onSubmittedSelect: discussNote, linkOptions: notes.filter(note => note.id !== active.id).map(note => note.title), reading: !editing ? <div className="setting-note-body" data-sweep-text><LinkedText text={active.body || '还没有正文，点击编辑开始书写。'} notes={notes} references={noteLinks(active.body)} comments={active.comments || []} onOpen={openTitle} /></div> : undefined }}
+            <div className={`studio-prose setting-note-prose${editing ? '' : ' is-reading'}`} key={active.id}><OutlineEditor outline={active.body} comments={active.comments || []} readOnly={readOnly || mutationBusy}
+              draftInput={{ ref: noteInput, onTyping, ready: activePage && ready, visible: activePage, label: '设定正文', className: 'setting-note-editor', maxLength: 30000, sendLabel: '暂存评论并继续讨论', sendEffect: 'handoff', stagedIds, onSubmittedSelect: discussNote, linkOptions: notes.filter(note => note.id !== active.id).map(note => note.title), onOpenReference: openTitle, animateText: true, reading: !editing ? <div className="setting-note-body" data-sweep-text><LinkedText text={active.body || '还没有正文，点击编辑开始书写。'} notes={notes} comments={active.comments || []} onOpen={openTitle} /></div> : undefined }}
               onChange={(body, comments) => { updateNoteComments(comments, body); onTyping() }} onCommentsChange={updateNoteComments} onSend={stageNoteComments} />
             </div>
-          </MotionFrame>
+          </div>
           {!!references.length && <section className="setting-backlinks" aria-label="引用条目"><h2>引用条目 <span>{references.length}</span></h2>{references.map(title => {
             const note = resolveNote(notes, title)
             return <button key={title} onClick={() => openTitle(title)}>{title}<small>{note ? categoryNames[note.category] : '未解析'}</small></button>
-          })}</section>}
+          })}</section>}</> : <div className="setting-empty"><h1 data-sweep-text>{categoryNames[category]}</h1><p data-sweep-text>{preview ? '从一段对话开始，也可以直接新建条目。' : readOnly ? '暂无可查看的设定。' : '从左侧新建条目，开始完善设定。'}</p>{preview && <button disabled={readOnly} onClick={() => showMode('chat')}>新建内容</button>}</div>}
         </div>
-      </> : <div className="setting-empty"><h1>{categoryNames[category]}</h1><p>{preview ? '从一段对话开始，也可以直接新建条目。' : readOnly ? '暂无可查看的设定。' : '从左侧新建条目，开始完善设定。'}</p>{preview && <button disabled={readOnly} onClick={() => showMode('chat')}>新建内容</button>}</div>}
+      </TextMotionSurface>}
+      {directEditing && collaborationOpen && collection && displayMode === 'note' && <SettingCollaborationPanel key={collection.id} collectionId={collection.id} notes={notes} readOnly={readOnly} onPrepare={prepareCollaboration} onApply={applyCollaboration}
+        feedback={collectionFeedback.map(item => item.text).join('\n\n')}
+        onSent={feedback => { const next = { ...sentFeedback }; for (const item of collectionFeedback) if (feedback.includes(item.text)) next[item.key] = item.signature; setSentFeedback(next); try { sessionStorage.setItem(`guranovel:setting-feedback-sent:${draftScope}`, JSON.stringify(next)) } catch { /* The durable Agent history still contains the submitted feedback. */ } }}
+        onClose={() => setCollaborationOpen(false)} />}
       {error && <p className="setting-error" role="alert">{error}</p>}
     </div>
   </div>

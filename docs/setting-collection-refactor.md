@@ -155,6 +155,16 @@ resolve_for_project(project_id, allowed_types) -> SettingContextBundle
 
 章节定稿、审阅通过或 Reader 结束都不能自动写入设定集。
 
+### 5.5 直接书写与独立设定 Agent（#364）
+
+Gura 专指全局助手。主设定集 Agent 面向整个设定集，使用独立的 `SettingCollaborationService`、集合会话和消息记录，不借用 Gura 的历史或输入草稿。旧条目级接口及其 `lore_agent`、`worldbuilding_agent` 历史保持兼容；主界面不再按当前条目或分类切换 Agent。
+
+新建内容先进入同一编辑器中的本地草稿，首次实际输入才创建文档。首次请求使用稳定的 `client_request_id` 和原始快照；后端按设定集与请求身份加锁并校验指纹。响应丢失后重试返回同一文档；若文档已被后续编辑、改名或删除，则返回冲突，避免用旧草稿覆盖新版本。
+
+与 Agent 协作前先同步手写草稿；客户端只发送消息身份与作者要求，后端读取整个设定集的已保存条目快照。讨论只生成消息或沿用 `SettingChangeProposal` 的建议；不会自动保存正文。明确采纳时，后端重新核对集合快照、目标版本、标题和作者正文，复用既有 proposal service 暂存文档版本，并将新版本、评论锚点和采纳决定一次提交。作者在请求期间继续编辑会保留双方内容并阻止旧建议覆盖；重复采纳不再创建版本，丢弃也不会改写正文。空集合无需占位文档，新条目只在明确采纳后创建。
+
+新增迁移 `0014_setting_collaboration` 保留 Gura 旧记录，增加独立的文档协作存储。升级前备份数据库及对应文件工作区，随后运行 `uv run alembic upgrade head`。存在协作会话时，回退到 0013 会明确失败；应保留或导出会话，或在隔离卷恢复配对备份，不能删除记录或清空数据卷来强行回退。此范围不等于关闭 #301、#311 的全部历史与恢复要求。
+
 ## 6. API 设计
 
 新增：
@@ -168,6 +178,17 @@ POST   /setting-collections/{id}/archive
 GET    /setting-collections/{id}/projects
 GET    /setting-collections/{id}/documents
 POST   /setting-collections/{id}/documents
+GET    /setting-collections/{id}/documents?deleted=true
+GET    /setting-collections/{id}/collaboration
+POST   /setting-collections/{id}/collaboration
+POST   /setting-collections/{id}/collaboration/messages
+POST   /setting-collections/{id}/collaboration/proposals/{proposal_id}/accept
+POST   /setting-collections/{id}/collaboration/proposals/{proposal_id}/discard
+GET    /setting-collections/{id}/documents/{document_id}/collaboration
+POST   /setting-collections/{id}/documents/{document_id}/collaboration
+POST   /setting-collections/{id}/documents/{document_id}/collaboration/messages
+POST   /setting-collections/{id}/documents/{document_id}/collaboration/proposals/{proposal_id}/accept
+POST   /setting-collections/{id}/documents/{document_id}/collaboration/proposals/{proposal_id}/discard
 ```
 
 文档内容、版本列表、写入和恢复继续复用现有 `/documents/{id}/...` 接口。响应中的文档所有权改为显式联合类型：小说文档返回 `project_id`，设定文档返回 `setting_collection_id`。
@@ -358,4 +379,10 @@ PATCH /projects/{id}
 - **前端代码规范与构建**：`npm run lint` 检查通过，`npm run build` 打包构建成功；
 - **Playwright 端到端测试**：13 项 E2E 真实浏览器测试全部通过，严格维持视口 100dvh 无整页滚动与核心交互链路正常；
 - **设定集重构系列 Issue 全部闭环**：#281、#282、#283、#284、#285、#286、#287 顺序落地并完整验证。
+
+## 12. 2026-10-21 主 Agent 协作范围修正
+
+主 Agent 面向整个设定集，使用 `/setting-collections/{id}/collaboration`，与当前选中的条目和分类无关；全局 Gura 保持独立。客户端发送消息身份和作者要求，后端读取设定集中全部有效条目的已保存标题、分类、正文与版本。空集合可以直接讨论，打开或发送不会先创建占位条目。建议可以针对新条目或已有条目，比较后明确采纳才落地；输入快照变化则保留建议并重新讨论。会话恢复、重复请求与采纳结果检查按设定集保存。
+
+迁移 `0015_setting_collection_collab` 新增集合级会话范围，保留旧条目会话及兼容接口，不复用或合并 Gura 历史。协作视图与直接编写共用内容列和 Gura 空间预留，保持切换前后的起始位置。此修正不新增批量自动改写或自动采纳能力。
 

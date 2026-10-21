@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type MouseEvent } from 'react'
+import { useCallback, useEffect, useRef, useState, type MouseEvent } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
 import {
   ApiError,
@@ -18,10 +18,13 @@ import {
   type SettingChangeProposal,
   type SettingCollection,
 } from './api/client'
-import StudioSetting from './StudioSetting'
+import StudioSetting, { type StudioSettingHandle } from './StudioSetting'
 import GlobalAssistant from './GlobalAssistant'
+import AssociatedNovelsDialog from './AssociatedNovelsDialog'
+import type { SettingTrashEntry } from './SettingTrashDialog'
 import {
   categoryNames,
+  categoryFromDocument,
   type SettingCategory,
   type SettingNote,
 } from './settingNotes'
@@ -32,18 +35,11 @@ interface ConflictState {
   noteId: string
   noteTitle: string
   localDraft: string
+  comments?: OutlineComment[]
 }
 
 function documentTypeForCategory(category: SettingCategory) {
   return category === 'world' ? ('world_overview' as const) : ('character_profile' as const)
-}
-
-function categoryFromDocument(doc: Document): SettingCategory {
-  if (doc.metadata?.category === 'world' || doc.metadata?.category === 'setting') {
-    return doc.metadata.category
-  }
-  const worldTypes = ['world_overview', 'power_system', 'factions', 'geography', 'history']
-  return worldTypes.includes(doc.type) ? 'world' : 'setting'
 }
 
 function documentToSettingNote(doc: Document, content: string): SettingNote {
@@ -57,18 +53,14 @@ function documentToSettingNote(doc: Document, content: string): SettingNote {
     title: doc.title || `未命名${categoryNames[category]}`,
     body: content,
     comments,
+    creationRequestId: typeof doc.metadata?.__creation_request_id === 'string' ? doc.metadata.__creation_request_id : undefined,
   }
-}
-
-function slugify(text: string): string {
-  const clean = text.toLowerCase().replace(/[^a-z0-9_-]/g, '-').replace(/-+/g, '-').replace(/^-+|-+$/g, '')
-  return clean || 'note'
 }
 
 export default function SettingCollectionWorkspace() {
   const { settingCollectionId = '' } = useParams<{ settingCollectionId: string }>()
   const navigate = useNavigate()
-  const editor = useRef<{ flush: () => Promise<boolean> }>(null)
+  const editor = useRef<StudioSettingHandle>(null)
   const [assistantContext, setAssistantContext] = useState<{ documentId?: string; versionId?: string }>({})
   const [leaving, setLeaving] = useState(false)
   const [navigationError, setNavigationError] = useState('')
@@ -86,6 +78,9 @@ export default function SettingCollectionWorkspace() {
   const isPreview = settingCollectionId === 'preview'
   const [collection, setCollection] = useState<SettingCollection | null>(null)
   const [projects, setProjects] = useState<Project[]>([])
+  const [projectsStatus, setProjectsStatus] = useState<'loading' | 'ready' | 'error'>('loading')
+  const [associationsOpen, setAssociationsOpen] = useState(false)
+  const associationsLoaded = useCallback((items: Project[]) => { setProjects(items); setProjectsStatus('ready') }, [])
   const [notes, setNotes] = useState<SettingNote[]>([])
   const [loading, setLoading] = useState(true)
   const [loadError, setLoadError] = useState<string | null>(null)
@@ -119,9 +114,8 @@ export default function SettingCollectionWorkspace() {
       setLoading(true)
       setLoadError(null)
       try {
-        const [loadedCollection, loadedProjects, loadedDocs] = await Promise.all([
+        const [loadedCollection, loadedDocs] = await Promise.all([
           getSettingCollection(settingCollectionId),
-          listCollectionProjects(settingCollectionId),
           listCollectionDocuments(settingCollectionId),
         ])
         if (cancelled) return
@@ -141,7 +135,6 @@ export default function SettingCollectionWorkspace() {
         )
 
         setCollection(loadedCollection)
-        setProjects(loadedProjects)
         setNotes(loadedNotes)
         setLoading(false)
       } catch (err: unknown) {
@@ -164,6 +157,25 @@ export default function SettingCollectionWorkspace() {
     }
   }, [settingCollectionId, isPreview, reloadTick])
 
+  useEffect(() => {
+    let cancelled = false
+    async function loadProjects() {
+      if (isPreview) { setProjectsStatus('ready'); return }
+      setProjectsStatus('loading')
+      try {
+        const items = await listCollectionProjects(settingCollectionId)
+        if (!cancelled) { setProjects(items); setProjectsStatus('ready') }
+      } catch { if (!cancelled) setProjectsStatus('error') }
+    }
+    void loadProjects()
+    return () => { cancelled = true }
+  }, [settingCollectionId, isPreview])
+
+  async function loadTrash(): Promise<SettingTrashEntry[]> {
+    const documents = await listCollectionDocuments(settingCollectionId, { deleted: true })
+    return documents.map(document => ({ id: document.id, title: document.title || '未命名条目', category: categoryFromDocument(document), deletedAt: document.deleted_at }))
+  }
+
   const isArchived = collection?.status === 'archived'
 
   async function handleSaveNoteContent(
@@ -174,10 +186,14 @@ export default function SettingCollectionWorkspace() {
   ): Promise<{ versionId: string } | 'conflict' | false> {
     if (isArchived) return false
     if (isPreview) return { versionId: 'preview-ver' }
-    const currentNote = notes.find((n) => n.id === noteId)
+    const currentNote = notes.find((n) => n.id === noteId || n.documentId === noteId)
     if (!currentNote) return false
     const versionToExpect = expectedVersionId || currentNote.versionId
     if (!versionToExpect) return false
+    const superseded = () => {
+      const latest = editor.current?.getNoteSnapshot?.(noteId)
+      return latest && latest.versionId !== versionToExpect
+    }
 
     setSaveStatus('saving')
     try {
@@ -187,14 +203,16 @@ export default function SettingCollectionWorkspace() {
         setting_comments: comments ?? currentNote.comments ?? [],
       })
       if (!newVersion) return false
+      if (superseded()) return { versionId: newVersion.id }
       setCollection((prev) => (prev ? { ...prev, revision: prev.revision + 1 } : prev))
       setNotes((prev) =>
-        prev.map((n) => (n.id === noteId ? { ...n, body: content, comments: comments ?? n.comments, versionId: newVersion.id } : n))
+        prev.map((n) => ((n.id === noteId || n.documentId === noteId) && n.versionId === versionToExpect ? { ...n, body: content, comments: comments ?? n.comments, versionId: newVersion.id } : n))
       )
       setSaveStatus('saved')
       setConflict(null)
       return { versionId: newVersion.id }
     } catch (err: unknown) {
+      if (superseded()) return err instanceof ApiError && err.status === 409 ? 'conflict' : false
       if (err instanceof ApiError && err.status === 409) {
         // Optimistic concurrency conflict: retain local draft!
         setSaveStatus('conflict')
@@ -202,6 +220,7 @@ export default function SettingCollectionWorkspace() {
           noteId,
           noteTitle: currentNote.title,
           localDraft: content,
+          comments: comments ?? currentNote.comments ?? [],
         })
         return 'conflict'
       }
@@ -216,7 +235,7 @@ export default function SettingCollectionWorkspace() {
       await patchDocument(noteId, { title: newTitle })
       setCollection((prev) => (prev ? { ...prev, revision: prev.revision + 1 } : prev))
       setNotes((prev) =>
-        prev.map((n) => (n.id === noteId ? { ...n, title: newTitle } : n))
+        prev.map((n) => (n.id === noteId || n.documentId === noteId ? { ...n, title: newTitle } : n))
       )
       return true
     } catch {
@@ -227,33 +246,34 @@ export default function SettingCollectionWorkspace() {
   async function handleCreateNote(
     category: SettingCategory,
     title: string,
-    tempId: string
+    tempId: string,
+    content = '',
+    comments: OutlineComment[] = [],
   ): Promise<SettingNote | null> {
     if (isArchived) return null
     const type = documentTypeForCategory(category)
-    const slug = slugify(title)
-    const path = `${category}/${slug}-${Date.now().toString(36)}.md`
+    const path = `${category}/${tempId}.md`
     try {
       const doc = await createCollectionDocument(settingCollectionId, {
         type,
+        client_request_id: tempId,
         title,
         path,
-        content: '',
-        metadata: { category },
+        content,
+        metadata: { category, comments },
       })
       setCollection((prev) => (prev ? { ...prev, revision: prev.revision + 1 } : prev))
       const createdNote: SettingNote = {
-        id: doc.id,
+        id: tempId,
+        creationRequestId: tempId,
         documentId: doc.id,
         versionId: doc.current_version_id || undefined,
         category,
         title,
-        body: '',
-        comments: [],
+        body: content,
+        comments,
       }
-      setNotes((prev) =>
-        prev.map((n) => (n.id === tempId ? createdNote : n))
-      )
+      setNotes((prev) => [...prev.filter(n => n.id !== tempId && n.id !== doc.id), createdNote])
       return createdNote
     } catch {
       return null
@@ -263,8 +283,17 @@ export default function SettingCollectionWorkspace() {
   async function handleDeleteNotes(noteIds: string[]): Promise<string[]> {
     if (isArchived) return []
     const results = await Promise.allSettled(noteIds.map(id => deleteDocument(id)))
-    const succeeded = noteIds.filter((_, index) => results[index].status === 'fulfilled')
-    setNotes(prev => prev.filter(note => !succeeded.includes(note.id)))
+    const confirmed = new Set(noteIds.filter((_, index) => results[index].status === 'fulfilled'))
+    if (results.some(result => result.status === 'rejected')) {
+      // A lost response does not tell us whether DELETE committed. Reconcile the
+      // durable trash before leaving a deleted document editable in the list.
+      try {
+        const trash = await listCollectionDocuments(settingCollectionId, { deleted: true })
+        trash.forEach(document => { if (noteIds.includes(document.id)) confirmed.add(document.id) })
+      } catch { /* Keep unconfirmed entries visible for an explicit retry. */ }
+    }
+    const succeeded = [...confirmed]
+    setNotes(prev => prev.filter(note => !succeeded.includes(note.documentId || note.id)))
     return succeeded
   }
 
@@ -276,6 +305,15 @@ export default function SettingCollectionWorkspace() {
       return documentToSettingNote(document, body.content)
     }))
     const restored = results.flatMap(result => result.status === 'fulfilled' ? [result.value] : [])
+    for (const [index, result] of results.entries()) {
+      if (result.status !== 'rejected') continue
+      try {
+        const document = await getDocument(noteIds[index])
+        if (document.deleted_at !== null) continue
+        const body = await readDocumentContent(document.id)
+        restored.push(documentToSettingNote(document, body.content))
+      } catch { /* Retry remains available until both state and body are readable. */ }
+    }
     setNotes(prev => [...prev.filter(note => !restored.some(item => item.id === note.id)), ...restored])
     return restored.map(note => note.id)
   }
@@ -326,17 +364,16 @@ export default function SettingCollectionWorkspace() {
         getDocument(conflict.noteId),
         readDocumentContent(conflict.noteId),
       ])
-      // The author explicitly chose to replace this draft. Otherwise the child
-      // editor restores its stale recovery copy over the freshly loaded text.
-      sessionStorage.removeItem(`guranovel:setting-draft-recovery:${conflict.noteId}`)
-      sessionStorage.removeItem(`guranovel:setting-feedback-recovery:${conflict.noteId}`)
+      const comments = restoreOutlineComments(freshDoc.metadata?.comments, freshContent.content)
+      editor.current?.replaceSavedNote?.(conflict.noteId, freshContent.content, freshDoc.current_version_id || '', comments)
       setNotes((prev) =>
         prev.map((n) =>
-          n.id === conflict.noteId
+          n.id === conflict.noteId || n.documentId === conflict.noteId
             ? {
                 ...n,
                 body: freshContent.content,
                 versionId: freshDoc.current_version_id || undefined,
+                comments,
               }
             : n
         )
@@ -351,17 +388,23 @@ export default function SettingCollectionWorkspace() {
   async function handleOverwriteConflict() {
     if (!conflict) return
     try {
+      const draft = editor.current?.getNoteSnapshot?.(conflict.noteId)
+      const content = draft?.body ?? conflict.localDraft
+      const expected = { body: content, comments: draft?.comments ?? conflict.comments ?? [] }
+      const comments = restoreOutlineComments(expected.comments, content)
       const freshDoc = await getDocument(conflict.noteId)
       if (!freshDoc.current_version_id) return
       const ver = await writeDocument(conflict.noteId, {
-        content: conflict.localDraft,
+        content,
         expected_current_version_id: freshDoc.current_version_id,
+        setting_comments: comments,
       })
+      editor.current?.replaceSavedNote?.(conflict.noteId, content, ver.id, comments, expected)
       setCollection((prev) => (prev ? { ...prev, revision: prev.revision + 1 } : prev))
       setNotes((prev) =>
         prev.map((n) =>
-          n.id === conflict.noteId
-            ? { ...n, body: conflict.localDraft, versionId: ver.id }
+          n.id === conflict.noteId || n.documentId === conflict.noteId
+            ? { ...n, body: content, versionId: ver.id, comments }
             : n
         )
       )
@@ -435,12 +478,12 @@ export default function SettingCollectionWorkspace() {
         </div>
 
         <div className="setting-workspace-header-meta">
-          <span
+          <button type="button"
             className="setting-pill-novels"
-            title={projects.length ? `关联小说：${projects.map((p) => p.title).join('、')}` : '暂无关联小说'}
+            onClick={() => setAssociationsOpen(true)}
           >
-            关联小说 ({projects.length})
-          </span>
+            {projectsStatus === 'ready' ? `关联小说 (${projects.length})` : projectsStatus === 'error' ? '关联小说 · 重试' : '关联小说…'}
+          </button>
         </div>
       </header>
 
@@ -482,6 +525,7 @@ export default function SettingCollectionWorkspace() {
 
       <section className="setting-workspace-body" aria-label="设定集正文">
         <StudioSetting
+          key={collection.id}
           ref={editor}
           onAssistantContext={setAssistantContext}
           libraryFooter={homeLink}
@@ -497,12 +541,23 @@ export default function SettingCollectionWorkspace() {
           onCreateNote={isPreview ? undefined : handleCreateNote}
           onDeleteNotes={isPreview ? undefined : handleDeleteNotes}
           onRestoreNotes={isPreview ? undefined : handleRestoreNotes}
+          onLoadTrash={isPreview ? undefined : loadTrash}
+          onCollaborationApplied={(result, stableId) => {
+            const note = { ...documentToSettingNote(result.document, result.content), id: stableId }
+            setNotes(previous => [...previous.filter(item => item.id !== stableId && item.documentId !== result.document.id), note])
+            setSaveStatus('saved')
+          }}
           syncUrlParams={true}
           defaultPinned={true}
           saveStatusText={saveStatusMessage}
           onTyping={() => {}}
         />
       </section>
+      {associationsOpen && <AssociatedNovelsDialog collectionId={settingCollectionId}
+        onProjectsLoaded={associationsLoaded}
+        onBeforeOpen={async () => !editor.current || await editor.current.flush()}
+        onOpenProject={project => navigate(`/?project=${encodeURIComponent(project.id)}`)}
+        onClose={() => setAssociationsOpen(false)} />}
       <GlobalAssistant key={settingCollectionId} collection={{ id: settingCollectionId, title: collection.title, ...assistantContext }} preview={isPreview} currentView="SettingCollection" />
     </div>
   )
