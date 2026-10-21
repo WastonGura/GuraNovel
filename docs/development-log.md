@@ -2,10 +2,11 @@
 
 Dates use Asia/Tokyo. Target: v0.12.0 desktop personal trial.
 
-## 2026-10-21 — #369 CI navigation fixture readiness
+## 2026-10-21 — #369 CI fixture timing
 
 - Initial PR CI passed 589 of 590 frontend checks; an existing review-restoration scenario clicked Review immediately after the outline section mounted, before its asynchronous idea editor installed/loaded its save queue. A mounted section alone is not a navigation-ready signal. The fixture now waits for its visible idea editor to become editable, then verifies both the committed Review stage/URL and the original report text. No production behavior, timeout or assertion was removed or relaxed.
 - All 37 navigation checks, ESLint and whitespace checks pass locally. The original test also passed in isolation, so this is a CI timing correction rather than a claimed reproducible product Red. A synchronous extra stage assertion initially observed an intermediate render; it now waits for the actual navigation commit. Complete latest-head CI and final review remain required before the user-authorized Squash merge.
+- The second run passed all 590 frontend unit, 2011 backend unit and 724 PostgreSQL checks, but one of 110 Chromium scenarios missed the short document reveal phase between dissolve and completion. The affected scenario now uses Playwright's clock to advance each animation frame and hold inside reveal before a real pointer click. It retains dissolve/particle/reveal checks, both directions of pointer cancellation, focus and manuscript assertions; product animation durations, retries and timeouts are unchanged. All seven reference-browser scenarios and ESLint pass locally. A fresh complete CI run is required on this final fixture correction.
 
 ## 2026-10-21 — #307 cover and introduction acceptance
 
