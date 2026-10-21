@@ -2,6 +2,11 @@
 
 Dates use Asia/Tokyo. Target: v0.12.0 desktop personal trial.
 
+## 2026-10-21 — #369 CI navigation fixture readiness
+
+- Initial PR CI passed 589 of 590 frontend checks; an existing review-restoration scenario clicked Review immediately after the outline section mounted, before its asynchronous idea editor installed/loaded its save queue. A mounted section alone is not a navigation-ready signal. The fixture now waits for its visible idea editor to become editable, then verifies both the committed Review stage/URL and the original report text. No production behavior, timeout or assertion was removed or relaxed.
+- All 37 navigation checks, ESLint and whitespace checks pass locally. The original test also passed in isolation, so this is a CI timing correction rather than a claimed reproducible product Red. A synchronous extra stage assertion initially observed an intermediate render; it now waits for the actual navigation commit. Complete latest-head CI and final review remain required before the user-authorized Squash merge.
+
 ## 2026-10-21 — #307 cover and introduction acceptance
 
 - Completed the four acceptance areas against main at 6fa97b3: persisted novel covers across refresh/order changes, stable invalid-image fallback with openable works, introduction create/edit/clear/readback, and partial-update compatibility. The production fixes already exist in the merged Dashboard, cover renderer and metadata save path; this follow-up adds regression coverage and verification, with no new production change or retrospective Red claim.
