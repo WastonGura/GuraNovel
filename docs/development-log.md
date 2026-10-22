@@ -2,6 +2,12 @@
 
 Dates use Asia/Tokyo. Target: v0.12.0 desktop personal trial.
 
+## 2026-10-23 — #310 PostgreSQL CI fixture follow-up
+
+- Checked PR #371 at `e22c8b3`: frontend quality, backend unit/lint, version consistency and Docker author workflow passed, with no review submissions or threads yet. Full PostgreSQL CI exposed one failure among 797 cases: the new continuous-conversation test directly seeded a collection row without creating its registered workspace root, so native POSIX MarkdownStore correctly refused to open the missing directory.
+- The shared test seed now explicitly creates its novel and collection roots, matching the precondition established by normal workspace-creation services. The earlier Windows PostgreSQL fixture's filesystem substitute created parent directories during writes and had masked this omission. Production storage, permission checks, assistant behavior and all test assertions remain unchanged.
+- Verified all 16 global-assistant integration cases against real PostgreSQL 16 and native Linux MarkdownStore in an isolated Docker runner; Ruff and whitespace checks pass. CI's original failure and the Linux result are retained under `GuraNovel-v012-evidence/issue310/pr371-ci-followup-20261023/`. Only the disposable runner/database/network are removed after validation; no author data or private configuration is touched. The correction is submitted to the existing PR for a fresh full CI run; merge remains pending.
+
 ## 2026-10-22 — #310 PR submission verification
 
 - User approved the final Gura iteration for submission. Bookshelf, chapter and setting-collection workspaces now share the author's selected global conversation, with explicit history/new controls and per-conversation drafts. Navigation changes the next message's context without selecting another chat. Earlier page-bound histories remain separately identified and read-only. Work details retain their original cover/chapter layout without Gura; returning to the bookshelf resumes the existing chat. Gura remains distinct from the collection-wide authoring Agent.

@@ -39,6 +39,8 @@ async def client(async_session, monkeypatch):
 
 
 async def seed(session, tmp_path, *, owner_id=None):
+    for workspace_root in (tmp_path / "novel", tmp_path / "world"):
+        workspace_root.mkdir(parents=True, exist_ok=True)
     project = Project(slug=str(uuid4()), title="Novel A", workspace_root=str(tmp_path / "novel"), owner_id=owner_id)
     collection = SettingCollection(slug=str(uuid4()), title="World B", workspace_root=str(tmp_path / "world"), owner_id=owner_id)
     session.add_all([project, collection])
