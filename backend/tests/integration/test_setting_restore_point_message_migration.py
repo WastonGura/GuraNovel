@@ -76,6 +76,7 @@ async def test_archive_message_migration_preserves_manual_points_and_protects_us
             )
         migrate("upgrade", "head")
         async with engine.begin() as connection:
+            head_before_refused_downgrade = await connection.scalar(text("SELECT version_num FROM alembic_version"))
             preserved = dict(
                 (
                     await connection.execute(
@@ -101,7 +102,7 @@ async def test_archive_message_migration_preserves_manual_points_and_protects_us
         async with engine.begin() as connection:
             assert (
                 await connection.scalar(text("SELECT version_num FROM alembic_version"))
-                == "0017_setting_archive_messages"
+                == head_before_refused_downgrade
             )
             assert (
                 await connection.scalar(

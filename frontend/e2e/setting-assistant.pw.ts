@@ -4,7 +4,7 @@ const collectionId = '11111111-1111-4111-8111-111111111111'
 const docId = '22222222-2222-4222-8222-222222222222'
 const versionId = '33333333-3333-4333-8333-333333333333'
 const stamp = '2026-10-20T00:00:00Z'
-const conversation = { id: 'conversation', project_id: null, setting_collection_id: collectionId, messages: [] as { id: string; role: string; content: string; tool_calls?: object[] }[], created_at: stamp, updated_at: stamp }
+const conversation = { id: 'conversation', title: '设定页中的全局对话', project_id: null, setting_collection_id: null, messages: [] as { id: string; role: string; content: string; tool_calls?: object[] }[], created_at: stamp, updated_at: stamp }
 
 async function workspace(page: Page, documentCount = 1) {
   await page.route(`**/api/v1/setting-collections/${collectionId}`, r => r.fulfill({ json: { id: collectionId, owner_id: null, title: '雾港世界 · 长标题布局验证', slug: 'world', workspace_root: '/tmp/world', description: null, metadata: {}, revision: 1, status: 'active', created_at: stamp, updated_at: stamp } }))
@@ -13,7 +13,8 @@ async function workspace(page: Page, documentCount = 1) {
   await page.route('**/api/v1/documents/*/content', r => r.fulfill({ json: { document_id: r.request().url().split('/').at(-2), version_id: versionId, content: '潮水在午夜倒流。\n'.repeat(150) } }))
   await page.route('**/api/v1/projects', r => r.fulfill({ json: [] }))
   await page.route('**/api/v1/setting-collections', r => r.fulfill({ json: [] }))
-  await page.route(`**/api/v1/setting-collections/${collectionId}/assistant/conversations`, r => r.fulfill({ json: conversation }))
+  await page.route('**/api/v1/assistant/conversations', r => r.fulfill({ json: r.request().method() === 'GET' ? [] : conversation }))
+  await page.route('**/api/v1/assistant/conversations/conversation', r => r.fulfill({ json: conversation }))
   await page.goto(`/setting-collections/${collectionId}?category=world&note=${docId}&returnTo=/projects/ignored/studio`)
   await expect(page.getByRole('heading', { name: '潮汐城' })).toBeVisible()
 }
@@ -118,13 +119,14 @@ test('category motion causes no phantom scroll', async ({ page }) => {
 test('a lost message response is reconciled after refresh without re-sending', async ({ page }) => {
   let saved = { ...conversation, messages: [...conversation.messages] }, sends = 0
   await workspace(page)
-  await page.route(`**/api/v1/setting-collections/${collectionId}/assistant/conversations`, r => r.fulfill({ json: saved }))
-  await page.route(`**/assistant/conversations/conversation/messages`, async r => {
+  await page.route('**/api/v1/assistant/conversations', r => r.fulfill({ json: r.request().method() === 'GET' ? [] : saved }))
+  await page.route('**/api/v1/assistant/conversations/conversation', r => r.fulfill({ json: saved }))
+  await page.route('**/api/v1/assistant/conversations/conversation/messages', async r => {
     const payload = r.request().postDataJSON()
     sends++
-    expect(payload).toMatchObject({ document_id: docId, document_version_id: versionId })
+    expect(payload.context).toEqual({ kind: 'collection', collection_id: collectionId, document_id: docId, document_version_id: versionId })
     saved = { ...conversation, messages: [
-      { id: 'user', role: 'user', content: payload.content, tool_calls: [{ client_message_id: payload.client_message_id }] },
+      { id: 'user', role: 'user', content: payload.content, tool_calls: [{ client_message_id: payload.client_message_id, context: payload.context, exchange_complete: true }] },
       { id: 'reply', role: 'assistant', content: '根据已保存的设定，潮水会在午夜倒流。' },
     ] }
     await r.fulfill({ status: 503, json: {} })

@@ -106,6 +106,23 @@ beforeEach(() => {
 })
 
 describe('Dashboard Setting Collections and Novel Integration', () => {
+  it('hides Gura while work details are open and returns it to the bookshelf after closing', async () => {
+    mockedApi.listProjects.mockResolvedValue([sampleProject()])
+    mockedApi.listSettingCollections.mockResolvedValue([])
+    mockedApi.listChapters.mockResolvedValue([])
+    renderDashboard()
+    const homeAssistant = await screen.findByRole('complementary', { name: 'Gura 助手' })
+    expect(homeAssistant.closest('dialog')).toBeNull()
+    fireEvent.click((await screen.findAllByRole('button', { name: 'Open Archive of Ash' }))[0])
+    const detail = await screen.findByRole('dialog', { name: 'Archive of Ash' })
+    expect(within(detail).queryByRole('button', { name: 'Gura' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('complementary', { name: 'Gura 助手' })).not.toBeInTheDocument()
+    fireEvent.click(within(detail).getByRole('button', { name: '关闭作品详情' }))
+    await waitFor(() => expect(detail).not.toBeInTheDocument())
+    expect(screen.getByRole('complementary', { name: 'Gura 助手' }).closest('dialog')).toBeNull()
+    expect(screen.getAllByRole('complementary', { name: 'Gura 助手' })).toHaveLength(1)
+  })
+
   it('offers an actionable first-novel empty state', async () => {
     mockedApi.listProjects.mockResolvedValue([])
     mockedApi.listSettingCollections.mockResolvedValue([])

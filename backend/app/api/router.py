@@ -16,6 +16,7 @@ from app.api.routes_setting_collaboration import router as setting_collaboration
 from app.api.routes_setting_collaboration import collection_router as setting_collection_collaboration_router
 from app.api.routes_studio_assistant import router as studio_assistant_router
 from app.api.routes_studio_assistant import collection_router as setting_assistant_router
+from app.api.routes_home_assistant import router as home_assistant_router
 
 from app.api.routes_outline_options import router as outline_options_router
 
@@ -34,6 +35,7 @@ api_router.include_router(chapters_router, tags=["chapters"])
 api_router.include_router(studio_router, tags=["studio"])
 api_router.include_router(studio_assistant_router, tags=["studio-assistant"])
 api_router.include_router(setting_assistant_router, tags=["setting-assistant"])
+api_router.include_router(home_assistant_router, tags=["home-assistant"])
 api_router.include_router(chapter_production_router, tags=["chapter-production"])
 api_router.include_router(chapter_production_v2_router, tags=["chapter-production-v2"])
 api_router.include_router(reader_panel_router, tags=["reader-panel"])
