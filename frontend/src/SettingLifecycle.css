@@ -1,0 +1,25 @@
+.setting-collection-menu { animation: setting-menu-in 180ms cubic-bezier(.22, 1, .36, 1) both; background: #fff; border: 1px solid #e6e6e6; border-radius: 12px; box-shadow: 0 10px 32px #00000012, 0 2px 6px #00000008; max-height: calc(100dvh - 16px); max-width: calc(100vw - 16px); overflow: auto; padding: 5px; pointer-events: auto; position: fixed; transform-origin: top right; width: 220px; }
+.setting-collection-menu.is-closing { animation: setting-menu-out 160ms ease-in both; pointer-events: none; }
+.studio .setting-collection-menu button { align-items: center; background: transparent; border: 0; border-radius: 7px; color: #333; display: flex; font-size: 14px; gap: 10px; min-height: 36px; padding: 8px 10px; text-align: left; width: 100%; }
+.studio .setting-collection-menu button:is(:hover, :focus-visible) { background: #f3f3f3; color: #171717; }
+.studio .setting-collection-menu button:focus-visible { outline: 1px solid #aaa; outline-offset: -1px; }
+.setting-collection-menu button svg { flex: 0 0 18px; height: 18px; width: 18px; }
+.setting-archive-dialog { width: 520px; }
+.setting-archive-dialog > div { padding: 28px; }
+.setting-archive-dialog p { color: #777; font-size: 14px; line-height: 1.75; margin: 16px 0; }
+.setting-archive-dialog .setting-archive-context { color: #999; font-size: 13px; margin: -8px 0 24px; overflow-wrap: anywhere; }
+.setting-archive-dialog .setting-archive-heading { color: #222; font-size: 22px; font-weight: 500; margin: 8px 0 20px; }
+.setting-archive-footer { display: flex; gap: 16px; justify-content: flex-end; margin-top: 24px; }
+.setting-archive-dialog .setting-archive-footer button { background: #f2f2f2; border-radius: 24px; color: #666; font-size: 14px; padding: 10px 20px; }
+.setting-archive-dialog .setting-archive-footer .setting-lifecycle-primary { background: #171717; color: #fff; }
+.setting-archive-dialog .setting-lifecycle-primary:hover:not(:disabled) { background: #333; color: #fff; }
+.setting-archive-dialog button:disabled { cursor: default; opacity: .45; }
+.setting-archive-dialog .setting-archive-note { font-size: 12px; }
+.setting-lifecycle-impact { border-top: 1px solid #eee; color: #888; font-size: 13px; margin-top: 24px; padding-top: 16px; }
+.setting-lifecycle-impact > span { color: #999; font-size: 12px; }
+.setting-lifecycle-impact ul { display: flex; flex-wrap: wrap; gap: 8px; list-style: none; margin: 12px 0 0; max-height: 120px; overflow: auto; padding: 0; }
+.setting-lifecycle-impact li { background: #f6f6f6; border-radius: 6px; color: #666; font-size: 12px; overflow-wrap: anywhere; padding: 5px 9px; }
+.setting-lifecycle-impact button { background: transparent; color: #666; text-decoration: underline; }
+.setting-archive-dialog .setting-lifecycle-error { color: #555; font-size: 13px; }
+@media (max-width: 600px), (max-height: 650px) { .setting-archive-dialog > div { padding: 22px; } .setting-archive-dialog p { margin: 12px 0; } .setting-archive-dialog .setting-archive-heading { font-size: 20px; } }
+@media (prefers-reduced-motion: reduce) { .setting-collection-menu, .setting-collection-menu.is-closing { animation: none; } }

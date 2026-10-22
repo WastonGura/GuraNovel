@@ -2,25 +2,36 @@ import { useCallback, useEffect, useRef, useState, type MouseEvent } from 'react
 import { Link, useNavigate, useParams } from 'react-router-dom'
 import {
   ApiError,
+  archiveSettingCollection,
   applySettingProposal,
   createCollectionDocument,
+  createSettingDocumentRestorePoint,
   deleteDocument,
   undeleteDocument,
   getDocument,
   getSettingCollection,
   listCollectionDocuments,
   listCollectionProjects,
+  listDocumentVersions,
+  listSettingDocumentRestorePoints,
   patchDocument,
   readDocumentContent,
+  restoreSettingDocumentRestorePoint,
   writeDocument,
   type Document,
+  type DocumentVersion,
   type Project,
   type SettingChangeProposal,
   type SettingCollection,
+  type SettingDocumentRestorePoint,
+  type SettingDocumentRestorePointRequest,
 } from './api/client'
-import StudioSetting, { type StudioSettingHandle } from './StudioSetting'
+import StudioSetting, { type SettingRestorePointStatus, type StudioSettingHandle } from './StudioSetting'
 import GlobalAssistant from './GlobalAssistant'
 import AssociatedNovelsDialog from './AssociatedNovelsDialog'
+import SettingHistoryDialog from './SettingHistoryDialog'
+import SettingArchiveDialog from './SettingArchiveDialog'
+import SettingCollectionMenu from './SettingCollectionMenu'
 import type { SettingTrashEntry } from './SettingTrashDialog'
 import {
   categoryNames,
@@ -59,6 +70,10 @@ function documentToSettingNote(doc: Document, content: string): SettingNote {
 
 export default function SettingCollectionWorkspace() {
   const { settingCollectionId = '' } = useParams<{ settingCollectionId: string }>()
+  return <SettingCollectionSession key={settingCollectionId} settingCollectionId={settingCollectionId} />
+}
+
+function SettingCollectionSession({ settingCollectionId }: { settingCollectionId: string }) {
   const navigate = useNavigate()
   const editor = useRef<StudioSettingHandle>(null)
   const [assistantContext, setAssistantContext] = useState<{ documentId?: string; versionId?: string }>({})
@@ -77,7 +92,7 @@ export default function SettingCollectionWorkspace() {
   const homeLink = <Link to="/" className="setting-workspace-home" aria-disabled={leaving} onClick={goHome}>回到书架</Link>
   const isPreview = settingCollectionId === 'preview'
   const [collection, setCollection] = useState<SettingCollection | null>(null)
-  const [projects, setProjects] = useState<Project[]>([])
+  const [projects, setProjects] = useState<Project[] | null>(null)
   const [projectsStatus, setProjectsStatus] = useState<'loading' | 'ready' | 'error'>('loading')
   const [associationsOpen, setAssociationsOpen] = useState(false)
   const associationsLoaded = useCallback((items: Project[]) => { setProjects(items); setProjectsStatus('ready') }, [])
@@ -87,6 +102,188 @@ export default function SettingCollectionWorkspace() {
   const [saveStatus, setSaveStatus] = useState<'saved' | 'saving' | 'conflict' | 'error'>('saved')
   const [conflict, setConflict] = useState<ConflictState | null>(null)
   const [reloadTick, setReloadTick] = useState(0)
+  const [history, setHistory] = useState<{ note: SettingNote; blocked?: string } | null>(null)
+  const [archiveOpen, setArchiveOpen] = useState(false)
+  const [operationBusy, setOperationBusy] = useState(false)
+  const [operationError, setOperationError] = useState('')
+  const [pointNotice, setPointNotice] = useState<SettingRestorePointStatus | null>(null)
+  const [pointBusy, setPointBusy] = useState(false)
+  const operation = useRef(false)
+  const pendingPoints = useRef(new Map<string, SettingDocumentRestorePointRequest>())
+
+  useEffect(() => {
+    if (!pointNotice) return
+    const timer = window.setTimeout(() => setPointNotice(null), 2500)
+    return () => window.clearTimeout(timer)
+  }, [pointNotice])
+
+  function pendingPoint(documentId: string) {
+    const cached = pendingPoints.current.get(documentId)
+    if (cached) return cached
+    try {
+      const stored = JSON.parse(sessionStorage.getItem(`guranovel:setting-restore-point-pending:${documentId}`) || 'null')
+      if (stored && typeof stored.request_id === 'string' && typeof stored.expected_current_version_id === 'string') {
+        const request = { request_id: stored.request_id, expected_current_version_id: stored.expected_current_version_id }
+        pendingPoints.current.set(documentId, request)
+        return request
+      }
+    } catch { /* The in-memory request still protects retries when storage is unavailable. */ }
+  }
+
+  function rememberPoint(documentId: string, request?: SettingDocumentRestorePointRequest) {
+    if (request) pendingPoints.current.set(documentId, request)
+    else pendingPoints.current.delete(documentId)
+    try {
+      const key = `guranovel:setting-restore-point-pending:${documentId}`
+      if (request) sessionStorage.setItem(key, JSON.stringify(request))
+      else sessionStorage.removeItem(key)
+    } catch { /* Keep the request identity in memory for this session. */ }
+  }
+
+  async function refreshAssociations(): Promise<boolean> {
+    if (isPreview) return true
+    setProjectsStatus('loading')
+    try {
+      setProjects(await listCollectionProjects(settingCollectionId))
+      setProjectsStatus('ready')
+      return true
+    } catch { setProjectsStatus('error'); return false }
+  }
+
+  async function openHistory(note: SettingNote) {
+    if (!note.documentId || operation.current) return
+    operation.current = true; setOperationBusy(true); setOperationError('')
+    try {
+      const saved = isArchived || !editor.current || await editor.current.flush()
+      const snapshot = editor.current?.getNoteSnapshot?.(note.documentId) ?? note
+      setHistory({ note: { ...snapshot }, blocked: saved ? undefined : '当前草稿未能保存。你仍可查看历史；请关闭窗口并同步草稿后再恢复。' })
+      void refreshAssociations()
+    } catch { setOperationError('历史存档暂时无法打开，当前草稿已保留。请重试。') }
+    finally { operation.current = false; setOperationBusy(false) }
+  }
+
+  async function createRestorePoint(note: SettingNote): Promise<boolean> {
+    if (!note.documentId || isArchived || operation.current) return false
+    const documentId = note.documentId
+    operation.current = true; setOperationBusy(true); setOperationError(''); setPointNotice(null); setPointBusy(true)
+    try {
+      if (!editor.current || !await editor.current.flush()) throw new Error('当前草稿未能保存，已暂停存档。草稿仍保留，请重试同步后再存档。')
+      const snapshot = editor.current.getNoteSnapshot?.(documentId)
+      if (!snapshot?.versionId) throw new Error('当前内容尚未保存，已暂停存档。请重试同步后再存档。')
+      const notice = { documentId, versionId: snapshot.versionId, title: snapshot.title, body: snapshot.body, commentsKey: JSON.stringify(snapshot.comments || []) }
+      let previousRequest = pendingPoint(documentId)
+      try {
+        const points = await listSettingDocumentRestorePoints(documentId)
+        if (previousRequest) {
+          const unresolved = previousRequest
+          const confirmed = points.some(point => point.id === unresolved.request_id
+            && point.document_id === documentId && point.version_id === unresolved.expected_current_version_id
+            && point.version.id === point.version_id && point.version.document_id === documentId)
+          if (confirmed) { rememberPoint(documentId); previousRequest = undefined }
+        }
+        if (!previousRequest && points.some(point => point.matches_current && point.version_id === snapshot.versionId)) { setPointNotice(notice); return true }
+      } catch (failure) {
+        // Retrying an unresolved request is safe even while the list cannot load.
+        if (!previousRequest) throw new Error('存档列表未能读取，当前草稿已保留。请重试存档。', { cause: failure })
+      }
+      const request = previousRequest ?? { request_id: crypto.randomUUID(), expected_current_version_id: snapshot.versionId }
+      rememberPoint(documentId, request)
+      const matchesRequest = (point: SettingDocumentRestorePoint) => point.id === request.request_id && point.document_id === documentId
+        && point.version_id === request.expected_current_version_id && point.version.id === point.version_id && point.version.document_id === documentId
+      let point: SettingDocumentRestorePoint
+      try {
+        point = await createSettingDocumentRestorePoint(documentId, request)
+      } catch (failure) {
+        let existing: SettingDocumentRestorePoint | undefined
+        try {
+          existing = (await listSettingDocumentRestorePoints(documentId)).find(matchesRequest)
+          if (!existing && failure instanceof ApiError && [400, 403, 404, 409, 422].includes(failure.status)) rememberPoint(documentId)
+        } catch { /* Keep the exact request identity until its result can be confirmed. */ }
+        if (!existing) throw new Error(failure instanceof ApiError && failure.status === 409
+          ? '当前内容已更新，存档结果未能确认。请重试核对。' : '存档结果未能确认，当前草稿已保留。重试会核对同一次存档。', { cause: failure })
+        point = existing
+      }
+      if (!matchesRequest(point)) throw new Error('存档结果未能确认，当前草稿已保留。请重试核对。')
+      rememberPoint(documentId)
+      if (point.version_id !== snapshot.versionId) throw new Error('上次存档已核实，当前内容尚未存档。请再次点击存档。')
+      setPointNotice(notice)
+      return true
+    } catch (failure) {
+      const message = failure instanceof Error ? failure.message : '存档结果未能确认，当前草稿已保留。请重试核对。'
+      setOperationError(message)
+      return false
+    } finally { operation.current = false; setOperationBusy(false); setPointBusy(false) }
+  }
+
+  async function restoreVersion(point: SettingDocumentRestorePoint, content: string): Promise<boolean> {
+    if (!history || isArchived || operation.current) return false
+    const documentId = history.note.documentId!
+    const expectedVersionId = history.note.versionId
+    const version = point.version
+    if (!expectedVersionId || point.document_id !== documentId || point.version_id !== version.id || version.document_id !== documentId || history.blocked) return false
+    operation.current = true; setOperationBusy(true); setOperationError('')
+    try {
+      if (projectsStatus !== 'ready' && !await refreshAssociations()) throw new Error('关联小说未能读取，请重新加载后再恢复。')
+      if (editor.current && !await editor.current.flush()) throw new Error('当前草稿未能保存，已暂停恢复。请关闭窗口重试同步。')
+      const snapshot = editor.current?.getNoteSnapshot?.(documentId)
+      if (!snapshot || snapshot.versionId !== expectedVersionId) throw new Error('当前版本已更新，草稿已保留。请重新打开历史核对。')
+      let restored: DocumentVersion
+      let fresh: Document
+      try {
+        restored = await restoreSettingDocumentRestorePoint(documentId, point.id, { expected_current_version_id: expectedVersionId, change_summary: `恢复到存档 ${point.point_number}` })
+      } catch (failure) {
+        try {
+          fresh = await getDocument(documentId)
+          const current = fresh.current_version ?? (await listDocumentVersions(documentId)).find(item => item.id === fresh.current_version_id)
+          if (!current || current.document_id !== documentId || current.parent_version_id !== expectedVersionId || current.restored_from_version_id !== version.id || current.restored_from_restore_point_id !== point.id) throw failure
+          restored = current
+        } catch {
+          throw new Error(failure instanceof ApiError && failure.status === 409 ? '版本已更新，当前草稿已保留。请重新打开历史核对。' : '恢复结果未能确认，当前文稿已保留。可重试核对。')
+        }
+      }
+      if (restored.document_id !== documentId || restored.parent_version_id !== expectedVersionId || restored.restored_from_version_id !== version.id || restored.restored_from_restore_point_id !== point.id) throw new Error('恢复结果未能确认，当前文稿已保留。可重试核对。')
+      try { fresh = await getDocument(documentId) } catch { throw new Error('恢复结果未能确认，当前文稿已保留。可重试核对。') }
+      if (fresh.current_version_id !== restored.id || fresh.setting_collection_id !== settingCollectionId) throw new Error('恢复后版本又有更新，当前草稿已保留。请重新打开历史核对。')
+      const comments = restoreOutlineComments(fresh.metadata?.comments, content)
+      editor.current?.replaceSavedNote?.(documentId, content, restored.id, comments, { body: snapshot.body, comments: snapshot.comments || [] })
+      setNotes(previous => previous.map(note => note.id === documentId || note.documentId === documentId ? { ...note, body: content, comments, versionId: restored.id } : note))
+      setSaveStatus('saved'); setConflict(null)
+      setCollection(previous => previous ? { ...previous, revision: previous.revision + 1 } : previous)
+      return true
+    } catch (failure) {
+      const message = failure instanceof Error ? failure.message : '恢复结果未能确认，当前文稿已保留。可重试核对。'
+      setOperationError(message)
+      throw new Error(message, { cause: failure })
+    } finally { operation.current = false; setOperationBusy(false) }
+  }
+
+  async function archiveCollection(): Promise<boolean> {
+    if (isPreview || isArchived || operation.current) return false
+    operation.current = true; setOperationBusy(true); setOperationError('')
+    try {
+      if (editor.current && !await editor.current.flush()) throw new Error('当前条目未能保存，已暂停归档。草稿仍保留，请关闭窗口重试同步。')
+      let archived: SettingCollection
+      try { archived = await archiveSettingCollection(settingCollectionId) }
+      catch {
+        try {
+          archived = await getSettingCollection(settingCollectionId)
+          if (archived.status !== 'archived') throw new Error('not archived')
+        } catch { throw new Error('归档结果未能确认，当前文稿已保留。可重试核对。') }
+      }
+      if (archived.id !== settingCollectionId || archived.status !== 'archived') throw new Error('归档结果未能确认，当前文稿已保留。可重试核对。')
+      setCollection(archived)
+      return true
+    } catch (failure) {
+      const message = failure instanceof Error ? failure.message : '归档结果未能确认，当前文稿已保留。可重试核对。'
+      setOperationError(message)
+      throw new Error(message, { cause: failure })
+    } finally { operation.current = false; setOperationBusy(false) }
+  }
+
+  const impact = <div className="setting-lifecycle-impact" aria-label="受影响的关联小说">
+    {projectsStatus === 'loading' ? <span role="status">正在读取关联小说…</span> : projectsStatus === 'error' ? <div role="alert">关联小说未能读取。<button type="button" onClick={() => { void refreshAssociations() }}>重新加载关联小说</button></div>
+      : <><span>关联小说 · {projects?.length ?? 0} 部</span>{projects?.length ? <ul>{projects.map(project => <li key={project.id}>{project.title}</li>)}</ul> : <p>暂无关联小说</p>}</>}
+  </div>
 
   useEffect(() => {
     let cancelled = false
@@ -480,14 +677,18 @@ export default function SettingCollectionWorkspace() {
         <div className="setting-workspace-header-meta">
           <button type="button"
             className="setting-pill-novels"
-            onClick={() => setAssociationsOpen(true)}
+            title={projectsStatus === 'error' ? '关联小说未能更新，点击重新查看' : undefined}
+            aria-disabled={operationBusy}
+            onClick={() => { if (!operation.current) setAssociationsOpen(true) }}
           >
-            {projectsStatus === 'ready' ? `关联小说 (${projects.length})` : projectsStatus === 'error' ? '关联小说 · 重试' : '关联小说…'}
+            {projects !== null ? `关联小说 (${projects.length})` : projectsStatus === 'error' ? '关联小说 · 重试' : '关联小说…'}
           </button>
+          {!isPreview && <SettingCollectionMenu disabled={operationBusy || Boolean(history) || associationsOpen || archiveOpen} onCollaborate={() => editor.current?.openCollaboration?.()} onArchive={isArchived ? undefined : () => { setArchiveOpen(true); void refreshAssociations() }} />}
         </div>
       </header>
 
       {navigationError && <p className="setting-navigation-error" role="alert">{navigationError}</p>}
+      {!history && !archiveOpen && operationError && <p className="setting-navigation-error" role="alert">{operationError}</p>}
 
       {conflict && (
         <div className="setting-conflict-banner" role="alert">
@@ -523,18 +724,23 @@ export default function SettingCollectionWorkspace() {
         </div>
       )}
 
-      <section className="setting-workspace-body" aria-label="设定集正文">
+      <section className="setting-workspace-body" aria-label="设定集正文" inert={operationBusy} aria-busy={operationBusy}>
         <StudioSetting
           key={collection.id}
           ref={editor}
           onAssistantContext={setAssistantContext}
+          onOpenHistory={isPreview ? undefined : note => { void openHistory(note) }}
+          onCreateRestorePoint={isPreview ? undefined : createRestorePoint}
+          restorePointStatus={pointNotice}
+          restorePointBusy={pointBusy}
+          collaborationInMenu={!isPreview}
           libraryFooter={homeLink}
           preview={isPreview}
           hidden={false}
           collection={collection}
           backendNotes={isPreview ? undefined : notes}
           readOnly={isArchived}
-          referencingProjects={projects}
+          referencingProjects={projects ?? []}
           onSaveNoteContent={isPreview ? undefined : handleSaveNoteContent}
           onApplyProposal={isPreview ? undefined : handleApplyProposal}
           onRenameNote={isPreview ? undefined : handleRenameNote}
@@ -553,6 +759,8 @@ export default function SettingCollectionWorkspace() {
           onTyping={() => {}}
         />
       </section>
+      {history?.note.documentId && <SettingHistoryDialog documentId={history.note.documentId} title={history.note.title} readOnly={isArchived} restoreBlockedReason={history.blocked} impact={impact} onRestore={restoreVersion} onClose={() => setHistory(null)} />}
+      {archiveOpen && <SettingArchiveDialog title={collection.title} readOnly={isArchived} impact={impact} impactReady={projectsStatus === 'ready'} onArchive={archiveCollection} onClose={() => setArchiveOpen(false)} />}
       {associationsOpen && <AssociatedNovelsDialog collectionId={settingCollectionId}
         onProjectsLoaded={associationsLoaded}
         onBeforeOpen={async () => !editor.current || await editor.current.flush()}

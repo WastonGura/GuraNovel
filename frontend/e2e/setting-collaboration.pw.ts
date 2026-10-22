@@ -4,6 +4,12 @@ const collectionId = '11111111-1111-4111-8111-111111111111'
 const docId = '22222222-2222-4222-8222-222222222222'
 const worldId = '44444444-4444-4444-8444-444444444444'
 const stamp = '2026-10-20T00:00:00Z'
+
+async function openCollectionCollaboration(page: Page) {
+  await page.getByRole('button', { name: '设定集操作', exact: true }).click()
+  await page.getByRole('menu', { name: '设定集操作', exact: true }).getByRole('menuitem', { name: '与设定 Agent 协作', exact: true }).click()
+  await expect(page.getByRole('complementary', { name: '设定 Agent 协作', exact: true })).toBeVisible()
+}
 type DocumentFixture = { id: string; project_id: null; chapter_id: null; setting_collection_id: string; title: string; type: string; path: string; current_version_id: string; current_version: null; metadata: object; created_at: string; updated_at: string }
 type MessageFixture = { id: string; role: 'user' | 'assistant'; content: string; client_message_id: string | null; proposal: null | { id: string; setting_collection_id: string; target_document_id: string | null; base_version_id: string | null; title: string; category: string; proposed_content: string; reason: string; status: 'pending' | 'accepted'; created_at: string; source_task: { agent_role: string; workflow_run_id: null; chapter_id: null; novel_title: null } }; proposal_status: 'pending' | 'accepted' | null; base_content: string | null; base_title: string | null; accepted_version_id: string | null; created_at: string }
 
@@ -98,7 +104,7 @@ test('new entry autosaves, collaborates with the setting Agent, adopts explicitl
   await body.fill('灯塔守护着雾中的港口。')
   await expect.poll(() => state.body).toBe('灯塔守护着雾中的港口。')
   expect(state.creates).toBe(1)
-  await page.getByRole('button', { name: '与设定 Agent 协作' }).click()
+  await openCollectionCollaboration(page)
   const panel = page.getByRole('complementary', { name: '设定 Agent 协作' })
   await expect(panel).toBeVisible()
   await panel.getByRole('textbox', { name: '给设定 Agent 的消息' }).fill('为灯塔补充一条与潮汐相关的规则。')
@@ -120,7 +126,7 @@ test('new entry autosaves, collaborates with the setting Agent, adopts explicitl
   await expect(gura.getByRole('log', { name: '助手对话记录' })).toContainText('Gura 可以通过侧栏底部')
   await expect(gura.getByRole('log', { name: '助手对话记录' })).not.toContainText('设定 Agent 提出了')
   await gura.getByRole('textbox', { name: '给 Gura 的消息' }).press('Escape')
-  await page.getByRole('button', { name: '与设定 Agent 协作' }).click()
+  await openCollectionCollaboration(page)
   await expect(panel.getByRole('log')).toContainText('设定 Agent 提出了灯塔的退潮规则。')
   await expect(panel.getByRole('log')).not.toContainText('Gura 可以通过侧栏底部')
   expect(await page.evaluate(() => document.documentElement.scrollHeight - innerHeight)).toBe(0)
@@ -132,7 +138,7 @@ test('typing during a setting Agent request retains fresh prose and requires a n
   await page.goto(`/setting-collections/${collectionId}?note=${docId}&mode=note`)
   const body = page.getByLabel('设定正文', { exact: true })
   await expect(body).toHaveText('港口在黄昏关闭。')
-  await page.getByRole('button', { name: '与设定 Agent 协作' }).click()
+  await openCollectionCollaboration(page)
   const panel = page.getByRole('complementary', { name: '设定 Agent 协作' })
   await panel.getByRole('textbox', { name: '给设定 Agent 的消息' }).fill('补充港口的细节。')
   await panel.getByRole('button', { name: '发送给设定 Agent' }).click()
@@ -144,7 +150,7 @@ test('typing during a setting Agent request retains fresh prose and requires a n
   await expect.poll(() => backend.state.body).toBe('港口彻夜开放，船只会在黎明前归来。')
   release()
   await expect.poll(() => backend.state.messages.length).toBe(2)
-  await page.getByRole('button', { name: '与设定 Agent 协作' }).click()
+  await openCollectionCollaboration(page)
   await panel.getByRole('button', { name: '比较建议' }).click()
   await expect(panel).toContainText('目标条目已更新，请基于设定集的最新内容重新讨论。')
   await expect(panel.getByRole('button', { name: '采纳建议' })).toHaveCount(0)
@@ -159,7 +165,7 @@ test('the collection Agent keeps the same history and draft while switching entr
   const { state } = await authoringBackend(page, true, true)
   await page.goto(`/setting-collections/${collectionId}?note=${docId}&category=setting&mode=note`)
   await expect(page.getByRole('textbox', { name: '设定标题' })).toHaveValue('旧港')
-  const open = () => page.getByRole('button', { name: '与设定 Agent 协作' }).click()
+  const open = () => openCollectionCollaboration(page)
   const panel = page.getByRole('complementary', { name: '设定 Agent 协作' })
   const draft = panel.getByRole('textbox', { name: '给设定 Agent 的消息' })
   await open()
@@ -200,7 +206,7 @@ test('the collection Agent keeps the same history and draft while switching entr
 test('an empty collection can discuss and propose a new entry without creating a placeholder document', async ({ page }) => {
   const { state } = await authoringBackend(page)
   await page.goto(`/setting-collections/${collectionId}`)
-  await page.getByRole('button', { name: '与设定 Agent 协作' }).click()
+  await openCollectionCollaboration(page)
   const panel = page.getByRole('complementary', { name: '设定 Agent 协作' })
   await expect(panel.getByRole('heading', { name: '一起构建这个世界' })).toBeVisible()
   expect(state.docs).toHaveLength(0)
@@ -231,7 +237,7 @@ test('adopting a legacy world document preserves its world category and URL with
   await expect(page.getByRole('button', { name: '世界观', exact: true })).toHaveAttribute('aria-pressed', 'true')
   await expect(page.getByLabel('世界观条目', { exact: true })).toContainText('旧港')
   expect(state.docs[0]).toMatchObject({ type: 'factions', metadata: {} })
-  await page.getByRole('button', { name: '与设定 Agent 协作' }).click()
+  await openCollectionCollaboration(page)
   const panel = page.getByRole('complementary', { name: '设定 Agent 协作' })
   await panel.getByRole('textbox', { name: '给设定 Agent 的消息' }).fill('补充这个港口组织的潮汐约定。')
   await panel.getByRole('button', { name: '发送给设定 Agent' }).click()
@@ -256,7 +262,7 @@ test(`the main Agent stays separate from Gura and retains the manuscript at ${vi
   const body = page.getByLabel('设定正文', { exact: true })
   await expect(body).toHaveText('港口在黄昏关闭。')
   const writingStart = (await page.getByRole('textbox', { name: '设定标题' }).boundingBox())!
-  await page.getByRole('button', { name: '与设定 Agent 协作' }).click()
+  await openCollectionCollaboration(page)
   const panel = page.getByRole('complementary', { name: '设定 Agent 协作' })
   await expect(panel).toBeVisible()
   await expect(panel.getByRole('heading', { name: '一起构建这个世界' })).toBeVisible()
@@ -290,7 +296,7 @@ test(`the main Agent stays separate from Gura and retains the manuscript at ${vi
   await panel.getByRole('button', { name: '关闭设定协作' }).click()
   await expect(body).toBeVisible()
   const writingWithGura = (await page.getByRole('textbox', { name: '设定标题' }).boundingBox())!
-  await page.getByRole('button', { name: '与设定 Agent 协作' }).click()
+  await openCollectionCollaboration(page)
   await expect(panel.getByRole('heading', { name: '一起构建这个世界' })).toBeVisible()
   await assertStart(writingWithGura)
   const height = page.getByRole('separator', { name: '调整 Gura 高度' })
@@ -304,7 +310,7 @@ test(`the main Agent stays separate from Gura and retains the manuscript at ${vi
   await panel.getByRole('button', { name: '关闭设定协作' }).click()
   await expect(body).toBeVisible()
   await expect(body).toBeFocused()
-  await page.getByRole('button', { name: '与设定 Agent 协作' }).click()
+  await openCollectionCollaboration(page)
   await expect(panel.getByRole('textbox', { name: '给设定 Agent 的消息' })).toHaveValue('这段生成要求不能丢失。')
   expect(await page.evaluate(() => document.documentElement.scrollHeight - innerHeight)).toBe(0)
 })

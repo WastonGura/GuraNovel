@@ -18,10 +18,16 @@ from app.api.schemas_documents import (
     UpdateDocumentRequest,
     WriteDocumentRequest,
 )
+from app.api.schemas_setting_restore_points import (
+    CreateSettingDocumentRestorePointRequest,
+    SettingDocumentRestorePointResponse,
+    UpdateSettingDocumentRestorePointMessageRequest,
+)
 from app.core.errors import ConflictError, ForbiddenError, NotFoundError
 from app.models import Document, DocumentVersion, Project, SettingCollection
 from app.services import DocumentService
 from app.services.setting_document_trash import set_setting_document_deleted
+from app.services.setting_document_restore_points import SettingDocumentRestorePoints
 from app.workspace.markdown_store import MarkdownStore
 
 router = APIRouter(prefix="/documents")
@@ -38,7 +44,9 @@ class RestoreBodyPayload(RestoreDocumentRequest):
     version_id: UUID | None = None
 
 
-async def _document_metadata(session: AsyncSession, document_id: UUID) -> Document:
+async def _document_metadata(
+    session: AsyncSession, document_id: UUID, actor_id: UUID | None = None,
+) -> Document:
     document = await session.scalar(
         select(Document)
         .options(
@@ -50,6 +58,10 @@ async def _document_metadata(session: AsyncSession, document_id: UUID) -> Docume
     )
     if document is None:
         raise NotFoundError("Document not found.")
+    collection = document.setting_collection
+    if (collection is not None and actor_id is not None
+            and collection.owner_id is not None and collection.owner_id != actor_id):
+        raise ForbiddenError("You do not have permission to access this setting collection.")
     return document
 
 
@@ -77,14 +89,19 @@ async def create_document(
 
 
 @router.get("/{document_id}", response_model=DocumentResponse)
-async def get_document(document_id: UUID, session: AsyncSession = Depends(get_db_session)) -> Document:
-    return await _document_metadata(session, document_id)
+async def get_document(
+    document_id: UUID, actor_id: UUID | None = Depends(get_actor_user_id),
+    session: AsyncSession = Depends(get_db_session),
+) -> Document:
+    return await _document_metadata(session, document_id, actor_id)
 
 
 @router.get("/{document_id}/content", response_model=DocumentContentResponse)
 async def read_current_content(
-    document_id: UUID, session: AsyncSession = Depends(get_db_session)
+    document_id: UUID, actor_id: UUID | None = Depends(get_actor_user_id),
+    session: AsyncSession = Depends(get_db_session),
 ) -> DocumentContentResponse:
+    await _document_metadata(session, document_id, actor_id)
     current_content = await DocumentService(session).read_current_content(document_id)
     return DocumentContentResponse(
         document_id=document_id,
@@ -95,11 +112,10 @@ async def read_current_content(
 
 @router.get("/{document_id}/versions", response_model=list[DocumentVersionResponse])
 async def list_document_versions(
-    document_id: UUID, session: AsyncSession = Depends(get_db_session)
+    document_id: UUID, actor_id: UUID | None = Depends(get_actor_user_id),
+    session: AsyncSession = Depends(get_db_session),
 ) -> list[DocumentVersion]:
-    document = await session.get(Document, document_id)
-    if document is None:
-        raise NotFoundError("Document not found.")
+    await _document_metadata(session, document_id, actor_id)
     return list(
         await session.scalars(
             select(DocumentVersion)
@@ -113,8 +129,10 @@ async def list_document_versions(
     "/{document_id}/versions/{version_id}/content", response_model=DocumentContentResponse
 )
 async def read_version_content(
-    document_id: UUID, version_id: UUID, session: AsyncSession = Depends(get_db_session)
+    document_id: UUID, version_id: UUID, actor_id: UUID | None = Depends(get_actor_user_id),
+    session: AsyncSession = Depends(get_db_session),
 ) -> DocumentContentResponse:
+    await _document_metadata(session, document_id, actor_id)
     content = await DocumentService(session).read_version_content(document_id, version_id)
     return DocumentContentResponse(document_id=document_id, version_id=version_id, content=content)
 
@@ -130,7 +148,7 @@ async def write_document(
     data = payload.model_dump()
     if payload.setting_comments is not None:
         data["setting_comments"] = [comment.model_dump(mode="json") for comment in payload.setting_comments]
-    if actor_id is not None and data.get("actor_user_id") is None:
+    if actor_id is not None:
         data["actor_user_id"] = actor_id
     version = await DocumentService(session).write_document(
         document_id=document_id, **data
@@ -151,12 +169,52 @@ async def restore_document(
     if target_version_id is None:
         raise ConflictError("version_id must be provided in URL or request body")
     data = payload.model_dump(exclude={"version_id"})
-    if actor_id is not None and data.get("actor_user_id") is None:
+    if actor_id is not None:
         data["actor_user_id"] = actor_id
     version = await DocumentService(session).restore_document(
         document_id=document_id, version_id=target_version_id, **data
     )
     return await _version_metadata(session, version.id)
+
+
+@router.get("/{document_id}/restore-points", response_model=list[SettingDocumentRestorePointResponse])
+async def list_setting_restore_points(
+    document_id: UUID, actor_id: UUID | None = Depends(get_actor_user_id),
+    session: AsyncSession = Depends(get_db_session),
+) -> list[dict]:
+    return await SettingDocumentRestorePoints(session).list(document_id, actor_user_id=actor_id)
+
+
+@router.post("/{document_id}/restore-points", response_model=SettingDocumentRestorePointResponse)
+async def create_setting_restore_point(
+    document_id: UUID, payload: CreateSettingDocumentRestorePointRequest,
+    actor_id: UUID | None = Depends(get_actor_user_id),
+    session: AsyncSession = Depends(get_db_session),
+) -> dict:
+    return await SettingDocumentRestorePoints(session).create(document_id, actor_user_id=actor_id, **payload.model_dump())
+
+
+@router.post("/{document_id}/restore-points/{point_id}/restore", response_model=DocumentVersionResponse)
+async def restore_setting_restore_point(
+    document_id: UUID, point_id: UUID, payload: RestoreDocumentRequest,
+    actor_id: UUID | None = Depends(get_actor_user_id),
+    session: AsyncSession = Depends(get_db_session),
+) -> DocumentVersion:
+    data = payload.model_dump()
+    if actor_id is not None:
+        data["actor_user_id"] = actor_id
+    return await SettingDocumentRestorePoints(session).restore(document_id, point_id, **data)
+
+
+@router.patch("/{document_id}/restore-points/{point_id}/message", response_model=SettingDocumentRestorePointResponse)
+async def update_setting_restore_point_message(
+    document_id: UUID, point_id: UUID, payload: UpdateSettingDocumentRestorePointMessageRequest,
+    actor_id: UUID | None = Depends(get_actor_user_id),
+    session: AsyncSession = Depends(get_db_session),
+) -> dict:
+    return await SettingDocumentRestorePoints(session).update_message(
+        document_id, point_id, actor_user_id=actor_id, **payload.model_dump(),
+    )
 
 
 @router.patch("/{document_id}", response_model=DocumentResponse)
@@ -168,7 +226,9 @@ async def update_document(
 ) -> Document:
     document = await _document_metadata(session, document_id)
     if document.setting_collection_id is not None:
-        collection = await session.get(SettingCollection, document.setting_collection_id)
+        collection = await session.scalar(select(SettingCollection).where(
+            SettingCollection.id == document.setting_collection_id,
+        ).with_for_update().execution_options(populate_existing=True))
         if collection is not None:
             if collection.status == "archived":
                 raise ConflictError("Archived setting collection cannot be modified.")

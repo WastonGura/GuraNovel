@@ -1,0 +1,83 @@
+.picker-dialog.setting-history-dialog { border-radius: 26px; box-shadow: 0 24px 80px #0002, 0 4px 12px #0001; height: min(680px, calc(100dvh - 48px)); max-height: calc(100dvh - 24px); overflow: hidden; width: min(960px, calc(100vw - 40px)); }
+.setting-history-dialog::backdrop { backdrop-filter: blur(5px); }
+.picker-dialog.setting-history-dialog > div { display: flex; flex-direction: column; height: 100%; min-height: 0; padding: 0; }
+.setting-history-dialog > div > header { flex-shrink: 0; gap: 12px; margin: 0; padding: 20px 28px; }
+.setting-history-dialog > div > header h2 { color: #555; font-size: 14px; font-weight: 500; }
+.setting-history-dialog > div > header button { border-radius: 50%; }
+.setting-history-dialog > div > header h2, .setting-history-dialog > div > header > span { white-space: nowrap; }
+.setting-history-layout { border-top: 1px solid #eee; display: grid; flex: 1; grid-template-columns: 240px minmax(0, 1fr); min-height: 0; }
+.setting-history-versions { min-height: 0; overflow: auto; overscroll-behavior: contain; padding: 22px 14px; scrollbar-color: #ddd transparent; scrollbar-width: thin; }
+.setting-history-versions ol { list-style: none; margin: 0; padding: 0; }
+.setting-history-versions li + li { margin-top: 6px; }
+.setting-history-dialog .setting-history-version { background: transparent; border: 0; border-radius: 12px; color: #666; display: block; font: inherit; padding: 14px; position: relative; text-align: left; transition: background 160ms, color 160ms; width: 100%; }
+.setting-history-dialog .setting-history-version[aria-pressed="true"] { background: #f3f3f3; color: #171717; }
+.setting-history-version[aria-pressed="true"]::before { background: #333; border-radius: 2px; content: ''; height: 22px; left: 0; position: absolute; top: 15px; width: 2px; }
+.setting-history-dialog .setting-history-version:hover:not(:disabled) { background: #171717; color: #fff; }
+.setting-history-version-heading { align-items: center; border-radius: 0; color: inherit; display: flex; gap: 10px; justify-content: space-between; padding: 0; }
+.setting-history-version-heading strong { -webkit-box-orient: vertical; -webkit-line-clamp: 2; display: -webkit-box; font-size: 13px; font-weight: 500; line-height: 1.7; min-width: 0; overflow: hidden; overflow-wrap: anywhere; }
+.setting-history-current { border: 1px solid currentColor; border-radius: 10px; color: inherit; flex: none; font-size: 10px; line-height: 1.5; opacity: .65; padding: 1px 7px; white-space: nowrap; }
+.setting-history-version-meta { align-items: center; display: flex; flex-wrap: wrap; font-size: 10px; gap: 4px 10px; line-height: 1.7; margin-top: 8px; opacity: .65; }
+.setting-history-version time { white-space: nowrap; }
+.setting-history-detail { border-left: 1px solid #eee; display: flex; flex-direction: column; min-height: 0; min-width: 0; }
+.setting-history-version-meta, .setting-history-version-meta > span { border-radius: 0; color: inherit; padding: 0; }
+.setting-history-version-meta > span { font-size: inherit; }
+.setting-history-preview-surface { animation: setting-history-preview-in 180ms ease backwards; display: flex; flex: 1; flex-direction: column; min-height: 0; opacity: 1; transition: opacity 120ms ease; }
+.setting-history-preview-surface.is-pending { opacity: .45; }
+.setting-history-preview-status { color: #777; flex: 0 0 auto; font-size: 12px; line-height: 1.8; margin: 0; padding: 8px 34px 14px; }
+.setting-history-preview-status > p { margin: 0; }
+.setting-history-document-heading { flex-shrink: 0; padding: 28px 34px 20px; }
+.setting-history-document-heading > span { color: #999; font-size: 11px; letter-spacing: .06em; }
+.setting-history-document-heading h3 { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; font-family: "Noto Serif SC", SimSun, serif; font-size: 25px; font-weight: 500; line-height: 1.5; margin: 10px 0 10px; overflow: hidden; overflow-wrap: anywhere; }
+.setting-history-document-heading > p { color: #999; font-size: 11px; line-height: 1.8; margin: 0; }
+.setting-history-message { align-items: baseline; display: flex; gap: 14px; margin-top: 14px; }
+.setting-history-message > p { color: #737373; flex: 1; font-size: 13px; line-height: 1.8; margin: 0; min-width: 0; overflow-wrap: anywhere; white-space: pre-wrap; }
+.setting-history-message > p.is-empty { color: #aaa; }
+.setting-history-message-editor { min-width: 0; width: 100%; }
+.setting-history-dialog .setting-history-message-editor input { background: transparent; border: 0; border-bottom: 1px solid transparent; border-radius: 0; box-shadow: none; color: #737373; font: inherit; font-size: 13px; line-height: 1.8; min-height: 36px; padding: 6px 0; transition: border-color 140ms ease, color 140ms ease; width: 100%; }
+.setting-history-dialog .setting-history-message-editor input::placeholder { color: #aaa; }
+.setting-history-dialog .setting-history-message-editor input:hover:not(:disabled) { border-bottom-color: #ddd; }
+.setting-history-dialog .setting-history-message-editor input:focus { border-bottom-color: #777; color: #171717; outline: none; }
+.setting-history-message-actions { align-items: center; display: flex; flex-wrap: wrap; gap: 4px 18px; margin-top: 4px; }
+.setting-history-latest-message { color: #666; font-size: 12px; line-height: 1.8; margin: 10px 0 0; overflow-wrap: anywhere; }
+.setting-history-copy, .setting-history-confirm { flex: 1; min-height: 0; overflow: auto; overscroll-behavior: contain; padding: 6px 34px 28px; scrollbar-color: #ddd transparent; scrollbar-width: thin; }
+.setting-history-plain { color: #444; font-size: 15px; line-height: 2; margin: 0; overflow-wrap: anywhere; tab-size: 4; white-space: pre-wrap; }
+.setting-history-state { color: #999; font-size: 13px; line-height: 1.8; margin: 0; padding: 12px 0; }
+.setting-history-state p { margin: 0 0 8px; }
+.setting-history-confirm h4 { color: #333; font-size: 18px; font-weight: 500; line-height: 1.7; margin: 8px 0; overflow-wrap: anywhere; }
+.setting-history-confirm > p { color: #777; font-size: 14px; line-height: 1.9; margin: 18px 0; }
+.setting-history-impact { border-top: 1px solid #eee; color: #777; font-size: 13px; line-height: 1.8; margin-top: 24px; padding-top: 18px; }
+.setting-history-error { color: #555; font-size: 12px; line-height: 1.8; margin: 0; overflow-wrap: anywhere; padding: 8px 34px 16px; }
+.setting-history-footer { align-items: center; border-top: 1px solid #eee; display: flex; flex-shrink: 0; justify-content: flex-end; min-height: 76px; padding: 16px 28px; }
+.setting-history-footer > div { align-items: center; display: flex; flex-shrink: 0; gap: 20px; }
+.setting-history-dialog .setting-history-text-button { background: transparent; border: 0; border-radius: 0; color: #777; font: inherit; font-size: 12px; min-height: 34px; padding: 6px 0; }
+.setting-history-dialog .setting-history-text-button:hover:not(:disabled) { background: transparent; color: #171717; text-decoration: underline; text-underline-offset: 5px; }
+.setting-history-dialog .setting-history-restore { background: #222; border: 0; border-radius: 24px; color: #fff; font: inherit; font-size: 12px; min-height: 38px; padding: 10px 20px; }
+.setting-history-dialog .setting-history-restore:hover:not(:disabled) { background: #000; color: #fff; }
+.setting-history-dialog button:disabled { cursor: default; opacity: .4; }
+.setting-history-versions:focus-visible, .setting-history-copy:focus-visible, .setting-history-confirm:focus-visible { outline: 1px solid #aaa; outline-offset: -3px; }
+@media (max-width: 620px) {
+  .picker-dialog.setting-history-dialog { border-radius: 20px; height: calc(100dvh - 24px); width: calc(100vw - 24px); }
+  .setting-history-dialog > div > header { gap: 8px; padding: 14px 18px; }
+  .setting-history-layout { grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(100px, 26%) minmax(0, 1fr); }
+  .setting-history-versions { padding: 12px; }
+  .setting-history-versions ol { display: flex; gap: 8px; }
+  .setting-history-versions li { flex: 0 0 170px; }
+  .setting-history-versions li + li { margin-top: 0; }
+  .setting-history-detail { border-left: 0; border-top: 1px solid #eee; }
+  .setting-history-document-heading { padding: 18px 22px 12px; }
+  .setting-history-document-heading h3 { font-size: 21px; margin-block: 6px; }
+  .setting-history-copy, .setting-history-confirm { padding: 6px 22px 20px; }
+  .setting-history-plain { font-size: 14px; }
+  .setting-history-footer { align-items: stretch; flex-direction: column; gap: 8px; min-height: 0; padding: 12px 18px; }
+  .setting-history-footer > div { justify-content: flex-end; }
+  .setting-history-error { padding-inline: 22px; }
+  .setting-history-preview-status { padding-inline: 22px; }
+}
+@media (max-height: 560px) and (min-width: 621px) {
+  .setting-history-dialog > div > header { padding-block: 12px; }
+  .setting-history-document-heading { padding-top: 18px; }
+  .setting-history-document-heading h3 { -webkit-line-clamp: 1; font-size: 22px; }
+  .setting-history-footer { min-height: 62px; padding-block: 10px; }
+}
+@keyframes setting-history-preview-in { from { opacity: 0; } to { opacity: 1; } }
+@media (prefers-reduced-motion: reduce) { .setting-history-version, .setting-history-preview-surface, .setting-history-dialog .setting-history-message-editor input { animation: none; transition: none; } }

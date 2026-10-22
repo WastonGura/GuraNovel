@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { useDialogMotion } from './useDialogMotion'
+import SettingActionIcon from './SettingActionIcon'
 import './SettingTrash.css'
 
 export interface SettingUndoOperation { id: string; ids: string[] }
@@ -51,7 +52,7 @@ function UndoNotice({ operation, onUndo, onDismiss, durationMs = 7000 }: Setting
   return createPortal(<div role="status" aria-live="polite" aria-atomic="true" className={`setting-undo-toast${closing ? ' is-closing' : ''}`} inert={closing} onAnimationEnd={onAnimationEnd}
     onPointerEnter={() => setHovered(true)} onPointerLeave={() => setHovered(false)} onFocus={() => setFocused(true)}
     onBlur={event => { if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setFocused(false) }}>
-    <div><span>已移至回收站</span><span aria-hidden="true">·</span><button type="button" disabled={pending} onClick={() => { void undo() }}>{pending ? '正在撤销…' : error ? '重试撤销' : '撤销'}</button><button type="button" className="setting-undo-dismiss" aria-label="关闭删除提示" onClick={() => { void requestClose() }}>×</button></div>
+    <div><span>已移至回收站</span><span aria-hidden="true">·</span><button type="button" disabled={pending} onClick={() => { void undo() }}>{pending ? '正在撤销…' : error ? '重试撤销' : '撤销'}</button><button type="button" className="setting-undo-dismiss setting-icon-button" aria-label="关闭删除提示" title="关闭删除提示" onClick={() => { void requestClose() }}><SettingActionIcon name="close" /></button></div>
     {error && <p role="alert">{error}</p>}
   </div>, document.body)
 }

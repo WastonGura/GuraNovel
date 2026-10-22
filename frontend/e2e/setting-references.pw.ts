@@ -6,7 +6,7 @@ const docId = 'd1111111-1111-4111-8111-111111111111'
 const worldId = 'd2222222-2222-4222-8222-222222222222'
 const stamp = '2026-10-20T00:00:00Z'
 
-async function workspace(page: Page) {
+async function workspace(page: Page, worldContent = '这是被引用的世界观正文。') {
   const state = { content: '看', version: 1, writes: [] as string[] }
   const version = () => `v1111111-1111-4111-8111-${String(state.version).padStart(12, '0')}`
   await page.route('**/api/v1/**', async route => {
@@ -24,7 +24,7 @@ async function workspace(page: Page) {
       }
       return json({ document_id: docId, version_id: version(), content: state.content })
     }
-    if (path === `/api/v1/documents/${worldId}/content`) return json({ document_id: worldId, version_id: version(), content: '这是被引用的世界观正文。' })
+    if (path === `/api/v1/documents/${worldId}/content`) return json({ document_id: worldId, version_id: version(), content: worldContent })
     return json([])
   })
   await page.goto(`/setting-collections/${collectionId}?note=${docId}&category=setting&mode=note`)
@@ -175,8 +175,11 @@ test('document switches dissolve and reveal real editable text, and pointer inpu
   await page.clock.runFor(DISSOLVE_MS + 48)
   await expect(motion).toHaveAttribute('data-text-phase', 'reveal')
   const editor = page.getByLabel('设定正文', { exact: true })
+  await expect(motion.locator('.studio-text-reveal')).toHaveCount(1)
+  await expect(editor).toHaveCSS('mask-image', 'none')
   await editor.click()
   await expect(motion).not.toHaveAttribute('data-text-phase')
+  await expect(motion.locator('.studio-text-reveal')).toHaveCount(0)
   await expect(editor).toBeFocused()
   await expect(editor).toHaveCSS('opacity', '1')
   await expect(editor).toHaveText('这是被引用的世界观正文。')
@@ -186,4 +189,33 @@ test('document switches dissolve and reveal real editable text, and pointer inpu
   await expect(motion).not.toHaveAttribute('data-text-phase')
   await expect(editor).toHaveText('看')
   await expect(editor).toBeFocused()
+})
+
+test('short multiline reveal finishes without changing completed glyphs or wrapped text positions', async ({ page }) => {
+  await page.clock.install()
+  await workspace(page, '潮汐低落时，港口的守门人会点亮灯塔。\n等到归航的船只靠岸，钟声才会停止。')
+  await page.clock.pauseAt(await page.evaluate(() => Date.now() + 1000))
+  await page.getByRole('button', { name: /^世界观$/ }).click()
+  const editor = page.getByLabel('设定正文', { exact: true })
+  await page.clock.runFor(DISSOLVE_MS + 48)
+  const rows = () => editor.evaluate(element => {
+    const range = document.createRange(); range.selectNodeContents(element)
+    return [...range.getClientRects()].map(({ x, y, width, height }) => ({ x, y, width, height }))
+  })
+  const initial = await rows()
+  const clip = await editor.evaluate(element => {
+    const text = element.firstChild!, range = document.createRange()
+    range.setStart(text, 0); range.setEnd(text, text.textContent!.indexOf('\n'))
+    const { x, y, width, height } = range.getBoundingClientRect()
+    return { x, y, width, height }
+  })
+  const beginning = await page.screenshot({ clip })
+  await page.clock.runFor(380)
+  await expect(page.locator('.setting-document-motion')).toHaveAttribute('data-text-phase', 'reveal')
+  const completeFirstLine = await page.screenshot({ clip })
+  expect(completeFirstLine.equals(beginning), 'The reveal must progressively expose the native line').toBe(false)
+  await page.clock.runFor(300)
+  await expect(page.locator('.setting-document-motion')).not.toHaveAttribute('data-text-phase')
+  expect(await rows()).toEqual(initial)
+  expect((await page.screenshot({ clip })).equals(completeFirstLine), 'A completed line must keep identical native glyphs when its reveal ends').toBe(true)
 })

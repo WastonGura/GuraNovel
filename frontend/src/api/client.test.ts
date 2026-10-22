@@ -9,6 +9,12 @@ import {
   listProjects,
   resolveProjectCreationAction,
   restoreDocument,
+  listDocumentVersions,
+  listSettingDocumentRestorePoints,
+  createSettingDocumentRestorePoint,
+  updateSettingDocumentRestorePointMessage,
+  restoreSettingDocumentRestorePoint,
+  getDocument,
   listRestorePoints,
   createRestorePoint,
   restorePoint,
@@ -59,6 +65,11 @@ const documentVersion = {
   file_path: 'documents/document-1.md',
   change_summary: null,
   created_at: '2026-07-19T00:00:00Z',
+}
+
+const settingPoint = {
+  id: 'manual-point', document_id: 'document-1', version_id: documentVersion.id, point_number: 1,
+  summary: '雾港', message: null, created_at: '2026-10-21T01:00:00Z', version: documentVersion, matches_current: true,
 }
 
 function mockJsonResponse(body: unknown, status = 200): void {
@@ -381,6 +392,102 @@ describe('typed API client', () => {
         body: JSON.stringify(payload),
       },
     )
+  })
+
+  it('preserves optional restore provenance on both versions and a document current version', async () => {
+    const restored = { ...documentVersion, restored_from_version_id: 'historical-version', restored_from_restore_point_id: 'manual-point' }
+    mockJsonResponse(restored)
+    await expect(restoreDocument('document-1', 'historical-version', { expected_current_version_id: 'version-0' })).resolves.toEqual(restored)
+    const oldVersion = { ...documentVersion, restored_from_version_id: null, restored_from_restore_point_id: null }
+    mockJsonResponse([oldVersion, restored, documentVersion])
+    await expect(listDocumentVersions('document-1')).resolves.toEqual([oldVersion, restored, documentVersion])
+    const doc = { id: 'document-1', project_id: null, setting_collection_id: 'collection', chapter_id: null, type: 'character_profile', title: '雾港',
+      path: 'setting/harbor.md', current_version_id: restored.id, current_version: restored, metadata: {}, created_at: project.created_at, updated_at: project.updated_at }
+    mockJsonResponse(doc)
+    await expect(getDocument('document-1')).resolves.toEqual(doc)
+  })
+
+  it.each([{ identity: 42 }, { identity: {} }, { identity: [] }])('rejects an invalid restore provenance identity %j', async ({ identity }) => {
+    mockJsonResponse({ ...documentVersion, restored_from_version_id: identity })
+    await expect(restoreDocument('document-1', 'historical-version', { expected_current_version_id: 'version-0' })).rejects.toMatchObject({ name: 'ApiError', code: 'invalid_response' })
+    mockJsonResponse([{ ...documentVersion, restored_from_restore_point_id: identity }])
+    await expect(listDocumentVersions('document-1')).rejects.toMatchObject({ name: 'ApiError', code: 'invalid_response' })
+  })
+
+  it('lists and creates explicit document archives through scoped endpoints without treating revisions as archives', async () => {
+    mockJsonResponse([settingPoint])
+    await expect(listSettingDocumentRestorePoints('document-1')).resolves.toEqual([settingPoint])
+    expect(fetch).toHaveBeenCalledWith('/api/v1/documents/document-1/restore-points', expect.objectContaining({ method: 'GET' }))
+    const point = { ...settingPoint, document_id: 'document/one', version: { ...documentVersion, document_id: 'document/one' } }
+    const payload = { request_id: settingPoint.id, expected_current_version_id: documentVersion.id }
+    mockJsonResponse(point)
+    await expect(createSettingDocumentRestorePoint('document/one', payload)).resolves.toEqual(point)
+    expect(fetch).toHaveBeenCalledWith('/api/v1/documents/document%2Fone/restore-points', expect.objectContaining({ method: 'POST', body: JSON.stringify(payload) }))
+    mockJsonResponse([])
+    await expect(listSettingDocumentRestorePoints('document-1')).resolves.toEqual([])
+    mockJsonResponse([{ ...settingPoint, summary: null, matches_current: false }])
+    await expect(listSettingDocumentRestorePoints('document-1')).resolves.toEqual([{ ...settingPoint, summary: null, matches_current: false }])
+  })
+
+  it.each([
+    { document_id: 'another-document' }, { version_id: 'another-version' },
+    { version: { ...documentVersion, document_id: 'another-document' } },
+    { point_number: 0 }, { point_number: 1.5 }, { matches_current: 'false' }, { summary: 42 }, { message: 42 },
+  ])('rejects an archive outside its document or with invalid identity fields %j', async overrides => {
+    mockJsonResponse([{ ...settingPoint, ...overrides }])
+    await expect(listSettingDocumentRestorePoints('document-1')).rejects.toMatchObject({ code: 'invalid_response' })
+  })
+
+  it('rejects revisions or duplicate identities returned as a document archive list', async () => {
+    mockJsonResponse([documentVersion])
+    await expect(listSettingDocumentRestorePoints('document-1')).rejects.toMatchObject({ code: 'invalid_response' })
+    mockJsonResponse([settingPoint, settingPoint])
+    await expect(listSettingDocumentRestorePoints('document-1')).rejects.toMatchObject({ code: 'invalid_response' })
+    mockJsonResponse(settingPoint)
+    await expect(listSettingDocumentRestorePoints('document-1')).rejects.toMatchObject({ code: 'invalid_response' })
+  })
+
+  it('requires a created archive to match both the idempotency request and expected saved revision', async () => {
+    const payload = { request_id: settingPoint.id, expected_current_version_id: documentVersion.id }
+    mockJsonResponse({ ...settingPoint, id: 'unrelated-point' })
+    await expect(createSettingDocumentRestorePoint('document-1', payload)).rejects.toMatchObject({ code: 'invalid_response' })
+    mockJsonResponse({ ...settingPoint, version_id: 'another-version', version: { ...documentVersion, id: 'another-version' } })
+    await expect(createSettingDocumentRestorePoint('document-1', payload)).rejects.toMatchObject({ code: 'invalid_response' })
+  })
+
+  it('keeps legacy archives readable while decoding an explicit optional message independently of the saved title', async () => {
+    const legacy = { ...settingPoint, message: undefined }
+    mockJsonResponse([legacy, { ...settingPoint, id: 'another-point', message: '补全雾港的时间规则' }])
+    await expect(listSettingDocumentRestorePoints('document-1')).resolves.toMatchObject([
+      { message: null, summary: '雾港' }, { message: '补全雾港的时间规则', summary: '雾港' },
+    ])
+  })
+
+  it('updates only the named archive message with an encoded route and an explicit compare-and-set base', async () => {
+    const payload = { message: ' 修正角色动机 ', expected_message: '角色初稿' }
+    const point = { ...settingPoint, id: 'point?two', document_id: 'document/one', message: '修正角色动机', version: { ...documentVersion, document_id: 'document/one' } }
+    mockJsonResponse(point)
+    await expect(updateSettingDocumentRestorePointMessage('document/one', 'point?two', payload)).resolves.toEqual(point)
+    expect(fetch).toHaveBeenLastCalledWith('/api/v1/documents/document%2Fone/restore-points/point%3Ftwo/message', expect.objectContaining({ method: 'PATCH', body: JSON.stringify(payload) }))
+    mockJsonResponse({ ...point, message: null })
+    await expect(updateSettingDocumentRestorePointMessage('document/one', 'point?two', { message: null, expected_message: '修正角色动机' })).resolves.toMatchObject({ message: null })
+  })
+
+  it.each([{ id: 'unrelated-point' }, { document_id: 'another-document' }, { message: '另一次修改' }])('does not acknowledge an unrelated message update %j', async overrides => {
+    mockJsonResponse({ ...settingPoint, ...overrides })
+    await expect(updateSettingDocumentRestorePointMessage('document-1', settingPoint.id, { message: '补全时间规则', expected_message: null })).rejects.toMatchObject({ code: 'invalid_response' })
+  })
+
+  it('restores an explicit archive through its encoded route and preserves exact archive provenance', async () => {
+    const restored = { ...documentVersion, document_id: 'document/one', restored_from_version_id: 'saved-version', restored_from_restore_point_id: 'point?two' }
+    const payload = { expected_current_version_id: 'version-0', change_summary: '恢复手动存档' }
+    mockJsonResponse(restored)
+    await expect(restoreSettingDocumentRestorePoint('document/one', 'point?two', payload)).resolves.toEqual(restored)
+    expect(fetch).toHaveBeenCalledWith('/api/v1/documents/document%2Fone/restore-points/point%3Ftwo/restore', expect.objectContaining({ method: 'POST', body: JSON.stringify(payload) }))
+    mockJsonResponse({ ...restored, restored_from_restore_point_id: 'different-point' })
+    await expect(restoreSettingDocumentRestorePoint('document/one', 'point?two', payload)).rejects.toMatchObject({ code: 'invalid_response' })
+    mockJsonResponse({ ...restored, document_id: 'different-document' })
+    await expect(restoreSettingDocumentRestorePoint('document/one', 'point?two', payload)).rejects.toMatchObject({ code: 'invalid_response' })
   })
 
   it('fetches setting collection by id', async () => {

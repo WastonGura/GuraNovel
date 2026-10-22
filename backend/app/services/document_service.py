@@ -180,9 +180,7 @@ class DocumentService:
                 raise ConflictError(
                     f"Document type '{document_type.value}' is not permitted for setting collections."
                 )
-            collection = await self.session.get(SettingCollection, setting_collection_id)
-            if collection is None:
-                raise NotFoundError("Setting collection not found.")
+            collection = await self._locked_setting_collection(setting_collection_id)
             collection_owner = getattr(collection, "owner_id", None)
             if (
                 actor_user_id is not None
@@ -298,9 +296,7 @@ class DocumentService:
                 raise ConflictError(
                     f"Document type '{kwargs['document_type'].value}' is not permitted for setting collections."
                 )
-            collection = await self.session.get(SettingCollection, setting_collection_id)
-            if collection is None:
-                raise NotFoundError("Setting collection not found.")
+            collection = await self._locked_setting_collection(setting_collection_id)
             collection_owner = getattr(collection, "owner_id", None)
             if (
                 kwargs.get("actor_user_id") is not None
@@ -469,6 +465,7 @@ class DocumentService:
         workflow_run_id: UUID | None = None,
         change_summary: str | None = None,
         version_metadata: dict[str, object] | None = None,
+        setting_comments_snapshot: list[dict] | None = None,
     ) -> DocumentVersion:
         version_metadata = self._validated_version_metadata(version_metadata)
         document = await self._locked_document(document_id)
@@ -476,8 +473,6 @@ class DocumentService:
         self._ensure_actor_permission(document, actor_user_id)
         self._ensure_expected_current_version(document, expected_current_version_id)
         setting_collection = getattr(document, "setting_collection", None)
-        if setting_collection is not None:
-            setting_collection.revision += 1
         target = await self.session.scalar(
             select(DocumentVersion).where(
                 DocumentVersion.id == version_id, DocumentVersion.document_id == document.id
@@ -486,6 +481,11 @@ class DocumentService:
         if target is None:
             raise NotFoundError("Document version not found.")
         content = self._store_for(document).read(self._snapshot_path(target))
+        if setting_collection is not None:
+            setting_collection.revision += 1
+        setting_comments = None
+        if setting_collection is not None:
+            setting_comments = setting_comments_snapshot if setting_comments_snapshot is not None else (target.metadata_ or {}).get("setting_comments", [])
         restored = await self._append_version(
             document=document,
             content=content,
@@ -494,7 +494,8 @@ class DocumentService:
             agent_role=agent_role,
             workflow_run_id=workflow_run_id,
             change_summary=change_summary,
-            version_metadata=version_metadata,
+            version_metadata={**version_metadata, "restored_from_version_id": str(target.id)},
+            setting_comments=setting_comments,
         )
         log_event(
             "document_restored",
@@ -681,6 +682,7 @@ class DocumentService:
         workflow_run_id: UUID | None,
         change_summary: str | None,
         version_metadata: dict[str, object] | None = None,
+        setting_comments: list[dict] | None = None,
     ) -> DocumentVersion:
         version = self._new_version(
             document=document,
@@ -696,6 +698,11 @@ class DocumentService:
         )
         document.current_version = version
         self.session.add(version)
+        if setting_comments is not None:
+            version.id = version.id or uuid4()
+            document.metadata_ = {**(document.metadata_ or {}), "comments": setting_comments,
+                                  "comments_source_version_id": str(version.id)}
+            version.metadata_ = {**(version.metadata_ or {}), "setting_comments": setting_comments}
         await self._commit_with_file_writes(
             self._store_for(document), ((document.path, content), (version.snapshot_path, content))
         )
@@ -725,10 +732,25 @@ class DocumentService:
             )
             .where(Document.id == document_id)
             .with_for_update()
+            .execution_options(populate_existing=True)
         )
         if document is None or document.deleted_at is not None:
             raise NotFoundError("Document not found.")
+        if document.setting_collection_id is not None:
+            # Metadata PATCH flushes collection before document; a recoverable conflict
+            # avoids waiting in the reverse order while holding this document lock.
+            document.setting_collection = await self._locked_setting_collection(document.setting_collection_id, skip_locked=True)
         return document
+
+    async def _locked_setting_collection(self, collection_id: UUID, *, skip_locked: bool = False) -> SettingCollection:
+        collection = await self.session.scalar(select(SettingCollection).where(
+            SettingCollection.id == collection_id,
+        ).with_for_update(skip_locked=skip_locked).execution_options(populate_existing=True))
+        if collection is None:
+            if skip_locked:
+                raise ConflictError("The setting collection is being modified; preserve the draft and retry after its save completes.")
+            raise NotFoundError("Setting collection not found.")
+        return collection
 
     async def _next_version_number(self, document_id: UUID) -> int:
         latest = await self.session.scalar(

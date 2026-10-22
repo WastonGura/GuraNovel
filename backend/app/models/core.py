@@ -336,6 +336,16 @@ class DocumentVersion(Base):
     actor_user: Mapped[User | None] = relationship(back_populates="document_versions")
     workflow_run: Mapped[WorkflowRun | None] = relationship(back_populates="document_versions")
 
+    @property
+    def restored_from_version_id(self) -> str | None:
+        """Server-recorded history identity, separate from arbitrary version metadata."""
+        return (self.metadata_ or {}).get("restored_from_version_id")
+
+    @property
+    def restored_from_restore_point_id(self) -> str | None:
+        metadata = self.metadata_ or {}
+        return metadata.get("attempt_id") if metadata.get("contract_version") == "setting.restore-point.v1" else None
+
 
 class ActionRequest(Base):
     __tablename__ = "action_requests"

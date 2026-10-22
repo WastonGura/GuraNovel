@@ -13,6 +13,7 @@ import SettingNoteList from './SettingNoteList'
 import SettingTrashDialog, { type SettingTrashEntry } from './SettingTrashDialog'
 import SettingUndoToast from './SettingUndoToast'
 import SettingCollaborationPanel from './SettingCollaborationPanel'
+import SettingActionIcon from './SettingActionIcon'
 import type { SettingCollaborationAcceptance } from './api/settingCollaborationClient'
 import { readCreationDrafts, writeCreationDrafts, type CreationDraft } from './settingDrafts'
 import { applySettingChanges, categoryNames, categoryFromDocument, emptySettingConversation, noteLinks, readSettingWorkspace, resolveNote, settingExampleReply, settingStorageKey, stagedSettingComments, type SettingCategory, type SettingChange, type SettingConversation as Conversation, type SettingNote } from './settingNotes'
@@ -21,10 +22,19 @@ import './studioSetting.css'
 
 export type SettingView = { id: string; category: SettingCategory; mode: 'note' | 'graph' | 'search' | 'chat' }
 
+export interface SettingRestorePointStatus {
+  documentId: string
+  versionId: string
+  title: string
+  body: string
+  commentsKey: string
+}
+
 export interface StudioSettingHandle {
   flush: () => Promise<boolean>
   getNoteSnapshot?: (documentId: string) => SettingNote | undefined
   replaceSavedNote?: (documentId: string, body: string, versionId: string, comments: OutlineComment[], expected?: Pick<SettingNote, 'body' | 'comments'>) => void
+  openCollaboration?: () => void
 }
 
 export interface StudioSettingProps {
@@ -48,6 +58,11 @@ export interface StudioSettingProps {
   onCollaborationApplied?: (result: SettingCollaborationAcceptance, stableId: string) => void
   onViewChange?: (view: SettingView) => void
   onAssistantContext?: (context: { documentId?: string; versionId?: string }) => void
+  onOpenHistory?: (note: SettingNote) => void
+  onCreateRestorePoint?: (note: SettingNote) => Promise<boolean>
+  restorePointStatus?: SettingRestorePointStatus | null
+  restorePointBusy?: boolean
+  collaborationInMenu?: boolean
   initialView?: Partial<SettingView>
   initialConversation?: Conversation
   syncUrlParams?: boolean
@@ -98,6 +113,11 @@ export default function StudioSetting({
   onCollaborationApplied,
   onViewChange,
   onAssistantContext,
+  onOpenHistory,
+  onCreateRestorePoint,
+  restorePointStatus,
+  restorePointBusy = false,
+  collaborationInMenu = false,
   initialView,
   initialConversation,
   syncUrlParams = false,
@@ -268,6 +288,9 @@ export default function StudioSetting({
   }, [notes])
 
   const active = notes.find(note => note.id === selectedId)
+  const activePointSaved = Boolean(active && restorePointStatus && active.documentId === restorePointStatus.documentId
+    && active.versionId === restorePointStatus.versionId && active.title === restorePointStatus.title && active.body === restorePointStatus.body
+    && JSON.stringify(active.comments || []) === restorePointStatus.commentsKey)
   useLayoutEffect(() => {
     const returning = previousCollaborationOpen.current && !collaborationOpen
     previousCollaborationOpen.current = collaborationOpen
@@ -954,7 +977,7 @@ export default function StudioSetting({
     }
     setError('')
   }
-  useImperativeHandle(ref, () => ({ flush: flushAll, getNoteSnapshot, replaceSavedNote }))
+  useImperativeHandle(ref, () => ({ flush: flushAll, getNoteSnapshot, replaceSavedNote, openCollaboration: discussNote }))
 
   async function prepareCollaboration(): Promise<boolean> {
     // The main Agent reads the collection. Opening or sending must not manufacture
@@ -992,18 +1015,18 @@ export default function StudioSetting({
         <div className="setting-categories" role="group" aria-label="设定分类" data-category={category}>
           <span aria-hidden="true" />{(['setting', 'world'] as const).map(value => <button key={value} aria-pressed={category === value} onClick={() => changeCategory(value)}>{categoryNames[value]}</button>)}
         </div>
-        <button className="studio-icon" aria-label={pinned ? '取消固定设定侧边栏' : '固定设定侧边栏'} aria-pressed={pinned} onClick={() => setPinned(!pinned)}><img src={`/ui/studio/${pinned ? 'pin' : 'unpin'}.svg`} alt="" /></button>
+        <button className="studio-icon setting-icon-button" aria-label={pinned ? '取消固定设定侧边栏' : '固定设定侧边栏'} title={pinned ? '取消固定侧边栏' : '固定侧边栏'} aria-pressed={pinned} onClick={() => setPinned(!pinned)}><SettingActionIcon name="pin" /></button>
       </div>
       <div className="setting-library-actions">
-        <div className="setting-new-row"><button className="setting-new" aria-pressed={mode === 'chat'} onClick={() => { setSweep(value => value + 1); if (directEditing) create(); else showMode('chat') }} disabled={readOnly}>{sweep > 0 && <span key={sweep} className="setting-action-sweep" aria-hidden="true" />}<img src="/ui/setting/append.svg" alt="" />新建内容</button>{!directEditing && <button className="setting-manual-new" aria-label="手动新建条目" title="手动新建条目" disabled={readOnly} onClick={() => create()}><img src="/ui/studio/add.svg" alt="" /></button>}</div>
-        <button className={mode === 'graph' ? 'is-active' : ''} aria-pressed={mode === 'graph'} onClick={() => showMode('graph')}><img src="/ui/setting/commit.svg" alt="" />关系图谱</button>
-        <button className={mode === 'search' ? 'is-active' : ''} aria-pressed={mode === 'search'} onClick={() => showMode('search')}><img src="/ui/setting/search.svg" alt="" />搜索内容</button>
+        <div className="setting-new-row"><button className="setting-new setting-sidebar-action" aria-pressed={mode === 'chat'} onClick={() => { setSweep(value => value + 1); if (directEditing) create(); else showMode('chat') }} disabled={readOnly}>{sweep > 0 && <span key={sweep} className="setting-action-sweep" aria-hidden="true" />}<SettingActionIcon name="create" />新建内容</button>{!directEditing && <button className="setting-manual-new setting-icon-button" aria-label="手动新建条目" title="手动新建条目" disabled={readOnly} onClick={() => create()}><SettingActionIcon name="plus" /></button>}</div>
+        <button className={`setting-sidebar-action${mode === 'graph' ? ' is-active' : ''}`} aria-pressed={mode === 'graph'} onClick={() => showMode('graph')}><SettingActionIcon name="graph" />关系图谱</button>
+        <button className={`setting-sidebar-action${mode === 'search' ? ' is-active' : ''}`} aria-pressed={mode === 'search'} onClick={() => showMode('search')}><SettingActionIcon name="search" />搜索内容</button>
       </div>
       <SettingNoteList notes={shown.map(note => note.title ? note : { ...note, title: `未命名${categoryNames[note.category]}` })} category={category} activeId={displayMode === 'note' ? active?.id : undefined} disabled={readOnly || !activePage} onOpen={choose} onOrder={orderNotes} onDelete={deleteNotes} />
       {mutationBusy && <p role="status">正在同步删除或恢复…</p>}
       {!directEditing && deleted && <div className="setting-delete-undo" role="status"><small>已删除 {deleted.items.length} 项，正文引用保留</small><button type="button" disabled={mutationBusy} onClick={undoDelete}>撤销删除</button></div>}
       {sidebarStatus && <small className="setting-local-note" role={saveStatusText ? 'status' : undefined}>{sidebarStatus}</small>}
-      {(libraryFooter || onLoadTrash) && <div className="setting-library-footer">{libraryFooter}{onLoadTrash && <button type="button" className="setting-trash-launcher" aria-label="回收站" title="回收站" onClick={() => setTrashOpen(true)}><img src="/ui/setting/delete.svg" alt="" /></button>}</div>}
+      {(libraryFooter || onLoadTrash) && <div className="setting-library-footer">{libraryFooter}{onLoadTrash && <button type="button" className="setting-trash-launcher setting-icon-button" aria-label="回收站" title="回收站" onClick={() => setTrashOpen(true)}><SettingActionIcon name="trash" /></button>}</div>}
     </aside>
     </div>
     {directEditing && <SettingUndoToast operation={undoOperation} onUndo={restoreEntries} onDismiss={() => setUndoOperation(null)} />}
@@ -1012,12 +1035,20 @@ export default function StudioSetting({
       inputType="text" inputLabel="搜索设定内容" placeholder="搜索设定与世界观中的标题、正文…"
       items={results.map(note => {
         const body = note.body.replace(/\[\[|\]\]/g, ''), start = Math.max(0, body.toLocaleLowerCase().indexOf(query.trim().toLocaleLowerCase()) - 30)
-        return { ...note, description: `${start > 0 ? '…' : ''}${body.slice(start, start + 140)}${body.length > start + 140 ? '…' : ''}`, kind: categoryNames[note.category], icon: '/ui/setting/append.svg' }
+        return { ...note, description: `${start > 0 ? '…' : ''}${body.slice(start, start + 140)}${body.length > start + 140 ? '…' : ''}`, kind: categoryNames[note.category], icon: <SettingActionIcon name="note" /> }
       })}
       onClose={() => { rememberView({ id: selectedId, category, mode: searchReturnMode }); setMode(searchReturnMode) }} onSelect={choose}
       emptyText="没有找到相关条目"
-      renderPreview={note => note ? <><img className="search-preview-icon" src="/ui/setting/append.svg" alt="" /><h3>{note.title}</h3><span className="search-preview-kind">{categoryNames[note.category]}</span><p>{note.body.replace(/\[\[|\]\]/g, '') || '暂无正文'}</p></> : <><h3>寻找世界的细节</h3><p>搜索设定与世界观中的标题和正文。</p></>} />}
-    {displayMode !== 'chat' && displayMode !== 'graph' && (active || directEditing && collection) && !(directEditing && collaborationOpen) && <div className="setting-editor-tools"><button disabled={readOnly && !directEditing} onClick={discussNote}>{directEditing ? '与设定 Agent 协作' : '交给 Agent 讨论'}</button>{!directEditing && active && <button disabled={readOnly} onClick={() => { if (editing && !titleCommit()) return; if (!editing) setDraftTitle(active.title); setEditing(!editing) }}>{editing ? '阅读' : '编辑'}</button>}</div>}
+      controlIcons={{ search: <SettingActionIcon name="search" />, close: <SettingActionIcon name="close" /> }}
+      renderPreview={note => note ? <><span className="search-preview-icon setting-search-entry"><SettingActionIcon name="note" /></span><h3>{note.title}</h3><span className="search-preview-kind">{categoryNames[note.category]}</span><p>{note.body.replace(/\[\[|\]\]/g, '') || '暂无正文'}</p></> : <><h3>寻找世界的细节</h3><p>搜索设定与世界观中的标题和正文。</p></>} />}
+    {displayMode !== 'chat' && displayMode !== 'graph' && (active || directEditing && collection && !collaborationInMenu) && !(directEditing && collaborationOpen) && <div className="setting-editor-tools">
+      {onOpenHistory && active && <button type="button" className="setting-icon-button" aria-label="历史存档" disabled={!active.documentId || mutationBusy || restorePointBusy} title={!active.documentId ? '保存条目后可查看历史存档' : '历史存档'} onClick={() => onOpenHistory(active)}><SettingActionIcon name="history" /></button>}
+      {onCreateRestorePoint && active && !readOnly && <button type="button" className="setting-save-point setting-icon-button" data-busy={restorePointBusy} data-state={activePointSaved ? 'success' : undefined} aria-label={restorePointBusy ? '正在存档…' : '存档当前内容'} aria-description={activePointSaved ? '当前内容已存档' : undefined} title={restorePointBusy ? '正在存档…' : '存档当前内容'} aria-busy={restorePointBusy} disabled={!active.documentId || mutationBusy || restorePointBusy} onClick={() => { void onCreateRestorePoint(active) }}>
+        <SettingActionIcon name="save" />
+      </button>}
+      {!collaborationInMenu && <button disabled={readOnly && !directEditing} onClick={discussNote}>{directEditing ? '与设定 Agent 协作' : '交给 Agent 讨论'}</button>}
+      {!directEditing && active && <button disabled={readOnly} onClick={() => { if (editing && !titleCommit()) return; if (!editing) setDraftTitle(active.title); setEditing(!editing) }}>{editing ? '阅读' : '编辑'}</button>}
+    </div>}
     <div className={`setting-main${displayMode === 'chat' ? ' is-conversation' : chatVisited ? ' has-conversation-return' : ''}${directEditing && collaborationOpen && displayMode === 'note' ? ' is-generation' : ''}`}>
       {chatVisited && displayMode !== 'chat' && <button className="setting-return-chat" onClick={() => showMode('chat')}>返回设定对话</button>}
       <SettingConversation conversation={conversation} notes={notes} visible={displayMode === 'chat' && activePage} disabled={readOnly} referencingProjects={referencingProjects} preview={preview} onPatch={patchConversation} onSend={sendMessage} onCommentChange={(noteId, commentId, text) => {

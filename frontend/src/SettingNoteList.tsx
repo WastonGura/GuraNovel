@@ -3,6 +3,7 @@ import { createPortal, flushSync } from 'react-dom'
 import { TextMotionSurface } from './StudioMotion'
 import { categoryNames, type SettingCategory, type SettingNote } from './settingNotes'
 import { useDialogMotion } from './useDialogMotion'
+import SettingActionIcon from './SettingActionIcon'
 
 type NoteMenuState = { instance: number; context: string; ids: string[]; x: number; y: number; copyStatus?: 'done' | 'error' }
 
@@ -41,8 +42,8 @@ function NoteContextMenu({ menu, valid, onClose, returnFocus, onCopy, onDelete }
         const buttons = [...event.currentTarget.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')], index = buttons.indexOf(document.activeElement as HTMLButtonElement)
         buttons[(index + (event.key === 'ArrowDown' ? 1 : -1) + buttons.length) % buttons.length]?.focus()
       }
-    }}><button type="button" role="menuitem" onClick={onCopy}><img src="/ui/setting/copy.svg" alt="" /><span aria-live="polite">{menu.copyStatus === 'done' ? '已复制名称' : menu.copyStatus === 'error' ? '复制失败，请重试' : menu.ids.length > 1 ? '复制所选条目名称' : '复制条目名称'}</span></button>
-      <button type="button" role="menuitem" onClick={() => close(onDelete)}><img src="/ui/setting/delete.svg" alt="" />删除{menu.ids.length > 1 ? ` ${menu.ids.length} 个条目` : '条目'}</button></div>
+    }}><button className="setting-menu-item" type="button" role="menuitem" onClick={onCopy}><SettingActionIcon name="copy" size={18} /><span aria-live="polite">{menu.copyStatus === 'done' ? '已复制名称' : menu.copyStatus === 'error' ? '复制失败，请重试' : menu.ids.length > 1 ? '复制所选条目名称' : '复制条目名称'}</span></button>
+      <button className="setting-menu-item" type="button" role="menuitem" onClick={() => close(onDelete)}><SettingActionIcon name="trash" size={18} />删除{menu.ids.length > 1 ? ` ${menu.ids.length} 个条目` : '条目'}</button></div>
 }
 
 export default function SettingNoteList({ notes, category, activeId, disabled, onOpen, onOrder, onDelete }: {
@@ -89,7 +90,7 @@ export default function SettingNoteList({ notes, category, activeId, disabled, o
     setSelected([]); onOpen(note)
   }
   return <>
-    <div className="setting-selection-actions" style={{ visibility: chosen.length && !disabled ? 'visible' : 'hidden' }}><small>已选 {chosen.length} 项</small><button type="button" aria-label="取消条目选择" onClick={() => setSelected([])}>×</button></div>
+    <div className="setting-selection-actions" style={{ visibility: chosen.length && !disabled ? 'visible' : 'hidden' }}><small>已选 {chosen.length} 项</small><button className="setting-icon-button" type="button" aria-label="取消条目选择" title="取消条目选择" onClick={() => setSelected([])}><SettingActionIcon name="close" /></button></div>
     <div ref={root} className="setting-note-list" aria-label={`${categoryNames[category]}条目`} tabIndex={0} onContextMenu={event => { event.preventDefault(); event.stopPropagation(); openMenu(event.target as HTMLElement, event.clientX, event.clientY) }} onKeyDown={event => {
       if (disabled) return
       if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'a') { event.preventDefault(); setSelected(ids) }
