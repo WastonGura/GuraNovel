@@ -185,6 +185,9 @@ class SettingCollectionService:
         metadata: dict | None = None,
         actor_user_id: UUID | None = None,
     ) -> SettingCollection:
+        await self.session.scalar(select(SettingCollection).where(
+            SettingCollection.id == collection_id,
+        ).with_for_update().execution_options(populate_existing=True))
         collection = await self.get_setting_collection(
             collection_id, actor_user_id=actor_user_id
         )
@@ -207,10 +210,17 @@ class SettingCollectionService:
     async def archive_setting_collection(
         self, collection_id: UUID, *, actor_user_id: UUID | None = None
     ) -> SettingCollection:
+        # Serialize with entry writes/restores; refresh any cached pre-archive state.
+        await self.session.scalar(select(SettingCollection).where(
+            SettingCollection.id == collection_id,
+        ).with_for_update().execution_options(populate_existing=True))
         collection = await self.get_setting_collection(
             collection_id, actor_user_id=actor_user_id
         )
+        if collection.status == "archived":
+            return collection
         collection.status = "archived"
+        collection.revision += 1
         await self.session.commit()
         await self.session.refresh(collection)
         return collection

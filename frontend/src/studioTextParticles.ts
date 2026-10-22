@@ -2,22 +2,27 @@ type Glyph = { text: string; x: number; y: number; width: number; height: number
 export type TextSnapshot = { width: number; height: number; glyphs: Glyph[] }
 export const DISSOLVE_MS = 820
 
+function visibleBounds(box: HTMLElement, surface: HTMLElement, origin: DOMRect, height = origin.height) {
+  let left = origin.left, right = origin.right, top = origin.top, bottom = origin.top + height
+  for (let parent: HTMLElement | null = surface; parent && parent !== box; parent = parent.parentElement) {
+    const style = getComputedStyle(parent), bounds = parent.getBoundingClientRect()
+    if (/auto|scroll|hidden|clip/.test(style.overflowX || style.overflow)) {
+      left = Math.max(left, bounds.left); right = Math.min(right, bounds.right)
+    }
+    if (/auto|scroll|hidden|clip/.test(style.overflowY || style.overflow)) {
+      top = Math.max(top, bounds.top); bottom = Math.min(bottom, bounds.bottom)
+    }
+  }
+  return { left, right, top, bottom }
+}
+
 // Capture actual glyph positions, including browser wrapping and mixed Chinese/Latin fonts.
 export function snapshotText(box: HTMLElement): TextSnapshot {
   const origin = box.getBoundingClientRect(), glyphs: Glyph[] = []
   const height = Math.max(origin.height, box.querySelector(':scope > .studio-motion-content')?.getBoundingClientRect().height || 0)
   box.querySelectorAll<HTMLElement>('[data-sweep-text]').forEach(surface => {
     if (surface.closest('[data-text-inactive="true"]')) return
-    let left = origin.left, right = origin.right, top = origin.top, bottom = origin.top + height
-    for (let parent: HTMLElement | null = surface; parent && parent !== box; parent = parent.parentElement) {
-      const style = getComputedStyle(parent), bounds = parent.getBoundingClientRect()
-      if (/auto|scroll|hidden|clip/.test(style.overflowX || style.overflow)) {
-        left = Math.max(left, bounds.left); right = Math.min(right, bounds.right)
-      }
-      if (/auto|scroll|hidden|clip/.test(style.overflowY || style.overflow)) {
-        top = Math.max(top, bounds.top); bottom = Math.min(bottom, bounds.bottom)
-      }
-    }
+    const { left, right, top, bottom } = visibleBounds(box, surface, origin, height)
     const walker = document.createTreeWalker(surface, NodeFilter.SHOW_TEXT)
     for (let text = walker.nextNode(); text; text = walker.nextNode()) {
       const style = getComputedStyle(text.parentElement!)
@@ -55,6 +60,7 @@ export function textMotionPhase(elapsed: number, hasOld: boolean) {
 // Reveal the real DOM so font rendering and layout stay unchanged at the end.
 function revealRows(box: HTMLElement) {
   const rows: { surface: HTMLElement; top: number; bottom: number; left: number; right: number; y: number }[] = []
+  const viewport = box.getBoundingClientRect()
   box.querySelectorAll<HTMLElement>('[data-sweep-text]').forEach(textSurface => {
     if (textSurface.closest('[data-text-inactive="true"]')) return
     // The input's layout mirror supplies line measurements, but the input itself is revealed.
@@ -62,12 +68,13 @@ function revealRows(box: HTMLElement) {
       : textSurface.closest('[data-text-input]')?.querySelector<HTMLInputElement | HTMLTextAreaElement>('input, textarea')
         || textSurface.closest('.studio-context-body.is-input, .studio-prose, .studio-idea-card')?.querySelector<HTMLTextAreaElement>('textarea') || textSurface
     const origin = surface.getBoundingClientRect()
+    const clip = visibleBounds(box, surface, viewport)
     const walker = document.createTreeWalker(textSurface, NodeFilter.SHOW_TEXT)
     for (let text = walker.nextNode(); text; text = walker.nextNode()) {
       const range = document.createRange()
       range.selectNodeContents(text)
       for (const rect of range.getClientRects?.() || []) {
-        if (!rect.width || !rect.height) continue
+        if (!rect.width || !rect.height || rect.bottom <= clip.top || rect.top >= clip.bottom || rect.right <= clip.left || rect.left >= clip.right) continue
         // Superscripts and inline links can have different tops on the same visual line.
         let row = rows.find(row => row.surface === surface && rect.top < origin.top + row.bottom - 2 && rect.bottom > origin.top + row.top + 2)
         if (!row) {
@@ -83,6 +90,14 @@ function revealRows(box: HTMLElement) {
     }
   })
   return rows.sort((a, b) => a.y - b.y || a.left - b.left)
+}
+
+function opaqueBackground(surface: HTMLElement) {
+  for (let element: HTMLElement | null = surface; element; element = element.parentElement) {
+    const color = getComputedStyle(element).backgroundColor
+    if (color.startsWith('rgb(') || /^rgba\([^)]*,\s*1\)$/.test(color) || /^color\([^/]+\)$/.test(color)) return color
+  }
+  return 'Canvas'
 }
 
 // Canvas is only used for outgoing dust; incoming text keeps its original DOM.
@@ -117,14 +132,23 @@ export function animateTextChange(box: HTMLElement, old: TextSnapshot | null, de
   let frame = 0, started: number | null = null, ended = false
   let rows: ReturnType<typeof revealRows> = []
   const masked = new Set<HTMLElement>()
+  // Masking editable text changes Chromium's LCD antialiasing to grayscale.
+  // Cover the setting canvas instead, so completed lines keep their native glyphs.
+  const nativeReveal = box.classList.contains('setting-document-motion')
+  const cover = document.createElement('div')
+  cover.className = 'studio-text-reveal'; cover.setAttribute('aria-hidden', 'true')
+  Object.assign(cover.style, { inset: '0', pointerEvents: 'none', position: 'absolute', zIndex: '1' })
+  let covers: { element: HTMLDivElement; background: string }[] = []
   const clear = (notify = true) => {
     if (ended) return
-    ended = true; cancelAnimationFrame(frame); layer.remove(); delete box.dataset.textPhase
+    ended = true; cancelAnimationFrame(frame); layer.remove(); cover.remove(); delete box.dataset.textPhase
+    box.removeEventListener('scroll', interrupt, true)
     masked.forEach(surface => surface.style.removeProperty('mask'))
     box.querySelectorAll('.studio-stream').forEach(node => node.setAttribute('aria-busy', 'false'))
     if (box.matches('.studio-stream')) box.setAttribute('aria-busy', 'false')
     if (notify) box.dispatchEvent(new Event('studio:text-ready'))
   }
+  const interrupt = () => clear(false)
   const tick = (now: number) => {
     started ??= now
     const elapsed = now - started - delay
@@ -146,13 +170,27 @@ export function animateTextChange(box: HTMLElement, old: TextSnapshot | null, de
         layer.remove()
         box.dataset.textPhase = 'reveal'; box.dispatchEvent(new Event('studio:text-ready'))
         rows = revealRows(box)
-        rows.forEach(({ surface }) => { masked.add(surface); surface.style.mask = 'linear-gradient(transparent, transparent)' })
+        if (nativeReveal) {
+          box.addEventListener('scroll', interrupt, true)
+          const origin = box.getBoundingClientRect()
+          covers = rows.map(row => {
+            const element = document.createElement('div'), bounds = row.surface.getBoundingClientRect()
+            Object.assign(element.style, { position: 'absolute', left: `${bounds.left - origin.left + row.left}px`, top: `${bounds.top - origin.top + row.top}px`, width: `${row.right - row.left + 24}px`, height: `${row.bottom - row.top}px` })
+            cover.append(element)
+            return { element, background: opaqueBackground(row.surface) }
+          })
+          box.append(cover)
+        } else rows.forEach(({ surface }) => { masked.add(surface); surface.style.mask = 'linear-gradient(transparent, transparent)' })
       }
       const revealTime = elapsed - revealStart, stagger = Math.min(90, 900 / Math.max(1, rows.length))
       const masks = new Map<HTMLElement, string[]>()
       rows.forEach((row, i) => {
         const p = Math.max(0, Math.min(1, (revealTime - i * stagger) / 300))
         const width = row.right - row.left + 24, edge = width * (1 - (1 - p) ** 2)
+        if (nativeReveal) {
+          covers[i].element.style.background = `linear-gradient(to right, transparent ${edge - 24}px, ${covers[i].background} ${edge}px)`
+          return
+        }
         const mask = `linear-gradient(to right, #000 ${edge - 24}px, transparent ${edge}px) ${row.left}px ${row.top}px / ${width}px ${row.bottom - row.top}px no-repeat`
         const layers = masks.get(row.surface) || []
         layers.push(mask); masks.set(row.surface, layers)

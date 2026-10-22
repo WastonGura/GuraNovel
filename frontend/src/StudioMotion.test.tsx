@@ -6,6 +6,73 @@ import { animateTextChange, DISSOLVE_MS, snapshotText, textMotionPhase, type Tex
 afterEach(() => { cleanup(); vi.useRealTimers(); vi.restoreAllMocks(); vi.unstubAllGlobals() })
 
 describe('continuous studio motion', () => {
+  it('reveals setting text over its opaque ancestor without masking glyphs, then removes every cover on interruption', () => {
+    vi.stubGlobal('CanvasRenderingContext2D', class {})
+    let tick!: FrameRequestCallback
+    vi.stubGlobal('requestAnimationFrame', vi.fn(callback => { tick = callback; return 1 }))
+    vi.stubGlobal('cancelAnimationFrame', vi.fn())
+    vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockReturnValue({ clearRect: vi.fn() } as unknown as CanvasRenderingContext2D)
+    const parent = document.createElement('div')
+    parent.style.backgroundColor = 'rgb(253, 253, 253)'
+    parent.innerHTML = '<div class="setting-document-motion"><div style="background:rgba(0,0,0,.1)" data-text-editor data-sweep-text>查看<span data-reference-title="旧港">旧港</span></div></div>'
+    document.body.append(parent)
+    const box = parent.firstElementChild as HTMLElement, editor = box.firstElementChild as HTMLElement
+    vi.spyOn(box, 'getBoundingClientRect').mockReturnValue({ left: 10, right: 210, top: 20, bottom: 140, width: 200, height: 120 } as DOMRect)
+    vi.spyOn(editor, 'getBoundingClientRect').mockReturnValue({ left: 20, right: 200, top: 40, bottom: 100, width: 180, height: 60 } as DOMRect)
+    const range = document.createRange()
+    range.getClientRects = () => [{ left: 25, right: 145, top: 44, bottom: 64, width: 120, height: 20 }] as unknown as DOMRectList
+    vi.spyOn(document, 'createRange').mockReturnValue(range)
+    const stop = animateTextChange(box, null)
+    tick(0)
+    const cover = box.querySelector<HTMLElement>('.studio-text-reveal')!
+    expect(cover).toHaveAttribute('aria-hidden', 'true')
+    expect(cover.style.pointerEvents).toBe('none')
+    expect(cover).toHaveTextContent('')
+    expect(cover.firstElementChild).toHaveStyle({ left: '15px', top: '22px', width: '144px', height: '24px' })
+    expect((cover.firstElementChild as HTMLElement).style.background).toContain('rgb(253, 253, 253)')
+    expect(editor.style.mask).toBe('')
+    expect(editor.querySelector('[data-reference-title]')).toHaveTextContent('旧港')
+    tick(150); stop()
+    expect(box.querySelector('.studio-text-reveal')).toBeNull()
+    expect(box.dataset.textPhase).toBeUndefined()
+    const restarted = animateTextChange(box, null, 100)
+    tick(0)
+    editor.dispatchEvent(new Event('scroll'))
+    expect(box.dataset.textPhase).toBe('waiting') // Restoring a document bookmark must not abort its incoming reveal.
+    tick(100)
+    expect(box.querySelectorAll('.studio-text-reveal')).toHaveLength(1)
+    editor.dispatchEvent(new Event('scroll'))
+    expect(box.querySelector('.studio-text-reveal')).toBeNull()
+    expect(box.dataset.textPhase).toBeUndefined()
+    restarted(); parent.remove()
+  })
+
+  it('reveals visible rows without masking hundreds of lines outside the scrolled viewport', () => {
+    vi.stubGlobal('CanvasRenderingContext2D', class {})
+    let tick!: FrameRequestCallback
+    vi.stubGlobal('requestAnimationFrame', vi.fn(callback => { tick = callback; return 1 }))
+    vi.stubGlobal('cancelAnimationFrame', vi.fn())
+    vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockReturnValue({ clearRect: vi.fn() } as unknown as CanvasRenderingContext2D)
+    const box = document.createElement('div')
+    box.innerHTML = '<div style="overflow-y:auto"><div data-text-editor data-sweep-text>长文</div></div>'
+    document.body.append(box)
+    const rect = (top: number, bottom: number) => ({ left: 0, right: 100, top, bottom, width: 100, height: bottom - top }) as DOMRect
+    vi.spyOn(box, 'getBoundingClientRect').mockReturnValue(rect(0, 120))
+    vi.spyOn(box.firstElementChild!, 'getBoundingClientRect').mockReturnValue(rect(10, 80))
+    const editor = box.querySelector<HTMLElement>('[data-text-editor]')!
+    vi.spyOn(editor, 'getBoundingClientRect').mockReturnValue(rect(-300, 8700))
+    const masks = vi.spyOn(editor.style, 'mask', 'set')
+    const range = document.createRange()
+    range.getClientRects = () => Array.from({ length: 300 }, (_, index) => rect(index * 30 - 300, index * 30 - 280)) as unknown as DOMRectList
+    vi.spyOn(document, 'createRange').mockReturnValue(range)
+    const stop = animateTextChange(box, null)
+    tick(0)
+    expect.soft(masks.mock.calls.at(-1)?.[0].match(/linear-gradient/g)).toHaveLength(3)
+    tick(500)
+    expect.soft(box.dataset.textPhase).toBeUndefined()
+    stop(); box.remove()
+  })
+
   it('reveals the visible title input and reference editor instead of their measurement mirrors', () => {
     vi.stubGlobal('CanvasRenderingContext2D', class {})
     let tick!: FrameRequestCallback
@@ -15,6 +82,7 @@ describe('continuous studio motion', () => {
     const box = document.createElement('div')
     box.innerHTML = '<span data-text-input><span data-sweep-text>旧港</span><input value="旧港"></span><div data-sweep-text data-text-editor contenteditable="true">港口正文</div>'
     document.body.append(box)
+    vi.spyOn(box, 'getBoundingClientRect').mockReturnValue({ left: 0, right: 120, top: 0, bottom: 120, width: 120, height: 120 } as DOMRect)
     const range = document.createRange()
     range.getClientRects = () => [{ left: 0, right: 80, top: 0, bottom: 20, width: 80, height: 20 }] as unknown as DOMRectList
     vi.spyOn(document, 'createRange').mockReturnValue(range)
@@ -113,6 +181,7 @@ describe('continuous studio motion', () => {
     const box = document.createElement('div')
     box.innerHTML = '<span data-sweep-text>new<sup>1</sup></span><button>pin</button>'
     document.body.append(box)
+    vi.spyOn(box, 'getBoundingClientRect').mockReturnValue({ left: 0, right: 120, top: 0, bottom: 60, width: 120, height: 60 } as DOMRect)
     const text = box.querySelector<HTMLElement>('[data-sweep-text]')!
     const range = document.createRange()
     range.getClientRects = () => (range.startContainer.parentElement?.tagName === 'SUP'

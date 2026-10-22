@@ -9,7 +9,7 @@ export interface SearchChoice {
   title: string
   description?: string | null
   kind?: string
-  icon?: string
+  icon?: ReactNode
   disabled?: boolean
   selected?: boolean
   cover?: string
@@ -19,12 +19,13 @@ export interface SearchChoice {
 /** Shared search surface: keyboard results, an independent preview and animated dismissal. */
 export default function SearchDialog<T extends SearchChoice>({ title, closeLabel, query, onQuery, inputLabel, placeholder,
   inputType = 'search', items, onSelect, onClose, renderPreview, filters, footer, emptyText = '没有找到匹配的内容',
-  resultsLabel = '搜索结果', dismissOnSelect = true, onSubmitQuery, onBeforeSelect, meta }: {
+  resultsLabel = '搜索结果', dismissOnSelect = true, onSubmitQuery, onBeforeSelect, meta, controlIcons }: {
   title: string; closeLabel?: string; query: string; onQuery: (query: string) => void; inputLabel: string; placeholder: string
   inputType?: 'search' | 'text'; items: T[]; onSelect: (item: T) => void; onClose: () => void
   renderPreview: (item: T | undefined) => ReactNode; filters?: ReactNode; footer?: ReactNode; emptyText?: string
   resultsLabel?: string; dismissOnSelect?: boolean; onSubmitQuery?: () => void; meta?: ReactNode
   onBeforeSelect?: (item: T) => boolean | Promise<boolean>
+  controlIcons?: { search: ReactNode; close: ReactNode }
 }) {
   const picker = useRef<PickerDialogHandle>(null)
   const frame = useRef<HTMLDivElement>(null)
@@ -52,7 +53,7 @@ export default function SearchDialog<T extends SearchChoice>({ title, closeLabel
     if (dismissOnSelect) { pending.current = item; picker.current?.close() }
     else { onSelect(item); frame.current?.querySelector('input')?.focus() }
   }
-  return <PickerDialog ref={picker} title={title} closeLabel={closeLabel} className="search-dialog" meta={meta}
+  return <PickerDialog ref={picker} title={title} closeLabel={closeLabel} closeIcon={controlIcons?.close} className="search-dialog" meta={meta}
     onClosing={() => { closing.current = true }}
     onClose={() => { onClose(); if (pending.current) onSelect(pending.current) }}>
     <div ref={frame} className="search-window" onKeyDown={event => {
@@ -73,12 +74,12 @@ export default function SearchDialog<T extends SearchChoice>({ title, closeLabel
         if (onSubmitQuery) onSubmitQuery()
         else if (active) select(active)
       }}>
-        <img src="/ui/setting/search.svg" alt="" />
+        {controlIcons ? <span className="setting-search-symbol">{controlIcons.search}</span> : <img src="/ui/setting/search.svg" alt="" />}
         <input type={inputType} aria-label={inputLabel} placeholder={placeholder} value={query} autoComplete="off"
           onChange={event => { setActiveId(''); onQuery(event.target.value) }} onKeyDown={event => {
             if (event.key === 'Enter' && (event.nativeEvent.isComposing || event.keyCode === 229)) event.preventDefault()
           }} />
-        {query && <button type="button" aria-label="清空搜索" onClick={() => { setActiveId(''); onQuery(''); frame.current?.querySelector('input')?.focus() }}>×</button>}
+        {query && <button type="button" className={controlIcons ? 'setting-icon-button' : undefined} aria-label="清空搜索" title={controlIcons ? '清空搜索' : undefined} onClick={() => { setActiveId(''); onQuery(''); frame.current?.querySelector('input')?.focus() }}>{controlIcons?.close ?? '×'}</button>}
       </form>
       {filters && <div className="search-window-filters">{filters}</div>}
       <div className="search-window-body">
@@ -87,7 +88,7 @@ export default function SearchDialog<T extends SearchChoice>({ title, closeLabel
             aria-label={item.title} disabled={item.disabled} aria-pressed={item.selected}
             aria-disabled={item.disabled || !!selectingId} aria-busy={selectingId === item.id}
             onPointerEnter={() => setActiveId(item.id)} onFocus={() => setActiveId(item.id)} onClick={() => select(item)}>
-            <span className={`search-choice-leading${item.cover ? ' is-cover' : ''}`}>{item.cover ? <CoverImage source={item.cover} widthHint={40} mode="picker" /> : <img src={item.icon ?? '/ui/icons/akar-icons_book.svg'} alt="" />}</span>
+            <span className={`search-choice-leading${item.cover ? ' is-cover' : ''}`}>{item.cover ? <CoverImage source={item.cover} widthHint={40} mode="picker" /> : item.icon && typeof item.icon !== 'string' ? item.icon : <img src={typeof item.icon === 'string' ? item.icon : '/ui/icons/akar-icons_book.svg'} alt="" />}</span>
             <span className="search-choice-copy"><strong>{item.title}</strong>{item.labels?.length ? <SearchTags labels={item.labels} limit={3} /> : item.description && <small>{item.description}</small>}</span>
             <span className="search-choice-kind" aria-hidden="true">{item.selected ? '✓' : item.kind}</span>
           </button>)}

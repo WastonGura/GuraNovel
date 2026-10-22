@@ -17,6 +17,8 @@ class DocumentVersionResponse(BaseModel):
     document_id: UUID
     version_number: int
     parent_version_id: UUID | None
+    restored_from_version_id: UUID | None = None
+    restored_from_restore_point_id: UUID | None = None
     source: DocumentSource
     actor_user_id: UUID | None
     agent_role: str | None

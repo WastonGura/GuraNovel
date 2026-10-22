@@ -1,5 +1,6 @@
 import { useEffect, useId, useRef, useState } from 'react'
 import PickerDialog from './PickerDialog'
+import SettingActionIcon from './SettingActionIcon'
 import { categoryNames, type SettingCategory } from './settingNotes'
 import './SettingTrash.css'
 
@@ -67,9 +68,9 @@ function TrashSession({ readOnly = false, onLoad, onRestore, onClose }: SettingT
       if (mounted.current) setRestoring(false)
     }
   }
-  return <PickerDialog title="回收站" className="setting-trash-dialog" onClose={onClose} meta={readOnly ? <span>已归档，只读</span> : undefined}>
+  return <PickerDialog title="回收站" className="setting-trash-dialog" closeIcon={<SettingActionIcon name="close" />} onClose={onClose} meta={readOnly ? <span>已归档，只读</span> : undefined}>
     <form className="setting-trash-search" onSubmit={event => event.preventDefault()}>
-      <img src="/ui/setting/search.svg" alt="" />
+      <span className="setting-trash-search-icon"><SettingActionIcon name="search" size={20} /></span>
       <input type="search" aria-label="搜索回收站" placeholder="搜索已删除的设定、世界观…" value={query} onChange={event => setQuery(event.target.value)} />
     </form>
     <div className="setting-trash-content" aria-busy={loading || restoring}>
@@ -79,7 +80,7 @@ function TrashSession({ readOnly = false, onLoad, onRestore, onClose }: SettingT
             {!readOnly && <label className="setting-trash-select-all"><input type="checkbox" checked={allVisibleSelected} disabled={restoring} onChange={() => setSelected(previous => allVisibleSelected ? previous.filter(id => !visible.some(entry => entry.id === id)) : [...new Set([...previous, ...visible.map(entry => entry.id)])])} />选择{normalized ? '当前结果' : '全部'}</label>}
             <ul className="setting-trash-list" aria-label="已删除条目">{visible.map(entry => <li key={entry.id} aria-label={entry.title}>
               {!readOnly && <input type="checkbox" aria-label={`选择${entry.title}`} checked={selected.includes(entry.id)} disabled={restoring} onChange={() => setSelected(previous => previous.includes(entry.id) ? previous.filter(id => id !== entry.id) : [...previous, entry.id])} />}
-              <img src="/ui/icons/akar-icons_book.svg" alt="" />
+              <span className="setting-trash-entry-icon"><SettingActionIcon name="note" /></span>
               <div className="setting-trash-copy"><strong>{entry.title}</strong><span>{categoryNames[entry.category]}<span aria-hidden="true"> · </span>{entry.deletedAt && Number.isFinite(Date.parse(entry.deletedAt)) ? <time dateTime={entry.deletedAt}>{new Intl.DateTimeFormat('zh-CN', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }).format(new Date(entry.deletedAt))} 删除</time> : '删除时间未知'}</span></div>
               {!readOnly && <button type="button" className="setting-trash-restore" disabled={restoring} aria-label={`恢复${entry.title}`} onClick={() => { void restore([entry]) }}>恢复</button>}
             </li>)}</ul>

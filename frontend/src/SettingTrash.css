@@ -2,10 +2,10 @@
 .picker-dialog.setting-trash-dialog > div { display: flex; flex-direction: column; height: 100%; min-height: 0; padding: 24px 28px 18px; }
 .setting-trash-dialog header { flex-shrink: 0; margin-bottom: 16px; }
 .setting-trash-search { align-items: center; border-bottom: 1px solid #eee; display: flex; flex-shrink: 0; gap: 14px; padding: 4px 0 20px; }
-.setting-trash-search > img { height: 22px; opacity: .55; width: 22px; }
+.setting-trash-search-icon { color: #888; display: inline-flex; flex-shrink: 0; transition: color 160ms; }
 .setting-trash-search input { background: transparent; border: 0; border-radius: 0; font-size: 17px; min-width: 0; padding: 4px 0; }
 .setting-trash-search input:focus { outline: none; }
-.setting-trash-search:focus-within > img { opacity: 1; }
+.setting-trash-search:focus-within > .setting-trash-search-icon { color: #171717; }
 .setting-trash-search input::placeholder { color: #aaa; }
 .setting-trash-search input::-webkit-search-cancel-button { appearance: none; }
 .setting-trash-content { flex: 1; min-height: 0; overflow: auto; overscroll-behavior: contain; padding-top: 12px; scrollbar-width: thin; }
@@ -14,7 +14,7 @@
 .setting-trash-list { list-style: none; margin: 0; padding: 0; }
 .setting-trash-list > li { align-items: center; border-radius: 10px; display: flex; gap: 12px; min-height: 74px; padding: 12px 6px; }
 .setting-trash-list > li + li { border-top: 1px solid #f3f3f3; }
-.setting-trash-list > li > img { height: 22px; opacity: .5; width: 22px; }
+.setting-trash-entry-icon { color: #999; display: inline-flex; flex-shrink: 0; }
 .setting-trash-copy { flex: 1; min-width: 0; }
 .setting-trash-copy strong { color: #333; display: block; font-size: 14px; font-weight: 500; line-height: 1.6; overflow-wrap: anywhere; }
 .setting-trash-copy > span { color: #999; display: block; font-size: 11px; line-height: 1.5; margin-top: 5px; }
@@ -39,5 +39,5 @@
 .setting-undo-toast.is-closing { animation: setting-toast-out 180ms ease both; pointer-events: none; }
 @keyframes setting-toast-in { from { opacity: 0; transform: translate(-50%, 8px); } to { opacity: 1; transform: translate(-50%, 0); } }
 @keyframes setting-toast-out { from { opacity: 1; transform: translate(-50%, 0); } to { opacity: 0; transform: translate(-50%, 6px); } }
-@media (max-width: 540px) { .picker-dialog.setting-trash-dialog > div { padding: 20px 18px 14px; } .setting-trash-list > li { gap: 9px; } .setting-trash-list > li > img { display: none; } .setting-trash-footer { gap: 8px; } }
-@media (prefers-reduced-motion: reduce) { .setting-undo-toast, .setting-undo-toast.is-closing { animation: none; } .setting-trash-restore { transition: none; } }
+@media (max-width: 540px) { .picker-dialog.setting-trash-dialog > div { padding: 20px 18px 14px; } .setting-trash-list > li { gap: 9px; } .setting-trash-entry-icon { display: none; } .setting-trash-footer { gap: 8px; } }
+@media (prefers-reduced-motion: reduce) { .setting-undo-toast, .setting-undo-toast.is-closing { animation: none; } .setting-trash-restore, .setting-trash-search-icon { transition: none; } }

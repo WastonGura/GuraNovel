@@ -40,11 +40,12 @@ async def test_collection_scope_upgrade_preserves_both_existing_histories_and_re
             with pytest.raises(IntegrityError):
                 async with connection.begin_nested():
                     await connection.execute(text("INSERT INTO setting_collaborations(id,setting_collection_id,document_id,agent_role) VALUES (:id,:collection,NULL,'lore_agent')"), {"id": uuid4(), "collection": collection})
+            head_before_refused_downgrade = await connection.scalar(text("SELECT version_num FROM alembic_version"))
         refused = migrate("downgrade", "0014_setting_collaboration", check=False)
         assert refused.returncode != 0
         assert "refusing to discard collection discussions or proposals" in refused.stderr
         async with engine.begin() as connection:
-            assert await connection.scalar(text("SELECT version_num FROM alembic_version")) == "0015_setting_collection_collab"
+            assert await connection.scalar(text("SELECT version_num FROM alembic_version")) == head_before_refused_downgrade
             assert await connection.scalar(text("SELECT id FROM setting_collaborations WHERE id=:id"), {"id": whole_conversation}) == whole_conversation
             # Only isolated test data is removed to exercise a non-lossy reverse migration.
             await connection.execute(text("DELETE FROM setting_collaborations WHERE id=:id"), {"id": whole_conversation})

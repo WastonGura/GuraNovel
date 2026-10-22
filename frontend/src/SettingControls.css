@@ -1,0 +1,72 @@
+/* Setting workspace controls: opt in without restyling manuscript links or Gura. */
+.studio .setting-icon-button,
+.studio .studio-setting .setting-icon-button,
+.studio .studio-setting .setting-library-top .setting-icon-button,
+.picker-dialog .setting-icon-button,
+.picker-dialog.search-dialog header .setting-icon-button,
+.setting-undo-toast .setting-icon-button {
+  align-items: center;
+  background: transparent;
+  border: 0;
+  border-radius: 8px;
+  box-shadow: none;
+  color: #737373;
+  display: inline-flex;
+  flex: 0 0 32px;
+  height: 32px;
+  justify-content: center;
+  line-height: 1;
+  min-height: 32px;
+  padding: 0;
+  text-decoration: none;
+  transition: background-color 160ms ease, color 160ms ease, opacity 160ms ease;
+  vertical-align: middle;
+  width: 32px;
+}
+.studio .studio-setting .setting-icon-button:is(:hover, :focus-visible):not(:disabled),
+.studio .setting-icon-button:is(:hover, :focus-visible):not(:disabled),
+.picker-dialog .setting-icon-button:is(:hover, :focus-visible):not(:disabled),
+.setting-undo-toast .setting-icon-button:is(:hover, :focus-visible):not(:disabled) {
+  background: #f2f2f2;
+  box-shadow: none;
+  color: #171717;
+  text-decoration: none;
+  transform: none;
+}
+.studio .studio-setting .setting-icon-button:active:not(:disabled),
+.studio .setting-icon-button:active:not(:disabled),
+.picker-dialog .setting-icon-button:active:not(:disabled),
+.setting-undo-toast .setting-icon-button:active:not(:disabled) { background: #e9e9e9; }
+.studio .setting-icon-button:focus-visible,
+.studio .setting-sidebar-action:focus-visible,
+.studio .setting-menu-item:focus-visible,
+.picker-dialog .setting-icon-button:focus-visible,
+.setting-undo-toast .setting-icon-button:focus-visible { outline: 2px solid #888; outline-offset: 2px; }
+.studio .setting-icon-button:disabled,
+.picker-dialog .setting-icon-button:disabled { cursor: default; opacity: .4; }
+.studio .setting-icon-button[data-busy='true'] { opacity: .7; }
+.studio .setting-icon-button[aria-pressed='true'] { color: #171717; }
+.studio .setting-icon-button[data-state='success'] { color: #171717; }
+.studio .setting-library-actions .setting-sidebar-action {
+  border-radius: 10px;
+  color: #737373;
+  gap: 12px;
+  min-height: 40px;
+}
+.studio .setting-library-actions .setting-sidebar-action:is(:hover, :focus-visible):not(:disabled) { background: #f3f3f3; color: #171717; }
+.studio .setting-library-actions .setting-sidebar-action[aria-pressed='true'] { color: #171717; }
+.studio .setting-menu-item { border-radius: 7px; font-size: 14px; gap: 10px; min-height: 36px; }
+.studio .setting-menu-item:is(:hover, :focus-visible):not(:disabled) { background: #f3f3f3; color: #171717; }
+.picker-dialog.setting-history-dialog .setting-history-restore,
+.picker-dialog.setting-trash-dialog .setting-trash-restore-selected,
+.picker-dialog.setting-archive-dialog .setting-lifecycle-primary { border-radius: 24px; font-size: 14px; line-height: 20px; min-height: 40px; padding: 10px 20px; }
+.studio .setting-graph-zoom { align-items: center; display: flex; gap: 4px; }
+.setting-graph-scale { color: #737373; font-size: 12px; font-variant-numeric: tabular-nums; min-width: 42px; text-align: center; }
+.setting-search-symbol { color: #737373; display: inline-flex; flex: 0 0 20px; }
+.search-window-input:focus-within .setting-search-symbol { color: #171717; }
+.search-preview-icon.setting-search-entry { align-items: center; display: inline-flex; justify-content: center; }
+.picker-dialog .search-window-input .setting-icon-button { height: 32px; min-height: 32px; width: 32px; }
+@media (max-width: 760px) { .studio .setting-library-actions .setting-sidebar-action { gap: 10px; } }
+@media (prefers-reduced-motion: reduce) {
+  .setting-icon-button { transition: none !important; }
+}

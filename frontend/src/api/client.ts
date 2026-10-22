@@ -168,6 +168,30 @@ export interface DocumentVersion {
   file_path: string
   change_summary: string | null
   created_at: string
+  restored_from_version_id?: string | null
+  restored_from_restore_point_id?: string | null
+}
+
+export interface SettingDocumentRestorePoint {
+  id: string
+  document_id: string
+  version_id: string
+  point_number: number
+  summary: string | null
+  message?: string | null
+  created_at: string
+  version: DocumentVersion
+  matches_current: boolean
+}
+
+export interface SettingDocumentRestorePointRequest {
+  request_id: string
+  expected_current_version_id: string
+}
+
+export interface SettingDocumentRestorePointMessageRequest {
+  message: string | null
+  expected_message: string | null
 }
 
 export interface Document {
@@ -604,7 +628,17 @@ function decodeDocumentVersion(value: unknown): DocumentVersion {
     workflow_run_id: nullableString(data.workflow_run_id), content_hash: string(data.content_hash),
     byte_size: integer(data.byte_size), word_count: integer(data.word_count), file_path: string(data.file_path),
     change_summary: nullableString(data.change_summary), created_at: string(data.created_at),
+    ...(data.restored_from_version_id === undefined ? {} : { restored_from_version_id: nullableString(data.restored_from_version_id) }),
+    ...(data.restored_from_restore_point_id === undefined ? {} : { restored_from_restore_point_id: nullableString(data.restored_from_restore_point_id) }),
   }
+}
+
+function decodeSettingDocumentRestorePoint(value: unknown, documentId: string): SettingDocumentRestorePoint {
+  const data = object(value)
+  const point = { id: string(data.id), document_id: string(data.document_id), version_id: string(data.version_id), point_number: integer(data.point_number),
+    summary: nullableString(data.summary), message: data.message === undefined ? null : nullableString(data.message), created_at: string(data.created_at), version: decodeDocumentVersion(data.version), matches_current: boolean(data.matches_current) }
+  if (!point.id || point.point_number < 1 || point.document_id !== documentId || point.version.document_id !== documentId || point.version_id !== point.version.id) throw invalidResponse()
+  return point
 }
 
 export function decodeDocument(value: unknown): Document {
@@ -987,6 +1021,39 @@ export function restorePoint(projectId: string, chapterId: string, pointId: stri
 
 export function readDocumentVersionContent(documentId: string, versionId: string): Promise<DocumentContent> {
   return request('GET', () => apiPath('documents', documentId, 'versions', versionId, 'content'), decodeDocumentContent)
+}
+
+export function listSettingDocumentRestorePoints(documentId: string): Promise<SettingDocumentRestorePoint[]> {
+  return request('GET', () => apiPath('documents', documentId, 'restore-points'), value => {
+    if (!Array.isArray(value)) throw invalidResponse()
+    const points = value.map(item => decodeSettingDocumentRestorePoint(item, documentId))
+    if (new Set(points.map(point => point.id)).size !== points.length) throw invalidResponse()
+    return points
+  })
+}
+
+export function createSettingDocumentRestorePoint(documentId: string, payload: SettingDocumentRestorePointRequest): Promise<SettingDocumentRestorePoint> {
+  return request('POST', () => apiPath('documents', documentId, 'restore-points'), value => {
+    const point = decodeSettingDocumentRestorePoint(value, documentId)
+    if (point.id !== payload.request_id || point.version_id !== payload.expected_current_version_id) throw invalidResponse()
+    return point
+  }, payload)
+}
+
+export function updateSettingDocumentRestorePointMessage(documentId: string, pointId: string, payload: SettingDocumentRestorePointMessageRequest): Promise<SettingDocumentRestorePoint> {
+  return request('PATCH', () => apiPath('documents', documentId, 'restore-points', pointId, 'message'), value => {
+    const point = decodeSettingDocumentRestorePoint(value, documentId)
+    if (point.id !== pointId || point.message !== (payload.message?.trim() || null)) throw invalidResponse()
+    return point
+  }, payload)
+}
+
+export function restoreSettingDocumentRestorePoint(documentId: string, pointId: string, payload: RestoreDocumentRequest): Promise<DocumentVersion> {
+  return request('POST', () => apiPath('documents', documentId, 'restore-points', pointId, 'restore'), value => {
+    const version = decodeDocumentVersion(value)
+    if (version.document_id !== documentId || version.restored_from_restore_point_id !== pointId) throw invalidResponse()
+    return version
+  }, payload)
 }
 
 export function writeDocument(documentId: string, payload: WriteDocumentRequest): Promise<DocumentVersion> {

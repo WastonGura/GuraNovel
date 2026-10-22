@@ -28,7 +28,25 @@ describe('Studio Assistant', () => {
 
   afterEach(() => {
     cleanup()
+    vi.useRealTimers()
     vi.restoreAllMocks()
+  })
+
+  it('preserves focus moved to another menu item immediately after closing Gura', () => {
+    vi.useFakeTimers()
+    render(<MemoryRouter><GlobalAssistant preview /><div role="menu"><button type="button" role="menuitem">与设定 Agent 协作</button></div></MemoryRouter>)
+    const launcher = screen.getByRole('button', { name: 'Gura' })
+    fireEvent.click(launcher)
+    const input = screen.getByRole('textbox', { name: '给 Gura 的消息' })
+    expect(input).toHaveFocus()
+    fireEvent.keyDown(input, { key: 'Escape' })
+    expect(launcher).toHaveAttribute('aria-expanded', 'false')
+    expect(launcher).toHaveFocus()
+    const action = screen.getByRole('menuitem', { name: '与设定 Agent 协作' })
+    action.focus()
+    expect(action).toHaveFocus()
+    act(() => { vi.advanceTimersByTime(50) })
+    expect(action).toHaveFocus()
   })
 
   it('isolates collection drafts while restoring each collection when returning', async () => {

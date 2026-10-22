@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { listCollectionProjects, type Project } from './api/client'
 import SearchDialog from './SearchDialog'
+import SettingActionIcon from './SettingActionIcon'
 import SearchRecordPreview from './SearchRecordPreview'
 import { matchesSearchRecord, projectSearchRecord } from './searchRecords'
 
@@ -44,6 +45,7 @@ function AssociatedNovelsSession({ collectionId, onBeforeOpen, onOpenProject, on
     }
   }
   return <SearchDialog title="关联作品" query={query} onQuery={setQuery} inputLabel="搜索关联作品" placeholder="搜索关联作品…"
+    controlIcons={{ search: <SettingActionIcon name="search" />, close: <SettingActionIcon name="close" /> }}
     items={choices} onClose={onClose} onSelect={item => onOpenProject(item.project)} onBeforeSelect={item => protectDocument(item.project)}
     filters={failed && <button type="button" aria-label="重新加载关联作品" onClick={() => { setFailed(false); setAttempt(value => value + 1) }}>重新加载</button>}
     emptyText={failed ? '暂时无法读取关联作品' : projects === null ? '正在加载关联作品…' : query.trim() ? '没有找到匹配的关联作品' : '暂无关联作品'}

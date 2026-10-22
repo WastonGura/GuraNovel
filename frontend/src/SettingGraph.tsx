@@ -1,5 +1,6 @@
 import { useLayoutEffect, useMemo, useRef, useState, type PointerEvent } from 'react'
 import { buildNoteGraph, type SettingNote } from './settingNotes'
+import SettingActionIcon from './SettingActionIcon'
 
 type Point = { x: number; y: number; vx: number; vy: number }
 type Camera = { x: number; y: number; scale: number }
@@ -188,9 +189,9 @@ export default function SettingGraph({ notes, onOpen }: { notes: SettingNote[]; 
         </g>)}
       </g>
     </svg>
-    {!graph.nodes.length && <p className="setting-graph-empty">写下第一条设定，再用 [[条目名]] 将它们连接起来。</p>}
+    {!graph.nodes.length && <p className="setting-graph-empty">写下第一条设定，再用 @ 引用条目，将它们连接起来。</p>}
     <div className="setting-graph-bottom"><p id="setting-graph-help">拖动节点或空白处 · 滚轮缩放 · 点击打开条目{notes.length > 160 && ' · 当前最多展示 160 条'}</p>
-      <div className="setting-graph-zoom"><button aria-label="缩小图谱" onClick={() => zoom(1 / 1.2)}>−</button><button aria-label="图谱归位" title="Home 归位" onClick={() => setCamera(home)}>{Math.round(camera.scale * 100)}%</button><button aria-label="放大图谱" onClick={() => zoom(1.2)}>+</button></div>
+      <div className="setting-graph-zoom"><button className="setting-icon-button" aria-label="缩小图谱" title="缩小图谱" onClick={() => zoom(1 / 1.2)}><SettingActionIcon name="minus" /></button><span className="setting-graph-scale" aria-live="polite">{Math.round(camera.scale * 100)}%</span><button className="setting-icon-button" aria-label="放大图谱" title="放大图谱" onClick={() => zoom(1.2)}><SettingActionIcon name="plus" /></button><button className="setting-icon-button" aria-label="图谱归位" title="图谱归位 · Home" onClick={() => setCamera(home)}><SettingActionIcon name="fit" /></button></div>
     </div>
   </div>
 }

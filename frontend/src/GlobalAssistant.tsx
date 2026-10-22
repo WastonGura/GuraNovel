@@ -213,8 +213,10 @@ function AssistantSession({
     }
     if (previous) {
       launcher.current?.focus({ preventScroll: true })
+      const closingFocus = document.activeElement
       const timer = setTimeout(() => {
-        launcher.current?.focus({ preventScroll: true })
+        // Respect a control the author focused after closing the assistant.
+        if (document.activeElement === closingFocus || document.activeElement === document.body) launcher.current?.focus({ preventScroll: true })
       }, 50)
       return () => clearTimeout(timer)
     }
