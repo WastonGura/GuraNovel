@@ -18,7 +18,8 @@ class ChapterService:
         self.session = session
 
     async def create_chapter(
-        self, *, project_id: UUID, title: str | None = None, metadata: dict | None = None
+        self, *, project_id: UUID, title: str | None = None, metadata: dict | None = None,
+        commit: bool = True,
     ) -> Chapter:
         project = await self.session.get(Project, project_id)
         if project is None:
@@ -33,7 +34,10 @@ class ChapterService:
         )
         self.session.add(chapter)
         try:
-            await self.session.commit()
+            if commit:
+                await self.session.commit()
+            else:
+                await self.session.flush()
         except BaseException:
             await self.session.rollback()
             raise

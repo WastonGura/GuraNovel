@@ -185,11 +185,13 @@ describe('SettingCollectionWorkspace', () => {
   })
 
   it('uses only collection context and the selected saved document version for Gura', async () => {
-    const conversation = { id: 'conv-world', project_id: null, setting_collection_id: 'col-123', messages: [], created_at: '', updated_at: '' }
+    const conversation = { id: 'conv-world', project_id: null, setting_collection_id: null, messages: [], created_at: '', updated_at: '' }
     const calls: { url: string; body: Record<string, unknown> }[] = []
     vi.spyOn(globalThis, 'fetch').mockImplementation(async (url, init) => {
-      calls.push({ url: String(url), body: JSON.parse(String(init?.body)) })
-      return new Response(JSON.stringify(conversation), { status: 200 })
+      const body = JSON.parse(String(init?.body))
+      calls.push({ url: String(url), body })
+      return new Response(JSON.stringify(String(url).endsWith('/messages') ? { ...conversation, messages: [{ id: 'user', role: 'user', content: body.content,
+        tool_calls: [{ client_message_id: body.client_message_id, context: body.context, exchange_complete: true }] }] } : conversation), { status: 200 })
     })
     renderWorkspace('/setting-collections/col-123?note=doc-world-1&category=world')
     await screen.findByRole('heading', { name: '天穹神域' })
@@ -199,8 +201,8 @@ describe('SettingCollectionWorkspace', () => {
     await waitFor(() => expect(screen.getByRole('button', { name: '发送给 Gura' })).toBeEnabled())
     fireEvent.click(screen.getByRole('button', { name: '发送给 Gura' }))
     await waitFor(() => expect(calls).toHaveLength(2))
-    expect(calls[0].url).toBe('/api/v1/setting-collections/col-123/assistant/conversations')
-    expect(calls[1].body).toMatchObject({ document_id: 'doc-world-1', document_version_id: 'ver-201', content: '帮我理解这个世界' })
+    expect(calls[0].url).toBe('/api/v1/assistant/conversations')
+    expect(calls[1].body).toMatchObject({ context: { kind: 'collection', collection_id: 'col-123', document_id: 'doc-world-1', document_version_id: 'ver-201' }, content: '帮我理解这个世界' })
     expect(calls.every(call => !call.url.includes('/projects/'))).toBe(true)
     expect(screen.queryByText('交互预览')).not.toBeInTheDocument()
   })

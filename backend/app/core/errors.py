@@ -69,6 +69,14 @@ class ConflictError(AppError):
     default_message = "The request conflicts with the current resource state."
 
 
+class AssistantExchangeUnconfirmedError(ConflictError):
+    code = "assistant_exchange_unconfirmed"
+    default_message = (
+        "The previous assistant operation is still running or its outcome is unconfirmed. "
+        "Check the project and conversation history before starting a new conversation."
+    )
+
+
 class WorkflowStateError(ConflictError):
     code = "workflow_state_error"
     default_message = "The workflow is not in a state that allows this operation."

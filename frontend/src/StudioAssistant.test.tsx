@@ -5,6 +5,7 @@ import Studio from './Studio'
 import GlobalAssistant from './GlobalAssistant'
 import { getProject, listChapters, readDocumentContent } from './api/client'
 import { listChapterProductionRuns } from './api/chapterProductionV2Client'
+import { resetAssistantDeliveries } from './assistantDeliveries'
 
 vi.mock('./api/chapterProductionV2Client', async original => ({
   ...await original<typeof import('./api/chapterProductionV2Client')>(),
@@ -24,6 +25,7 @@ describe('Studio Assistant', () => {
     vi.mocked(listChapterProductionRuns).mockResolvedValue([])
     localStorage.clear()
     sessionStorage.clear()
+    resetAssistantDeliveries()
   })
 
   afterEach(() => {
@@ -34,7 +36,7 @@ describe('Studio Assistant', () => {
 
   it('preserves focus moved to another menu item immediately after closing Gura', () => {
     vi.useFakeTimers()
-    render(<MemoryRouter><GlobalAssistant preview /><div role="menu"><button type="button" role="menuitem">与设定 Agent 协作</button></div></MemoryRouter>)
+    render(<MemoryRouter initialEntries={['/preview/studio']}><GlobalAssistant preview /><div role="menu"><button type="button" role="menuitem">与设定 Agent 协作</button></div></MemoryRouter>)
     const launcher = screen.getByRole('button', { name: 'Gura' })
     fireEvent.click(launcher)
     const input = screen.getByRole('textbox', { name: '给 Gura 的消息' })
@@ -49,17 +51,17 @@ describe('Studio Assistant', () => {
     expect(action).toHaveFocus()
   })
 
-  it('isolates collection drafts while restoring each collection when returning', async () => {
+  it('continues the same conversation draft when changing collections', async () => {
     vi.spyOn(globalThis, 'fetch').mockImplementation(async () => new Response(JSON.stringify({ id: 'conv', project_id: null, messages: [] }), { status: 200 }))
     const view = (id: string) => <MemoryRouter><GlobalAssistant collection={{ id, title: id }} /></MemoryRouter>
     const result = render(view('world-A'))
     await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Gura' })) })
     fireEvent.change(screen.getByRole('textbox', { name: '给 Gura 的消息' }), { target: { value: 'A 的想法' } })
     await act(async () => { result.rerender(view('world-B')) })
-    expect(screen.getByRole('textbox', { name: '给 Gura 的消息' })).toHaveValue('')
+    expect(screen.getByRole('textbox', { name: '给 Gura 的消息' })).toHaveValue('A 的想法')
     fireEvent.change(screen.getByRole('textbox', { name: '给 Gura 的消息' }), { target: { value: 'B 的想法' } })
     await act(async () => { result.rerender(view('world-A')) })
-    expect(screen.getByRole('textbox', { name: '给 Gura 的消息' })).toHaveValue('A 的想法')
+    expect(screen.getByRole('textbox', { name: '给 Gura 的消息' })).toHaveValue('B 的想法')
   })
 
   it('recovers unsent text after refresh during conversation initialization retry', async () => {
@@ -74,7 +76,9 @@ describe('Studio Assistant', () => {
     const first = render(view)
     await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Gura' })) })
     fireEvent.change(screen.getByRole('textbox', { name: '给 Gura 的消息' }), { target: { value: '刷新也不能丢失' } })
-    act(() => { fireEvent.click(screen.getByRole('button', { name: '发送给 Gura' })) })
+    expect(screen.getByRole('button', { name: '发送给 Gura' })).toBeDisabled()
+    expect(screen.queryByText('软件哪里不会用？')).not.toBeInTheDocument()
+    act(() => { fireEvent.click(screen.getByRole('button', { name: '重新载入会话' })) })
     expect(calls).toBe(2)
     first.unmount()
     await act(async () => { render(view) })
@@ -82,7 +86,7 @@ describe('Studio Assistant', () => {
   })
 
   it('retries a rejected setting version with the current context and a fresh identity', async () => {
-    const requests: { document_version_id: string; client_message_id: string }[] = []
+    const requests: { context: { document_version_id: string }; client_message_id: string }[] = []
     const conversation = { id: 'world-conv', project_id: null, messages: [] }
     vi.spyOn(globalThis, 'fetch').mockImplementation(async (url, init) => {
       if (String(url).endsWith('/messages')) {
@@ -101,7 +105,7 @@ describe('Studio Assistant', () => {
     rendered.rerender(view('current'))
     await act(async () => { fireEvent.click(screen.getByRole('button', { name: '发送给 Gura' })) })
     expect(requests).toHaveLength(2)
-    expect(requests[1].document_version_id).toBe('current')
+    expect(requests[1].context.document_version_id).toBe('current')
     expect(requests[1].client_message_id).not.toBe(requests[0].client_message_id)
   })
 
@@ -109,9 +113,9 @@ describe('Studio Assistant', () => {
     const fetchSpy = vi.spyOn(globalThis, 'fetch')
     await act(async () => {
       render(
-        <MemoryRouter initialEntries={['/studio']}>
+        <MemoryRouter initialEntries={['/preview/studio']}>
           <Routes>
-            <Route path="/studio" element={<Studio />} />
+            <Route path="/preview/studio" element={<Studio />} />
           </Routes>
         </MemoryRouter>
       )
@@ -197,7 +201,9 @@ describe('Studio Assistant', () => {
         return new Response(JSON.stringify(mockConv), { status: 200, headers: { 'Content-Type': 'application/json' } })
       }
       if (url.includes('/messages')) {
-        return new Response(JSON.stringify(updatedConv), { status: 200, headers: { 'Content-Type': 'application/json' } })
+        const payload = JSON.parse(String(init?.body))
+        return new Response(JSON.stringify({ ...updatedConv, messages: updatedConv.messages.map(message => message.id === 'msg-3'
+          ? { ...message, tool_calls: [{ client_message_id: payload.client_message_id, context: payload.context, exchange_complete: true }] } : message) }), { status: 200, headers: { 'Content-Type': 'application/json' } })
       }
       return new Response(JSON.stringify({}), { status: 404 })
     })
@@ -238,7 +244,7 @@ describe('Studio Assistant', () => {
 
     // Verify fetch call payload
     expect(fetchSpy).toHaveBeenCalledWith(
-      '/api/v1/projects/proj-123/assistant/conversations/conv-001/messages',
+      '/api/v1/assistant/conversations/conv-001/messages',
       expect.objectContaining({
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -298,7 +304,7 @@ describe('Studio Assistant', () => {
       fireEvent.click(sendButton)
     })
 
-    expect(screen.getByText('发送失败，请稍后重试。')).toBeInTheDocument()
+    expect(screen.getByText('无法连接 Gura 助手服务，请稍后重试；消息已保留。')).toBeInTheDocument()
     // Draft is restored in input
     expect(input).toHaveValue('未能送达的消息')
   })
@@ -321,6 +327,7 @@ describe('Studio Assistant', () => {
     }
 
     let resolveSend!: (value: Response) => void
+    let sentRequest: { client_message_id: string; context: Record<string, unknown> }
     const sendPromise = new Promise<Response>(resolve => {
       resolveSend = resolve
     })
@@ -331,6 +338,7 @@ describe('Studio Assistant', () => {
         return new Response(JSON.stringify(mockConv), { status: 200, headers: { 'Content-Type': 'application/json' } })
       }
       if (url.includes('/messages')) {
+        sentRequest = JSON.parse(String(init?.body))
         return sendPromise
       }
       return new Response(JSON.stringify({}), { status: 404 })
@@ -370,7 +378,7 @@ describe('Studio Assistant', () => {
           JSON.stringify({
             ...mockConv,
             messages: [
-              { id: 'm-1', role: 'user', content: '思考状态测试', created_at: '2026-09-13T10:02:00Z' },
+              { id: 'm-1', role: 'user', content: '思考状态测试', created_at: '2026-09-13T10:02:00Z', tool_calls: [{ client_message_id: sentRequest.client_message_id, context: sentRequest.context, exchange_complete: true }] },
               { id: 'm-2', role: 'assistant', content: '已完成思考并回复', created_at: '2026-09-13T10:02:01Z' },
             ],
           }),
@@ -384,19 +392,20 @@ describe('Studio Assistant', () => {
 
     // Press Escape to close assistant
     fireEvent.keyDown(input, { key: 'Escape' })
-    expect(launcher).toHaveAttribute('aria-expanded', 'false')
-    expect(launcher).toHaveFocus()
+    const currentLauncher = screen.getByRole('button', { name: 'Gura' })
+    expect(currentLauncher).toHaveAttribute('aria-expanded', 'false')
+    expect(currentLauncher).toHaveFocus()
   })
 
   it('persists open state and draft across remounts via sessionStorage', async () => {
     sessionStorage.setItem('guranovel_assistant_open', 'true')
-    sessionStorage.setItem('guranovel_assistant_draft', '草稿暂存文字')
+    sessionStorage.setItem('guranovel_assistant_draft:preview', '草稿暂存文字')
 
     await act(async () => {
       render(
-        <MemoryRouter initialEntries={['/studio']}>
+        <MemoryRouter initialEntries={['/preview/studio']}>
           <Routes>
-            <Route path="/studio" element={<Studio />} />
+            <Route path="/preview/studio" element={<Studio />} />
           </Routes>
         </MemoryRouter>
       )
@@ -407,7 +416,7 @@ describe('Studio Assistant', () => {
     expect(input).toHaveValue('草稿暂存文字')
 
     fireEvent.change(input, { target: { value: '更新后的暂存文字' } })
-    expect(sessionStorage.getItem('guranovel_assistant_draft')).toBe('更新后的暂存文字')
+    expect(sessionStorage.getItem('guranovel_assistant_draft:preview')).toBe('更新后的暂存文字')
 
     const closeBtn = screen.getByRole('button', { name: '收起助手' })
     fireEvent.click(closeBtn)
@@ -518,9 +527,9 @@ describe('Studio Assistant', () => {
       fireEvent.click(launcher)
     })
 
-    // It should have initialized conversation with inferred project ID 'proj-999'
+    // The global conversation stays global; each send carries the inferred project context.
     expect(fetchSpy).toHaveBeenCalledWith(
-      '/api/v1/projects/proj-999/assistant/conversations',
+      '/api/v1/assistant/conversations',
       expect.objectContaining({
         method: 'POST',
       })
@@ -529,6 +538,7 @@ describe('Studio Assistant', () => {
   })
 
   it('renders and toggles correctly on dashboard without studio wrapper', async () => {
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async () => new Response(JSON.stringify({ id: 'home-conv', project_id: null, messages: [] }), { status: 200 }))
     await act(async () => {
       render(
         <MemoryRouter initialEntries={['/']}>
@@ -550,6 +560,7 @@ describe('Studio Assistant', () => {
 
     const assistant = document.querySelector('.studio-assistant')
     expect(assistant).toHaveClass('is-open')
-    expect(screen.getByText('交互预览')).toBeInTheDocument()
+    expect(screen.queryByText('交互预览')).not.toBeInTheDocument()
+    expect(screen.getByText('软件哪里不会用？')).toBeInTheDocument()
   })
 })

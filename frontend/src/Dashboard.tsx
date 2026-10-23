@@ -3,6 +3,7 @@ import { useLocation, useNavigate, useSearchParams } from 'react-router-dom'
 import CoverImage from './CoverImage'
 import DashboardSearch from './DashboardSearch'
 import CreationDialog, { DialogDismissButton } from './CreationDialog'
+import GlobalAssistant from './GlobalAssistant'
 import { NovelDialog, NovelFields } from './NovelDialog'
 import { novelCoverSource } from './novelCover'
 import { useNovelMetadata } from './useNovelMetadata'
@@ -458,6 +459,7 @@ export default function Dashboard() {
       </div>
       {searching && <DashboardSearch projects={projects} collections={collections} failed={failed} collectionsFailed={collectionsFailed}
         onClose={() => setSearching(false)} onProject={setSelected} onCollection={id => navigate(`/setting-collections/${encodeURIComponent(id)}`)} />}
+      {!selected && <GlobalAssistant />}
       {selected && (
         <NovelDetails
           key={selected.id}

@@ -24,7 +24,7 @@ async function authoringBackend(page: Page, existing = false, multiple = false, 
   if (multiple) state.docs.push({ ...document('潮汐法则', { category: 'world' }), id: worldId, type: 'world_overview', path: 'world/tides.md' })
   const conversation = () => ({ id: 'setting-conversation', setting_collection_id: collectionId, document_id: null, agent_role: 'lore_agent', messages: state.messages, created_at: stamp, updated_at: stamp })
   let globalMessages: object[] = []
-  const globalConversation = () => ({ id: 'global-conversation', project_id: null, setting_collection_id: collectionId, messages: globalMessages, created_at: stamp, updated_at: stamp })
+  const globalConversation = () => ({ id: 'global-conversation', title: '全局 Gura 对话', project_id: null, setting_collection_id: null, messages: globalMessages, created_at: stamp, updated_at: stamp })
   await page.route('**/api/v1/**', async route => {
     const request = route.request(), path = new URL(request.url()).pathname, method = request.method()
     const json = (value: unknown, status = 200) => route.fulfill({ status, json: value })
@@ -80,10 +80,12 @@ async function authoringBackend(page: Page, existing = false, multiple = false, 
       message.proposal_status = 'accepted'; message.accepted_version_id = versionId(); message.proposal!.status = 'accepted'
       return json({ conversation: conversation(), document: accepted, content: state.body })
     }
-    if (path.endsWith('/assistant/conversations')) return json(globalConversation())
-    if (path.endsWith('/assistant/conversations/global-conversation/messages')) {
+    if (path === '/api/v1/assistant/conversations') return json(method === 'GET' ? [] : globalConversation())
+    if (path === '/api/v1/assistant/conversations/global-conversation') return json(globalConversation())
+    if (path === '/api/v1/assistant/conversations/global-conversation/messages') {
       const payload = request.postDataJSON()
-      globalMessages = [{ id: 'global-user', role: 'user', content: payload.content, tool_calls: [{ client_message_id: payload.client_message_id }] }, { id: 'global-agent', role: 'assistant', content: 'Gura 可以通过侧栏底部的回到书架帮助你导航。' }]
+      expect(payload.context).toMatchObject({ kind: 'collection', collection_id: collectionId })
+      globalMessages = [{ id: 'global-user', role: 'user', content: payload.content, tool_calls: [{ client_message_id: payload.client_message_id, context: payload.context, exchange_complete: true }] }, { id: 'global-agent', role: 'assistant', content: 'Gura 可以通过侧栏底部的回到书架帮助你导航。' }]
       return json(globalConversation())
     }
     if (path === '/api/v1/projects' || path === '/api/v1/setting-collections') return json([])

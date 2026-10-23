@@ -72,7 +72,7 @@ export default function App() {
           </Routes>
         </main>
       </div>
-      {!studio && !setting && <GlobalAssistant />}
+      {!studio && !setting && pathname !== '/' && <GlobalAssistant />}
     </div>
   )
 }

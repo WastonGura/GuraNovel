@@ -38,7 +38,7 @@ beforeEach(() => {
 })
 afterEach(() => { cleanup(); vi.useRealTimers(); vi.restoreAllMocks() })
 
-function openPreview() { return render(<MemoryRouter><Studio /></MemoryRouter>) }
+function openPreview() { return render(<MemoryRouter initialEntries={['/preview/studio']}><Studio /></MemoryRouter>) }
 async function stage(name: string | RegExp) {
   const labels: Record<string, string> = { Outline: '大纲', Draft: '正文', Review: '审阅', Reader: '读者评审', Final: '定稿' }
   await act(async () => fireEvent.click(screen.getByRole('button', { name: typeof name === 'string' ? labels[name] || name : name })))

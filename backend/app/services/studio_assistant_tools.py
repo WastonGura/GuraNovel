@@ -467,6 +467,7 @@ async def tool_create_chapter(
     chapter = await ChapterService(session).create_chapter(
         project_id=project_id,
         title=clean_title,
+        commit=not session.info.get("assistant_exchange_owns_transaction", False),
     )
     target_url = f"/projects/{project_id}/studio/{chapter.id}?view=Create&stage=Outline"
     return {

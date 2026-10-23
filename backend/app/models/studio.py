@@ -72,12 +72,14 @@ class StudioAssistantConversation(Base):
         Index("idx_studio_assistant_conversations_project", "project_id"),
         Index("idx_studio_assistant_conversations_chapter", "chapter_id"),
         Index("uq_studio_assistant_collection", "setting_collection_id", unique=True, postgresql_where=text("setting_collection_id IS NOT NULL")),
-        CheckConstraint("num_nonnulls(project_id, setting_collection_id) = 1 AND (setting_collection_id IS NULL OR chapter_id IS NULL)", name="ck_studio_assistant_scope"),
+        Index("idx_studio_assistant_global_owner_updated", "home_owner_key", "updated_at", postgresql_where=text("home_owner_key IS NOT NULL")),
+        CheckConstraint("num_nonnulls(project_id, setting_collection_id, home_owner_key) = 1 AND (project_id IS NOT NULL OR chapter_id IS NULL) AND (home_owner_key IS NULL OR home_owner_key = 'local' OR home_owner_key ~ '^user:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$')", name="ck_studio_assistant_scope"),
     )
 
     id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True, default=uuid4)
     project_id: Mapped[UUID | None] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"), nullable=True)
     setting_collection_id: Mapped[UUID | None] = mapped_column(ForeignKey("setting_collections.id", ondelete="CASCADE"), nullable=True)
+    home_owner_key: Mapped[str | None] = mapped_column(String(64), nullable=True)
     chapter_id: Mapped[UUID | None] = mapped_column(ForeignKey("chapters.id", ondelete="CASCADE"), nullable=True)
     title: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
