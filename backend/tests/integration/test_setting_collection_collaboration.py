@@ -60,7 +60,8 @@ async def note(session, collection, title, *, world=False, body=None):
 def generated(monkeypatch, captured, *, target_title=None, invalid_target=None):
     from app.agents.setting_collaboration import SettingCollectionCollaborationReply, SettingCollectionSuggestedEdit
 
-    async def reply(content, context, history):
+    async def reply(content, context, history, *, before_dispatch):
+        await before_dispatch({"model_identifier": "synthetic-test-model"})
         captured.append((content, context, history))
         target = next((doc for doc in context["documents"] if doc["title"] == target_title), None)
         return SettingCollectionCollaborationReply(reply="这是整个设定集的建议，尚未写入。", suggestion=SettingCollectionSuggestedEdit(
@@ -195,7 +196,8 @@ async def test_collection_author_can_keep_writing_while_the_agent_generates_agai
     started, finish = asyncio.Event(), asyncio.Event()
     contexts = []
 
-    async def reply(content, context, history):
+    async def reply(content, context, history, *, before_dispatch):
+        await before_dispatch({"model_identifier": "synthetic-test-model"})
         contexts.append(context)
         started.set()
         await finish.wait()
@@ -228,7 +230,8 @@ async def test_owner_archive_failure_retry_and_unknown_target_do_not_create_fake
     assert (await client.get(path, headers={"x-actor-user-id": str(stranger.id)})).status_code == 403
     from app.llm.errors import ProviderUnavailableError
 
-    async def fail(*args):
+    async def fail(*args, before_dispatch):
+        await before_dispatch({"model_identifier": "synthetic-test-model"})
         raise ProviderUnavailableError()
 
     monkeypatch.setattr("app.agents.setting_collaboration.generate_setting_collection_collaboration", fail)
@@ -237,13 +240,25 @@ async def test_owner_archive_failure_retry_and_unknown_target_do_not_create_fake
     assert (await client.get(path)).json()["messages"] == []
     captured = []
     generated(monkeypatch, captured, invalid_target=str(uuid4()))
+    assert (await client.post(path + "/messages", json=payload)).json()["attempts"][0]["status"] == "dispatched"
+    assert captured == []
+    assert (await client.post(path + "/attempts/finish", json=payload)).status_code == 200
+    payload = {**payload, "client_message_id": "explicit-after-uncertainty"}
     assert (await client.post(path + "/messages", json=payload)).status_code == 422
     assert (await client.get(path)).json()["messages"] == []
+    invalid = await client.post(path + "/messages", json=payload)
+    assert invalid.status_code == 200
+    assert invalid.json()["attempts"][0]["status"] == "dispatched"
+    assert invalid.json()["attempts"][0]["error_code"] == "provider_invalid_output"
+    assert len(captured) == 1  # The saved invalid target is inspected, never regenerated.
+    assert (await client.post(path + "/attempts/finish", json=payload)).status_code == 200
+    payload = {**payload, "client_message_id": "explicit-after-invalid-output"}
     generated(monkeypatch, captured)
     first, second = await asyncio.gather(client.post(path + "/messages", json=payload), client.post(path + "/messages", json=payload))
     assert first.status_code == second.status_code == 200
     assert len(captured) == 2  # One invalid provider target plus one acknowledged generation.
-    message = first.json()["messages"][1]
+    completed = next(response for response in (first, second) if response.json()["messages"])
+    message = completed.json()["messages"][1]
     assert (await client.post(f"/api/v1/setting-collections/{collection.id}/archive")).status_code == 200
     assert (await client.get(path)).status_code == 200
     assert (await client.post(path + "/messages", json={**payload, "client_message_id": "new-after-archive"})).status_code == 409

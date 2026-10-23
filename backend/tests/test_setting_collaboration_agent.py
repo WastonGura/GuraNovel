@@ -37,6 +37,7 @@ async def test_setting_agent_uses_distinct_prompt_complete_proposal_and_shared_t
     assert "tools" not in requests[0]
     assert json.loads(requests[0]["messages"][-1]["content"])["context"]["base_version_id"] == "immutable-version"
     assert provenance == {"provider_kind": "openai_compatible", "model_identifier": "test-model", "prompt_template_version": "setting-collaboration-v1", "input_tokens": 40, "output_tokens": 20}
+    assert requests[0]["response_format"] == {"type": "json_object"}
 
 
 @pytest.mark.anyio
@@ -86,3 +87,64 @@ async def test_collection_agent_uses_the_whole_collection_contract_and_can_sugge
     assert "不是全局助手 Gura" in requests[0]["messages"][0]["content"]
     assert json.loads(requests[0]["messages"][-1]["content"])["context"]["documents"] == []
     assert provenance["prompt_template_version"] == "setting-collection-collaboration-v1"
+
+
+@pytest.mark.anyio
+async def test_setting_dispatch_never_falls_back_to_a_second_http_request(monkeypatch):
+    from app.llm.errors import ProviderUnavailableError
+
+    monkeypatch.setattr(setting_collaboration.settings, "openai_compatible_base_url", "https://model.example.test/v1")
+    monkeypatch.setattr(setting_collaboration.settings, "openai_compatible_api_key", SecretStr("synthetic-test-key"))
+    monkeypatch.setattr(setting_collaboration.settings, "openai_compatible_model", "test-model")
+    requests = []
+
+    def reject(request):
+        requests.append(request)
+        return httpx.Response(400, stream=httpx.ByteStream(b'{"error":"unsupported schema"}'))
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(reject)) as client:
+        monkeypatch.setattr(setting_collaboration, "OpenAICompatibleStructuredOutputTransport", lambda **kwargs: OpenAICompatibleStructuredOutputTransport(**kwargs, client=client))
+        with pytest.raises(ProviderUnavailableError):
+            await setting_collaboration.generate_setting_collection_collaboration("Discuss", {"agent_role": "lore_agent", "documents": []}, [])
+    assert len(requests) == 1
+    assert json.loads(requests[0].content)["response_format"] == {"type": "json_object"}
+
+
+@pytest.mark.anyio
+async def test_gateway_preflight_precedes_durable_claim_and_claim_precedes_http(monkeypatch):
+    from app.llm.errors import ProviderUnavailableError
+
+    events = []
+
+    async def claim(provenance):
+        assert provenance["model_identifier"] == "test-model"
+        events.append("durable-dispatch")
+
+    monkeypatch.setattr(setting_collaboration.settings, "openai_compatible_api_key", None)
+    with pytest.raises(ProviderConfigurationError):
+        await setting_collaboration.generate_setting_collection_collaboration("Discuss", {}, [], before_dispatch=claim)
+    assert events == []
+    monkeypatch.setattr(setting_collaboration.settings, "openai_compatible_base_url", "https://model.example.test/v1")
+    monkeypatch.setattr(setting_collaboration.settings, "openai_compatible_api_key", SecretStr("synthetic-test-key"))
+    monkeypatch.setattr(setting_collaboration.settings, "openai_compatible_model", "test-model")
+
+    def respond(request):
+        assert events == ["durable-dispatch"]
+        events.append("http")
+        return httpx.Response(200, stream=httpx.ByteStream(b'{"choices":[{"message":{"content":"{\\"reply\\":\\"Discussed\\",\\"suggestion\\":null}"}}]}'))
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+        monkeypatch.setattr(setting_collaboration, "OpenAICompatibleStructuredOutputTransport", lambda **kwargs: OpenAICompatibleStructuredOutputTransport(**kwargs, client=client))
+        await setting_collaboration.generate_setting_collection_collaboration("Discuss", {"agent_role": "lore_agent", "documents": []}, [], before_dispatch=claim)
+        assert events == ["durable-dispatch", "http"]
+        events.clear()
+        with pytest.raises(ProviderInvalidOutputError):
+            await setting_collaboration.generate_setting_collection_collaboration("x" * 2000001, {"agent_role": "lore_agent"}, [], before_dispatch=claim)
+        assert events == []
+
+        async def failed_claim(provenance):
+            raise RuntimeError("Database dispatch commit failed")
+
+        with pytest.raises(ProviderUnavailableError):
+            await setting_collaboration.generate_setting_collection_collaboration("Discuss", {"agent_role": "lore_agent"}, [], before_dispatch=failed_claim)
+        assert events == []

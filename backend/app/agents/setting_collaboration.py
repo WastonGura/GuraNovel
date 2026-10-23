@@ -1,12 +1,13 @@
 """A setting authoring Agent produces proposals, never writes documents itself."""
 import json
+from collections.abc import Awaitable, Callable
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from app.core.config import settings
 from app.llm.errors import ProviderConfigurationError
-from app.llm.gateway import StructuredOutputGateway, StructuredOutputProfile, StructuredOutputRequest
+from app.llm.gateway import StructuredOutputGateway, StructuredOutputProfile, StructuredOutputRequest, StructuredTransportRequest
 from app.llm.openai_compatible_provider import OpenAICompatibleStructuredOutputTransport
 
 
@@ -53,15 +54,30 @@ class SettingCollectionCollaborationReply(SettingCollaborationReply):
     suggestion: SettingCollectionSuggestedEdit | None
 
 
-async def generate_setting_collaboration(content: str, context: dict, history: list[dict[str, str]]) -> tuple[SettingCollaborationReply, dict]:
-    return await _generate(content, context, history, collection_scope=False)
+DispatchCallback = Callable[[dict], Awaitable[None]]
 
 
-async def generate_setting_collection_collaboration(content: str, context: dict, history: list[dict[str, str]]) -> tuple[SettingCollectionCollaborationReply, dict]:
-    return await _generate(content, context, history, collection_scope=True)
+class _DispatchTransport:
+    """The durable claim runs after gateway preflight and before any HTTP request."""
+
+    def __init__(self, transport, before_dispatch: DispatchCallback | None, provenance: dict):
+        self.transport, self.before_dispatch, self.provenance = transport, before_dispatch, provenance
+
+    async def call(self, request: StructuredTransportRequest):
+        if self.before_dispatch is not None:
+            await self.before_dispatch(self.provenance)
+        return await self.transport.call(request)
 
 
-async def _generate(content: str, context: dict, history: list[dict[str, str]], *, collection_scope: bool):
+async def generate_setting_collaboration(content: str, context: dict, history: list[dict[str, str]], *, before_dispatch: DispatchCallback | None = None) -> tuple[SettingCollaborationReply, dict]:
+    return await _generate(content, context, history, collection_scope=False, before_dispatch=before_dispatch)
+
+
+async def generate_setting_collection_collaboration(content: str, context: dict, history: list[dict[str, str]], *, before_dispatch: DispatchCallback | None = None) -> tuple[SettingCollectionCollaborationReply, dict]:
+    return await _generate(content, context, history, collection_scope=True, before_dispatch=before_dispatch)
+
+
+async def _generate(content: str, context: dict, history: list[dict[str, str]], *, collection_scope: bool, before_dispatch: DispatchCallback | None):
     if not (settings.openai_compatible_base_url and settings.openai_compatible_api_key and settings.openai_compatible_model):
         raise ProviderConfigurationError()
     timeout = settings.openai_compatible_timeout_seconds or 30
@@ -93,9 +109,11 @@ async def _generate(content: str, context: dict, history: list[dict[str, str]], 
     transport = OpenAICompatibleStructuredOutputTransport(
         base_url=settings.openai_compatible_base_url,
         api_key=settings.openai_compatible_api_key.get_secret_value(), timeout_seconds=timeout,
+        allow_schema_fallback=False,
+        prefer_json_schema=False,
     )
     try:
-        response = await StructuredOutputGateway(profile, transport).call(StructuredOutputRequest(
+        response = await StructuredOutputGateway(profile, _DispatchTransport(transport, before_dispatch, profile.provenance.to_payload())).call(StructuredOutputRequest(
             profile_id=profile.profile_id,
             user_prompt=json.dumps({"context": context, "history": [{"role": m["role"], "content": m["content"][:4000]} for m in history[-12:]], "request": content}, ensure_ascii=False),
         ))
