@@ -1,25 +1,622 @@
-import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import SettingCollaborationPanel, { type SettingCollaborationPanelProps } from './SettingCollaborationPanel'
 import * as client from './api/settingCollaborationClient'
 import type { SettingNote } from './settingNotes'
 import { ApiError } from './api/client'
+import { useLayoutEffect, useRef, useState } from 'react'
 
-vi.mock('./api/settingCollaborationClient', () => ({ getOrCreateSettingCollectionCollaboration: vi.fn(), sendSettingCollectionCollaborationMessage: vi.fn(), acceptSettingCollectionCollaborationProposal: vi.fn(), discardSettingCollectionCollaborationProposal: vi.fn() }))
+vi.mock('./api/settingCollaborationClient', () => ({ getOrCreateSettingCollectionCollaboration: vi.fn(), getSettingCollectionCollaboration: vi.fn(), getSettingCollectionCollaborationAttempt: vi.fn(), resumeSettingCollectionCollaborationAttempt: vi.fn(), finishSettingCollectionCollaborationAttempt: vi.fn(), sendSettingCollectionCollaborationMessage: vi.fn(), acceptSettingCollectionCollaborationProposal: vi.fn(), discardSettingCollectionCollaborationProposal: vi.fn(), listSettingCollectionConversations: vi.fn(), createSettingCollectionConversation: vi.fn(), getSettingCollectionConversation: vi.fn(), getSettingCollectionConversationAttempt: vi.fn(), resumeSettingCollectionConversationAttempt: vi.fn(), finishSettingCollectionConversationAttempt: vi.fn(), sendSettingCollectionConversationMessage: vi.fn(), acceptSettingCollectionConversationProposal: vi.fn(), discardSettingCollectionConversationProposal: vi.fn() }))
 const note: SettingNote = { id: 'note-one', documentId: 'doc-one', versionId: 'version-one', title: '旧港', body: '港口在黄昏关闭。', category: 'world' }
 const other: SettingNote = { id: 'note-two', documentId: 'doc-two', versionId: 'version-two', title: '守灯人', body: '守灯人每晚巡逻。', category: 'setting' }
 const proposal = { id: 'proposal-one', setting_collection_id: 'world-one', target_document_id: 'doc-one', base_version_id: 'version-one', title: '旧港', category: 'world', proposed_content: '港口在黄昏关闭，只有灯塔仍然亮着。', reason: '补充地点细节。' }
-const conversation = (messages: client.SettingCollaborationMessage[] = []): client.SettingCollaboration => ({ id: 'conversation-one', setting_collection_id: 'world-one', document_id: null, agent_role: 'lore_agent', messages, created_at: '2026-10-20T00:00:00Z', updated_at: '2026-10-20T00:00:00Z' })
-const suggestion = (): client.SettingCollaborationMessage => ({ id: 'message-agent', role: 'assistant', content: '可以从灯塔补充这个地点。', client_message_id: null, proposal, proposal_status: 'pending', base_content: note.body, base_title: note.title, accepted_version_id: null, created_at: '2026-10-20T00:00:00Z' })
+const conversation = (messages: client.SettingCollaborationMessage[] = []): client.SettingCollaboration => ({ id: 'conversation-one', title: '原有对话', is_default: true, client_request_id: null, setting_collection_id: 'world-one', document_id: null, agent_role: 'lore_agent', attempts: [], messages, created_at: '2026-10-20T00:00:00Z', updated_at: '2026-10-20T00:00:00Z' })
+const suggestion = (): client.SettingCollaborationMessage => ({ id: 'message-agent', attempt_id: null, role: 'assistant', content: '可以从灯塔补充这个地点。', client_message_id: null, proposal, proposal_status: 'pending', base_content: note.body, base_title: note.title, accepted_version_id: null, created_at: '2026-10-20T00:00:00Z' })
 const newSuggestion = (): client.SettingCollaborationMessage => ({ ...suggestion(), proposal: { ...proposal, target_document_id: null, base_version_id: null, title: '灯塔', proposed_content: '灯塔建在港湾入口。' }, base_content: '', base_title: '' })
-const userMessage = (id: string, content: string): client.SettingCollaborationMessage => ({ id: 'message-user', role: 'user', content, client_message_id: id, proposal: null, proposal_status: null, base_content: null, base_title: null, accepted_version_id: null, created_at: '2026-10-20T00:00:00Z' })
+const userMessage = (id: string, content: string): client.SettingCollaborationMessage => ({ id: 'message-user', attempt_id: null, role: 'user', content, client_message_id: id, proposal: null, proposal_status: null, base_content: null, base_title: null, accepted_version_id: null, created_at: '2026-10-20T00:00:00Z' })
 const accepted = (message = suggestion(), documentId = 'doc-one'): client.SettingCollaborationAcceptance => ({ conversation: conversation([{ ...message, proposal_status: 'accepted' }]), document: { id: documentId, project_id: null, setting_collection_id: 'world-one', chapter_id: null, type: 'world_overview', title: message.proposal!.title, path: 'world/old-port.md', current_version_id: 'accepted-version', current_version: null, created_at: '', updated_at: '' }, content: message.proposal!.proposed_content })
 const props = (changes: Partial<SettingCollaborationPanelProps> = {}): SettingCollaborationPanelProps => ({ collectionId: 'world-one', notes: [note, other], onPrepare: vi.fn().mockResolvedValue(true), onApply: vi.fn(() => true), onClose: vi.fn(), ...changes })
 const ready = () => screen.findByRole('heading', { name: '一起构建这个世界' })
-const storageKey = 'guranovel:setting-agent:collection:world-one'
+async function clickNewConversation() {
+  const button = screen.getByRole('button', { name: '新建对话' })
+  await waitFor(() => expect(button).toBeEnabled())
+  await act(async () => { fireEvent.click(button) })
+}
+const legacyStorageKey = 'guranovel:setting-agent:collection:world-one'
+const storageKey = `${legacyStorageKey}:conversation:conversation-one`
+const attemptFor = (payload: client.SettingCollectionCollaborationSend, status: client.SettingCollaborationAttempt['status'] = 'dispatched'): client.SettingCollaborationAttempt => ({ id: 'attempt-one', client_message_id: payload.client_message_id, content: payload.content, request: payload, status, error_code: null, provenance: null, has_result: status === 'completed' || status === 'result_saved', user_message_id: status === 'completed' ? 'message-user' : null, assistant_message_id: status === 'completed' ? 'message-agent' : null, created_at: '2026-10-20T00:00:00Z', updated_at: '2026-10-20T00:00:00Z' })
+const complete = (payload: client.SettingCollectionCollaborationSend, reply = suggestion()): client.SettingCollaboration => ({ ...conversation([{ ...userMessage(payload.client_message_id, payload.content), attempt_id: 'attempt-one' }, { ...reply, attempt_id: 'attempt-one' }]), attempts: [attemptFor(payload, 'completed')] })
 
-beforeEach(() => { vi.resetAllMocks(); sessionStorage.clear(); vi.stubGlobal('matchMedia', vi.fn(() => ({ matches: true }))); vi.mocked(client.getOrCreateSettingCollectionCollaboration).mockResolvedValue(conversation()); vi.mocked(client.acceptSettingCollectionCollaborationProposal).mockResolvedValue(accepted()) })
+beforeEach(() => {
+  vi.resetAllMocks(); sessionStorage.clear(); vi.stubGlobal('matchMedia', vi.fn(() => ({ matches: true })))
+  vi.mocked(client.getSettingCollectionCollaboration).mockResolvedValue(conversation())
+  vi.mocked(client.getOrCreateSettingCollectionCollaboration).mockResolvedValue(conversation())
+  vi.mocked(client.acceptSettingCollectionCollaborationProposal).mockResolvedValue(accepted())
+  vi.mocked(client.getSettingCollectionConversation).mockImplementation((id) => client.getSettingCollectionCollaboration(id))
+  vi.mocked(client.getSettingCollectionConversationAttempt).mockImplementation((id, _conversation, attempt) => client.getSettingCollectionCollaborationAttempt(id, attempt))
+  vi.mocked(client.resumeSettingCollectionConversationAttempt).mockImplementation((id, _conversation, attempt) => client.resumeSettingCollectionCollaborationAttempt(id, attempt))
+  vi.mocked(client.finishSettingCollectionConversationAttempt).mockImplementation((id, _conversation, payload) => client.finishSettingCollectionCollaborationAttempt(id, payload))
+  vi.mocked(client.sendSettingCollectionConversationMessage).mockImplementation((id, _conversation, payload) => client.sendSettingCollectionCollaborationMessage(id, payload))
+  vi.mocked(client.acceptSettingCollectionConversationProposal).mockImplementation((id, _conversation, ...args) => client.acceptSettingCollectionCollaborationProposal(id, ...args))
+  vi.mocked(client.discardSettingCollectionConversationProposal).mockImplementation((id, _conversation, proposal) => client.discardSettingCollectionCollaborationProposal(id, proposal))
+  vi.mocked(client.listSettingCollectionConversations).mockResolvedValue({ items: [], next_offset: null })
+})
 afterEach(() => { cleanup(); vi.useRealTimers(); vi.restoreAllMocks(); vi.unstubAllGlobals() })
+
+it('toggles history with the same icon and restores per-conversation drafts and proposal history', async () => {
+  vi.mocked(client.getSettingCollectionCollaboration).mockResolvedValue(conversation([suggestion()]))
+  const second = { ...conversation(), id: 'conversation-two', title: '另一段对话', is_default: false }
+  vi.mocked(client.listSettingCollectionConversations).mockResolvedValue({ items: [conversation(), second].map(item => ({ ...item, message_count: item.messages.length, preview: item.messages[0]?.content ?? '' })), next_offset: null })
+  vi.mocked(client.getSettingCollectionConversation).mockImplementation(async (_id, id) => id === second.id ? second : conversation([suggestion()]))
+  render(<SettingCollaborationPanel {...props()} />)
+  await screen.findByRole('button', { name: '比较建议' })
+  fireEvent.change(screen.getByRole('textbox'), { target: { value: '第一段的草稿。' } })
+  fireEvent.click(screen.getByRole('button', { name: '历史对话' }))
+  await screen.findByRole('button', { name: '继续对话：另一段对话' })
+  expect(screen.queryByRole('button', { name: '返回当前对话' })).not.toBeInTheDocument()
+  fireEvent.click(screen.getByRole('button', { name: '历史对话' }))
+  expect(screen.getByRole('textbox')).toHaveValue('第一段的草稿。')
+  fireEvent.click(screen.getByRole('button', { name: '历史对话' }))
+  fireEvent.click(await screen.findByRole('button', { name: '继续对话：另一段对话' }))
+  await ready()
+  expect(screen.getByRole('textbox')).toHaveValue('')
+  expect(screen.queryByRole('button', { name: '比较建议' })).not.toBeInTheDocument()
+  fireEvent.change(screen.getByRole('textbox'), { target: { value: '第二段的草稿。' } })
+  fireEvent.click(screen.getByRole('button', { name: '历史对话' }))
+  fireEvent.click(await screen.findByRole('button', { name: '继续对话：原有对话' }))
+  await screen.findByRole('button', { name: '比较建议' })
+  expect(screen.getByRole('textbox')).toHaveValue('第一段的草稿。')
+  expect(JSON.parse(sessionStorage.getItem(`${legacyStorageKey}:conversation:conversation-two`)!).draft).toBe('第二段的草稿。')
+})
+
+it('reuses one local unsent draft across history, repeated New and refresh without creating until Send', async () => {
+  vi.mocked(client.getSettingCollectionCollaboration).mockResolvedValue(conversation([suggestion()]))
+  vi.mocked(client.listSettingCollectionConversations).mockResolvedValue({ items: [{ ...conversation(), message_count: 1, preview: '已有讨论' }], next_offset: null })
+  const initial = props(), view = render(<SettingCollaborationPanel {...initial} />)
+  await screen.findByRole('button', { name: '比较建议' })
+  await clickNewConversation()
+  expect(screen.queryByRole('button', { name: '比较建议' })).not.toBeInTheDocument()
+  fireEvent.change(screen.getByRole('textbox'), { target: { value: '唯一的未发送新稿。' } })
+  fireEvent.click(screen.getByRole('button', { name: '历史对话' }))
+  await clickNewConversation()
+  expect(screen.getByRole('textbox')).toHaveValue('唯一的未发送新稿。')
+  fireEvent.click(screen.getByRole('button', { name: '历史对话' }))
+  fireEvent.click(await screen.findByRole('button', { name: '继续对话：原有对话' }))
+  await screen.findByRole('button', { name: '比较建议' })
+  await clickNewConversation()
+  expect(screen.getByRole('textbox')).toHaveValue('唯一的未发送新稿。')
+  expect(client.createSettingCollectionConversation).not.toHaveBeenCalled()
+  view.unmount()
+  render(<SettingCollaborationPanel {...initial} />)
+  await ready()
+  expect(screen.getByRole('textbox')).toHaveValue('唯一的未发送新稿。')
+  expect(client.createSettingCollectionConversation).not.toHaveBeenCalled()
+  vi.mocked(client.createSettingCollectionConversation).mockImplementation(async (_id, requestId) => ({ ...conversation(), id: 'new-one', is_default: false, client_request_id: requestId }))
+  vi.mocked(client.sendSettingCollectionConversationMessage).mockImplementation(async (_id, id, payload) => ({ ...complete(payload), id, is_default: false }))
+  await act(async () => { fireEvent.click(screen.getByRole('button', { name: '发送给设定 Agent' })) })
+  expect(client.createSettingCollectionConversation).toHaveBeenCalledTimes(1)
+  expect(client.sendSettingCollectionConversationMessage).toHaveBeenCalledExactlyOnceWith('world-one', 'new-one', expect.objectContaining({ content: '唯一的未发送新稿。' }))
+})
+
+it('replays an uncertain first-send creation with its original UUID and message identity after refresh', async () => {
+  vi.mocked(client.getSettingCollectionCollaboration).mockResolvedValue(conversation([suggestion()]))
+  vi.mocked(client.createSettingCollectionConversation).mockRejectedValueOnce(new ApiError(0, 'offline', '创建响应丢失。')).mockImplementationOnce(async (_id, requestId) => ({ ...conversation(), id: 'new-one', is_default: false, client_request_id: requestId }))
+  vi.mocked(client.sendSettingCollectionConversationMessage).mockImplementation(async (_id, id, payload) => ({ ...complete(payload), id, is_default: false }))
+  const initial = props(), view = render(<SettingCollaborationPanel {...initial} />)
+  await screen.findByRole('button', { name: '比较建议' })
+  await clickNewConversation()
+  fireEvent.change(screen.getByRole('textbox'), { target: { value: '原始待发送消息。' } })
+  await act(async () => { fireEvent.click(screen.getByRole('button', { name: '发送给设定 Agent' })) })
+  const requestId = vi.mocked(client.createSettingCollectionConversation).mock.calls[0][1]
+  const messageId = JSON.parse(sessionStorage.getItem(`${legacyStorageKey}:unsent-conversation`)!).pending.id
+  expect(client.sendSettingCollectionConversationMessage).not.toHaveBeenCalled()
+  expect(screen.getByRole('alert')).toHaveTextContent('继续发送')
+  expect(screen.queryByRole('button', { name: '重新连接' })).not.toBeInTheDocument()
+  expect(screen.getByRole('button', { name: '继续发送' })).toBeEnabled()
+  fireEvent.change(screen.getByRole('textbox'), { target: { value: '后来输入的新稿。' } })
+  view.unmount()
+  render(<SettingCollaborationPanel {...initial} />)
+  await ready()
+  expect(client.createSettingCollectionConversation).toHaveBeenCalledTimes(1)
+  await clickNewConversation()
+  expect(screen.getByRole('textbox')).toHaveValue('后来输入的新稿。')
+  await act(async () => { fireEvent.click(screen.getByRole('button', { name: '继续发送' })) })
+  expect(vi.mocked(client.createSettingCollectionConversation).mock.calls[1][1]).toBe(requestId)
+  expect(client.sendSettingCollectionConversationMessage).toHaveBeenCalledExactlyOnceWith('world-one', 'new-one', { client_message_id: messageId, content: '原始待发送消息。' })
+  expect(screen.getByRole('textbox')).toHaveValue('后来输入的新稿。')
+  expect(sessionStorage.getItem(`${legacyStorageKey}:pending-create`)).toBeNull()
+})
+
+it('uses a fresh local lifecycle and distinct server conversations for two explicit first sends', async () => {
+  vi.mocked(client.getSettingCollectionCollaboration).mockResolvedValue(conversation([suggestion()]))
+  let number = 0
+  vi.mocked(client.createSettingCollectionConversation).mockImplementation(async (_id, requestId) => ({ ...conversation(), id: `created-${++number}`, is_default: false, client_request_id: requestId }))
+  vi.mocked(client.sendSettingCollectionConversationMessage).mockImplementation(async (_id, id, payload) => ({ ...complete(payload), id, is_default: false }))
+  render(<SettingCollaborationPanel {...props()} />)
+  await screen.findByRole('button', { name: '比较建议' })
+  await clickNewConversation()
+  const firstInput = screen.getByRole('textbox')
+  fireEvent.change(firstInput, { target: { value: '第一个新对话。' } })
+  await act(async () => { fireEvent.click(screen.getByRole('button', { name: '发送给设定 Agent' })) })
+  expect(client.sendSettingCollectionConversationMessage).toHaveBeenLastCalledWith('world-one', 'created-1', expect.objectContaining({ content: '第一个新对话。' }))
+  await clickNewConversation()
+  expect(screen.getByRole('textbox')).not.toBe(firstInput)
+  expect(screen.getByRole('textbox')).toHaveValue('')
+  expect(screen.queryByRole('button', { name: '比较建议' })).not.toBeInTheDocument()
+  expect(client.createSettingCollectionConversation).toHaveBeenCalledTimes(1)
+  fireEvent.change(screen.getByRole('textbox'), { target: { value: '第二个新对话。' } })
+  await act(async () => { fireEvent.click(screen.getByRole('button', { name: '发送给设定 Agent' })) })
+  expect(client.sendSettingCollectionConversationMessage).toHaveBeenLastCalledWith('world-one', 'created-2', expect.objectContaining({ content: '第二个新对话。' }))
+  expect(vi.mocked(client.createSettingCollectionConversation).mock.calls[0][1]).not.toBe(vi.mocked(client.createSettingCollectionConversation).mock.calls[1][1])
+  expect(JSON.parse(sessionStorage.getItem(`${legacyStorageKey}:conversation:created-1`)!).pending).toBeNull()
+})
+
+it('opens a fresh local draft from history while the previous first message still awaits its ACK', async () => {
+  let release!: (value: client.SettingCollaboration) => void
+  const used = conversation([suggestion()])
+  vi.mocked(client.getSettingCollectionCollaboration).mockResolvedValue(used)
+  vi.mocked(client.listSettingCollectionConversations).mockResolvedValue({ items: [{ ...used, message_count: 1, preview: '已有讨论' }], next_offset: null })
+  vi.mocked(client.getSettingCollectionConversation).mockImplementation(async (_id, id) => id === 'created-A' ? { ...conversation(), id, is_default: false } : used)
+  vi.mocked(client.createSettingCollectionConversation).mockImplementation(async (_id, requestId) => ({ ...conversation(), id: 'created-A', is_default: false, client_request_id: requestId }))
+  vi.mocked(client.sendSettingCollectionConversationMessage).mockImplementation(() => new Promise(resolve => { release = resolve }))
+  render(<SettingCollaborationPanel {...props()} />)
+  await screen.findByRole('button', { name: '比较建议' })
+  await clickNewConversation()
+  fireEvent.change(screen.getByRole('textbox'), { target: { value: 'A 正在等待首条消息回复。' } })
+  await act(async () => { fireEvent.click(screen.getByRole('button', { name: '发送给设定 Agent' })) })
+  const payload = vi.mocked(client.sendSettingCollectionConversationMessage).mock.calls[0][2]
+  fireEvent.click(screen.getByRole('button', { name: '历史对话' }))
+  fireEvent.click(await screen.findByRole('button', { name: '继续对话：原有对话' }))
+  await screen.findByRole('button', { name: '比较建议' })
+  await clickNewConversation()
+  expect(sessionStorage.getItem(`${legacyStorageKey}:active-conversation`)).toBe('draft')
+  expect(screen.getByRole('textbox')).toHaveValue('')
+  expect(client.createSettingCollectionConversation).toHaveBeenCalledTimes(1)
+  expect(JSON.parse(sessionStorage.getItem(`${legacyStorageKey}:conversation:created-A`)!).pending.id).toBe(payload.client_message_id)
+  fireEvent.change(screen.getByRole('textbox'), { target: { value: 'C 的新稿。' } })
+  await act(async () => { release({ ...complete(payload), id: 'created-A', is_default: false }) })
+  expect(screen.getByRole('textbox')).toHaveValue('C 的新稿。')
+})
+
+it('resolves a legacy uncertain creation before first-send instead of reusing another empty selected conversation', async () => {
+  const requestId = '2482dfc5-40e6-4bc7-833a-79615c239042'
+  sessionStorage.setItem(`${legacyStorageKey}:active-conversation`, 'conversation-one')
+  sessionStorage.setItem(storageKey, JSON.stringify({ draft: '旧空白A的草稿。', revision: 1, pending: null, acceptance: null, scrollTop: 0 }))
+  sessionStorage.setItem(`${legacyStorageKey}:pending-create`, JSON.stringify({ client_request_id: requestId }))
+  vi.mocked(client.createSettingCollectionConversation).mockImplementation(async (_id, id) => ({ ...conversation(), id: 'recovered-create', is_default: false, client_request_id: id }))
+  vi.mocked(client.sendSettingCollectionConversationMessage).mockImplementation(async (_id, id, payload) => ({ ...complete(payload), id, is_default: false }))
+  render(<SettingCollaborationPanel {...props()} />)
+  await ready()
+  await clickNewConversation()
+  expect(sessionStorage.getItem(`${legacyStorageKey}:active-conversation`)).toBe('draft')
+  expect(client.createSettingCollectionConversation).not.toHaveBeenCalled()
+  fireEvent.change(screen.getByRole('textbox'), { target: { value: '恢复创建后再发的新消息。' } })
+  await act(async () => { fireEvent.click(screen.getByRole('button', { name: '发送给设定 Agent' })) })
+  expect(client.createSettingCollectionConversation).toHaveBeenCalledExactlyOnceWith('world-one', requestId)
+  expect(client.sendSettingCollectionConversationMessage).toHaveBeenCalledExactlyOnceWith('world-one', 'recovered-create', expect.objectContaining({ content: '恢复创建后再发的新消息。' }))
+  expect(JSON.parse(sessionStorage.getItem(storageKey)!).draft).toBe('旧空白A的草稿。')
+})
+
+it('does not bind a delayed creation or send its message after another history conversation is selected', async () => {
+  let release!: (value: client.SettingCollaboration) => void
+  vi.mocked(client.getSettingCollectionCollaboration).mockResolvedValue(conversation([suggestion()]))
+  vi.mocked(client.listSettingCollectionConversations).mockResolvedValue({ items: [{ ...conversation(), message_count: 1, preview: '已有讨论' }], next_offset: null })
+  vi.mocked(client.createSettingCollectionConversation).mockImplementationOnce(() => new Promise(resolve => { release = resolve })).mockImplementationOnce(async (_id, requestId) => ({ ...conversation(), id: 'created-original', is_default: false, client_request_id: requestId }))
+  vi.mocked(client.sendSettingCollectionConversationMessage).mockImplementation(async (_id, id, payload) => ({ ...complete(payload), id, is_default: false }))
+  render(<SettingCollaborationPanel {...props()} />)
+  await screen.findByRole('button', { name: '比较建议' })
+  await clickNewConversation()
+  fireEvent.change(screen.getByRole('textbox'), { target: { value: '未绑定的原消息。' } })
+  await act(async () => { fireEvent.click(screen.getByRole('button', { name: '发送给设定 Agent' })) })
+  const requestId = vi.mocked(client.createSettingCollectionConversation).mock.calls[0][1]
+  fireEvent.click(screen.getByRole('button', { name: '历史对话' }))
+  fireEvent.click(await screen.findByRole('button', { name: '继续对话：原有对话' }))
+  await screen.findByRole('button', { name: '比较建议' })
+  const input = screen.getByRole('textbox')
+  fireEvent.change(input, { target: { value: '已有对话的新稿。' } }); input.focus()
+  await act(async () => { release({ ...conversation(), id: 'created-original', is_default: false, client_request_id: requestId }) })
+  expect(input).toHaveValue('已有对话的新稿。'); expect(input).toHaveFocus()
+  expect(client.sendSettingCollectionConversationMessage).not.toHaveBeenCalled()
+  expect(JSON.parse(sessionStorage.getItem(`${legacyStorageKey}:pending-create`)!).client_request_id).toBe(requestId)
+  await clickNewConversation()
+  expect(screen.getByRole('textbox')).toHaveValue('未绑定的原消息。')
+  await act(async () => { fireEvent.click(screen.getByRole('button', { name: '继续发送' })) })
+  expect(vi.mocked(client.createSettingCollectionConversation).mock.calls[1][1]).toBe(requestId)
+  expect(client.sendSettingCollectionConversationMessage).toHaveBeenCalledExactlyOnceWith('world-one', 'created-original', expect.objectContaining({ content: '未绑定的原消息。' }))
+})
+
+
+it('keeps an old in-flight request in its original conversation after switching and receiving its late ACK', async () => {
+  let release!: (value: client.SettingCollaboration) => void
+  vi.mocked(client.sendSettingCollectionConversationMessage).mockImplementation(() => new Promise(resolve => { release = resolve }))
+  const second = { ...conversation(), id: 'conversation-two', title: '第二段', is_default: false }
+  vi.mocked(client.listSettingCollectionConversations).mockResolvedValue({ items: [conversation(), second].map(item => ({ ...item, message_count: 0, preview: '' })), next_offset: null })
+  vi.mocked(client.getSettingCollectionConversation).mockResolvedValue(second)
+  render(<SettingCollaborationPanel {...props()} />)
+  await ready()
+  fireEvent.change(screen.getByRole('textbox'), { target: { value: '第一段进行中的请求。' } })
+  await act(async () => { fireEvent.click(screen.getByRole('button', { name: '发送给设定 Agent' })) })
+  const [collectionId, conversationId, payload] = vi.mocked(client.sendSettingCollectionConversationMessage).mock.calls[0]
+  expect([collectionId, conversationId]).toEqual(['world-one', 'conversation-one'])
+  fireEvent.click(screen.getByRole('button', { name: '历史对话' }))
+  fireEvent.click(await screen.findByRole('button', { name: '继续对话：第二段' }))
+  await ready()
+  const input = screen.getByRole('textbox')
+  fireEvent.change(input, { target: { value: '第二段的新输入。' } })
+  input.focus()
+  await act(async () => { release(complete(payload)) })
+  expect(input).toHaveValue('第二段的新输入。')
+  expect(input).toHaveFocus()
+  expect(screen.queryByRole('button', { name: '比较建议' })).not.toBeInTheDocument()
+  expect(JSON.parse(sessionStorage.getItem(storageKey)!).pending.id).toBe(payload.client_message_id)
+  vi.mocked(client.getSettingCollectionConversation).mockResolvedValue(complete(payload))
+  fireEvent.click(screen.getByRole('button', { name: '历史对话' }))
+  fireEvent.click(await screen.findByRole('button', { name: '继续对话：原有对话' }))
+  await screen.findByRole('button', { name: '比较建议' })
+  expect(JSON.parse(sessionStorage.getItem(storageKey)!).pending).toBeNull()
+  expect(screen.getByRole('textbox')).toHaveValue('')
+  expect(client.sendSettingCollectionConversationMessage).toHaveBeenCalledTimes(1)
+})
+
+it('keeps the selected conversation on refresh and never silently falls back after its load fails', async () => {
+  sessionStorage.setItem(`${legacyStorageKey}:active-conversation`, 'known-conversation')
+  vi.mocked(client.getSettingCollectionConversation).mockRejectedValue(new ApiError(503, 'offline', '选中的对话暂时无法读取。'))
+  render(<SettingCollaborationPanel {...props()} />)
+  await screen.findByRole('alert')
+  expect(client.getSettingCollectionConversation).toHaveBeenCalledExactlyOnceWith('world-one', 'known-conversation')
+  expect(client.getSettingCollectionCollaboration).not.toHaveBeenCalled()
+  expect(client.getOrCreateSettingCollectionCollaboration).not.toHaveBeenCalled()
+  expect(client.createSettingCollectionConversation).not.toHaveBeenCalled()
+  expect(screen.queryByRole('heading', { name: '一起构建这个世界' })).not.toBeInTheDocument()
+})
+
+it('blocks duplicate first sends during lazy creation and keeps genuine outside focus on its ACK', async () => {
+  let release!: (value: client.SettingCollaboration) => void
+  vi.mocked(client.getSettingCollectionCollaboration).mockResolvedValue(conversation([suggestion()]))
+  vi.mocked(client.createSettingCollectionConversation).mockImplementation(() => new Promise(resolve => { release = resolve }))
+  vi.mocked(client.sendSettingCollectionConversationMessage).mockImplementation(async (_id, id, payload) => ({ ...complete(payload), id, is_default: false }))
+  render(<><button>文稿中的其他操作</button><SettingCollaborationPanel {...props()} /></>)
+  await screen.findByRole('button', { name: '比较建议' })
+  await clickNewConversation()
+  fireEvent.change(screen.getByRole('textbox'), { target: { value: '首次发送的消息。' } })
+  await act(async () => { fireEvent.click(screen.getByRole('button', { name: '发送给设定 Agent' })) })
+  fireEvent.keyDown(screen.getByRole('textbox'), { key: 'Enter' })
+  expect(screen.getByRole('button', { name: '发送给设定 Agent' })).toBeDisabled()
+  expect(client.sendSettingCollectionConversationMessage).not.toHaveBeenCalled()
+  const outside = screen.getByRole('button', { name: '文稿中的其他操作' })
+  outside.focus()
+  await act(async () => { release({ ...conversation(), id: 'new-one', is_default: false, client_request_id: vi.mocked(client.createSettingCollectionConversation).mock.calls[0][1] }) })
+  expect(outside).toHaveFocus()
+  expect(client.createSettingCollectionConversation).toHaveBeenCalledTimes(1)
+  expect(client.sendSettingCollectionConversationMessage).toHaveBeenCalledTimes(1)
+  expect(screen.getByRole('textbox')).toHaveValue('')
+})
+
+
+it('focuses the composer when first-send creation leaves disabled-send focus on the body', async () => {
+  let release!: (value: client.SettingCollaboration) => void
+  vi.mocked(client.getSettingCollectionCollaboration).mockResolvedValue(conversation([suggestion()]))
+  vi.mocked(client.createSettingCollectionConversation).mockImplementation(() => new Promise(resolve => { release = resolve }))
+  vi.mocked(client.sendSettingCollectionConversationMessage).mockImplementation(async (_id, id, payload) => ({ ...complete(payload), id, is_default: false }))
+  render(<SettingCollaborationPanel {...props()} />)
+  await screen.findByRole('button', { name: '比较建议' })
+  fireEvent.click(screen.getByRole('button', { name: '历史对话' }))
+  await clickNewConversation()
+  fireEvent.change(screen.getByRole('textbox'), { target: { value: '第一次明确发送。' } })
+  await act(async () => { fireEvent.click(screen.getByRole('button', { name: '发送给设定 Agent' })) })
+  expect(screen.getByRole('button', { name: '发送给设定 Agent' })).toBeDisabled()
+  document.body.tabIndex = -1; document.body.focus(); document.body.removeAttribute('tabindex')
+  expect(document.activeElement).toBe(document.body)
+  await act(async () => { release({ ...conversation(), id: 'new-from-history', is_default: false, client_request_id: vi.mocked(client.createSettingCollectionConversation).mock.calls[0][1] }) })
+  expect(screen.getByRole('textbox')).toHaveValue('')
+  expect(screen.getByRole('textbox')).toHaveFocus()
+  expect(client.sendSettingCollectionConversationMessage).toHaveBeenCalledTimes(1)
+})
+
+
+it('never sends after a mismatched lazy-create ACK and retains both original identities for retry', async () => {
+  vi.mocked(client.getSettingCollectionCollaboration).mockResolvedValue(conversation([suggestion()]))
+  vi.mocked(client.createSettingCollectionConversation).mockResolvedValue({ ...conversation(), id: 'wrong-new', is_default: false, client_request_id: 'unrelated' })
+  const initial = props(), view = render(<SettingCollaborationPanel {...initial} />)
+  await screen.findByRole('button', { name: '比较建议' })
+  await clickNewConversation()
+  fireEvent.change(screen.getByRole('textbox'), { target: { value: '不能丢的新稿。' } })
+  await act(async () => { fireEvent.click(screen.getByRole('button', { name: '发送给设定 Agent' })) })
+  expect(screen.getByRole('alert')).toHaveTextContent('新建对话的响应不匹配')
+  const requestId = vi.mocked(client.createSettingCollectionConversation).mock.calls[0][1]
+  const pending = JSON.parse(sessionStorage.getItem(`${legacyStorageKey}:unsent-conversation`)!).pending
+  view.unmount()
+  render(<SettingCollaborationPanel {...initial} />)
+  await ready()
+  expect(client.createSettingCollectionConversation).toHaveBeenCalledTimes(1)
+  await act(async () => { fireEvent.click(screen.getByRole('button', { name: '继续发送' })) })
+  expect(vi.mocked(client.createSettingCollectionConversation).mock.calls[1][1]).toBe(requestId)
+  expect(JSON.parse(sessionStorage.getItem(`${legacyStorageKey}:unsent-conversation`)!).pending.id).toBe(pending.id)
+  expect(client.sendSettingCollectionConversationMessage).not.toHaveBeenCalled()
+  expect(sessionStorage.getItem(`${legacyStorageKey}:active-conversation`)).toBe('draft')
+})
+
+
+it('loads more history explicitly without creating a conversation', async () => {
+  const item = { id: 'conversation-one', title: '第一段', is_default: true, created_at: conversation().created_at, updated_at: conversation().updated_at, message_count: 0, preview: '' }
+  vi.mocked(client.listSettingCollectionConversations).mockResolvedValueOnce({ items: [item], next_offset: 30 }).mockResolvedValueOnce({ items: [{ ...item, id: 'conversation-two', title: '第二段' }], next_offset: null })
+  render(<SettingCollaborationPanel {...props()} />)
+  await ready()
+  fireEvent.change(screen.getByRole('textbox'), { target: { value: '让新建保留此稿。' } })
+  fireEvent.click(screen.getByRole('button', { name: '历史对话' }))
+  await screen.findByRole('button', { name: '继续对话：第一段' })
+  expect(client.listSettingCollectionConversations).toHaveBeenCalledTimes(1)
+  await act(async () => { fireEvent.click(screen.getByRole('button', { name: '加载更多对话' })) })
+  expect(client.listSettingCollectionConversations).toHaveBeenLastCalledWith('world-one', 30)
+  expect(screen.getByRole('button', { name: '继续对话：第二段' })).toBeInTheDocument()
+  expect(client.createSettingCollectionConversation).not.toHaveBeenCalled()
+})
+
+it('keeps an existing empty server draft reachable through New after history hides that empty conversation', async () => {
+  sessionStorage.setItem(legacyStorageKey, JSON.stringify({ draft: '早期默认对话的草稿。', revision: 3, pending: null, acceptance: null, scrollTop: 32 }))
+  const used = { ...conversation([suggestion()]), id: 'used-session', title: '已使用的对话', is_default: false }
+  vi.mocked(client.listSettingCollectionConversations).mockResolvedValue({ items: [{ ...used, message_count: 1, preview: '已使用' }], next_offset: null })
+  vi.mocked(client.getSettingCollectionConversation).mockImplementation(async (_id, id) => id === used.id ? used : conversation())
+  const initial = props(), view = render(<SettingCollaborationPanel {...initial} />)
+  await ready()
+  expect(screen.getByRole('textbox')).toHaveValue('早期默认对话的草稿。')
+  expect(sessionStorage.getItem(legacyStorageKey)).toBeNull()
+  fireEvent.click(screen.getByRole('button', { name: '历史对话' }))
+  fireEvent.click(await screen.findByRole('button', { name: '继续对话：已使用的对话' }))
+  await screen.findByRole('button', { name: '比较建议' })
+  view.unmount()
+  render(<SettingCollaborationPanel {...initial} />)
+  await screen.findByRole('button', { name: '比较建议' })
+  await clickNewConversation()
+  await ready()
+  expect(screen.getByRole('textbox')).toHaveValue('早期默认对话的草稿。')
+  expect(client.createSettingCollectionConversation).not.toHaveBeenCalled()
+  vi.mocked(client.sendSettingCollectionConversationMessage).mockImplementation(async (_id, id, payload) => ({ ...complete(payload), id }))
+  await act(async () => { fireEvent.click(screen.getByRole('button', { name: '发送给设定 Agent' })) })
+  expect(client.sendSettingCollectionConversationMessage).toHaveBeenCalledWith('world-one', 'conversation-one', expect.objectContaining({ content: '早期默认对话的草稿。' }))
+  expect(client.createSettingCollectionConversation).not.toHaveBeenCalled()
+})
+
+
+it('preserves both journals without mixing pending identities when legacy and target recovery conflict', async () => {
+  const original = { id: 'legacy-request', text: '同文的新输入。', draft: '同文的新输入。', revision: 4, sent: true, payload: { client_message_id: 'legacy-request', content: '同文的新输入。' } }
+  const legacy = JSON.stringify({ draft: original.draft, revision: 4, pending: original, acceptance: null, scrollTop: 10 })
+  const target = JSON.stringify({ draft: original.draft, revision: 4, pending: { ...original, id: 'target-request', payload: { ...original.payload, client_message_id: 'target-request' } }, acceptance: { proposalId: 'another-proposal', base: null }, scrollTop: 30 })
+  sessionStorage.setItem(legacyStorageKey, legacy); sessionStorage.setItem(storageKey, target)
+  vi.mocked(client.getSettingCollectionCollaboration).mockResolvedValue(complete(original.payload))
+  render(<SettingCollaborationPanel {...props()} />)
+  expect(await screen.findByRole('alert')).toHaveTextContent('两份')
+  expect(sessionStorage.getItem(legacyStorageKey)).toBe(legacy)
+  expect(sessionStorage.getItem(storageKey)).toBe(target)
+  expect(screen.getByRole('textbox')).toHaveValue(original.draft)
+  expect(screen.getByRole('button', { name: '发送给设定 Agent' })).toBeDisabled()
+  expect(client.sendSettingCollectionConversationMessage).not.toHaveBeenCalled()
+})
+
+it('enters an unused local draft after finishing an unknown attempt without creating an empty server record', async () => {
+  vi.mocked(client.sendSettingCollectionCollaborationMessage).mockRejectedValue(new ApiError(0, 'offline', '结果未确认。'))
+  render(<SettingCollaborationPanel {...props()} />)
+  await ready()
+  fireEvent.change(screen.getByRole('textbox'), { target: { value: '结束等待但不能当成空白历史。' } })
+  await act(async () => { fireEvent.click(screen.getByRole('button', { name: '发送给设定 Agent' })) })
+  const payload = vi.mocked(client.sendSettingCollectionCollaborationMessage).mock.calls[0][1]
+  vi.mocked(client.finishSettingCollectionCollaborationAttempt).mockResolvedValue({ ...conversation(), attempts: [attemptFor(payload, 'finished')] })
+  await act(async () => { fireEvent.click(screen.getByRole('button', { name: '结束等待' })) })
+  fireEvent.change(screen.getByRole('textbox'), { target: { value: '' } })
+  await clickNewConversation()
+  expect(client.createSettingCollectionConversation).not.toHaveBeenCalled()
+  expect(sessionStorage.getItem(`${legacyStorageKey}:active-conversation`)).toBe('draft')
+  expect(screen.getByRole('textbox')).toHaveValue('')
+  expect(JSON.parse(sessionStorage.getItem(storageKey)!).pending).toBeNull()
+})
+
+
+it('keeps the manuscript focus restored by its parent when closing instead of returning to the menu trigger', async () => {
+  function Host() {
+    const [open, setOpen] = useState(false), body = useRef<HTMLTextAreaElement>(null)
+    useLayoutEffect(() => { if (!open) body.current?.focus() }, [open])
+    return <><textarea ref={body} aria-label="当前正文" /><button onClick={() => setOpen(true)}>设定集菜单</button>{open && <SettingCollaborationPanel {...props({ onClose: () => setOpen(false) })} />}</>
+  }
+  render(<Host />)
+  const trigger = screen.getByRole('button', { name: '设定集菜单' })
+  trigger.focus(); fireEvent.click(trigger)
+  await ready()
+  await act(async () => { fireEvent.click(screen.getByRole('button', { name: '关闭设定协作' })) })
+  expect(screen.getByRole('textbox', { name: '当前正文' })).toHaveFocus()
+})
+
+it('keeps a partial user-only exchange pending and never acknowledges its comments', async () => {
+  vi.mocked(client.sendSettingCollectionCollaborationMessage).mockImplementation(async (_id, payload) => ({ ...conversation([userMessage(payload.client_message_id, payload.content), suggestion()]), attempts: [attemptFor(payload)] }))
+  const sent = vi.fn()
+  render(<SettingCollaborationPanel {...props({ feedback: '评论快照', onSent: sent })} />)
+  await ready()
+  fireEvent.change(screen.getByRole('textbox'), { target: { value: '请继续。' } })
+  await act(async () => { fireEvent.click(screen.getByRole('button', { name: '发送给设定 Agent' })) })
+  expect(screen.getByRole('textbox')).toHaveValue('请继续。')
+  expect(screen.getByRole('button', { name: '检查结果' })).toBeEnabled()
+  expect(JSON.parse(sessionStorage.getItem(storageKey)!).pending).not.toBeNull()
+  expect(sent).not.toHaveBeenCalled()
+})
+
+it('restores prepared and saved results without automatic provider requests or preparation', async () => {
+  const payload = { client_message_id: 'original-request', content: '找回灯塔。' }
+  vi.mocked(client.getSettingCollectionCollaboration).mockResolvedValue({ ...conversation(), attempts: [attemptFor(payload, 'prepared')] })
+  vi.mocked(client.resumeSettingCollectionCollaborationAttempt).mockResolvedValue({ ...conversation(), attempts: [attemptFor(payload, 'result_saved')] })
+  const initial = props()
+  render(<SettingCollaborationPanel {...initial} />)
+  await screen.findByRole('button', { name: '继续发送' })
+  expect(client.sendSettingCollectionCollaborationMessage).not.toHaveBeenCalled()
+  expect(initial.onPrepare).not.toHaveBeenCalled()
+  await act(async () => { fireEvent.click(screen.getByRole('button', { name: '继续发送' })) })
+  expect(client.resumeSettingCollectionCollaborationAttempt).toHaveBeenCalledExactlyOnceWith('world-one', 'attempt-one')
+  expect(screen.getByRole('button', { name: '恢复结果' })).toBeEnabled()
+  vi.mocked(client.resumeSettingCollectionCollaborationAttempt).mockResolvedValue(complete(payload))
+  await act(async () => { fireEvent.click(screen.getByRole('button', { name: '恢复结果' })) })
+  expect(screen.getByRole('textbox')).toHaveValue('')
+  expect(initial.onPrepare).not.toHaveBeenCalled()
+})
+
+it('preserves retyped identical input across reload and exact completion', async () => {
+  vi.mocked(client.sendSettingCollectionCollaborationMessage).mockRejectedValue(new ApiError(0, 'offline', '响应丢失。'))
+  const initial = props(), view = render(<SettingCollaborationPanel {...initial} />)
+  await ready()
+  fireEvent.change(screen.getByRole('textbox'), { target: { value: '同一段新输入。' } })
+  await act(async () => { fireEvent.click(screen.getByRole('button', { name: '发送给设定 Agent' })) })
+  const payload = vi.mocked(client.sendSettingCollectionCollaborationMessage).mock.calls[0][1]
+  fireEvent.change(screen.getByRole('textbox'), { target: { value: '' } })
+  fireEvent.change(screen.getByRole('textbox'), { target: { value: payload.content } })
+  view.unmount()
+  vi.mocked(client.getSettingCollectionCollaboration).mockResolvedValue(complete(payload))
+  render(<SettingCollaborationPanel {...initial} />)
+  await screen.findByRole('button', { name: '比较建议' })
+  expect(screen.getByRole('textbox')).toHaveValue(payload.content)
+  expect(JSON.parse(sessionStorage.getItem(storageKey)!).pending).toBeNull()
+})
+
+it('ends an unknown request with its original payload and waits for a new explicit send', async () => {
+  vi.mocked(client.sendSettingCollectionCollaborationMessage).mockRejectedValue(new ApiError(0, 'offline', '结果未确认。'))
+  const sent = vi.fn()
+  render(<SettingCollaborationPanel {...props({ onSent: sent })} />)
+  await ready()
+  fireEvent.change(screen.getByRole('textbox'), { target: { value: '保留这条想法。' } })
+  await act(async () => { fireEvent.click(screen.getByRole('button', { name: '发送给设定 Agent' })) })
+  const payload = vi.mocked(client.sendSettingCollectionCollaborationMessage).mock.calls[0][1]
+  vi.mocked(client.finishSettingCollectionCollaborationAttempt).mockResolvedValue({ ...conversation(), attempts: [attemptFor(payload, 'finished')] })
+  await act(async () => { fireEvent.click(screen.getByRole('button', { name: '结束等待' })) })
+  expect(client.finishSettingCollectionCollaborationAttempt).toHaveBeenCalledExactlyOnceWith('world-one', payload)
+  expect(screen.getByRole('textbox')).toHaveValue(payload.content)
+  expect(client.sendSettingCollectionCollaborationMessage).toHaveBeenCalledTimes(1)
+  expect(sent).not.toHaveBeenCalled()
+  await act(async () => { fireEvent.click(screen.getByRole('button', { name: '发送给设定 Agent' })) })
+  expect(vi.mocked(client.sendSettingCollectionCollaborationMessage).mock.calls[1][1].client_message_id).not.toBe(payload.client_message_id)
+})
+
+it('never starts generation after unmounting during preparation', async () => {
+  let finish!: (value: boolean) => void
+  const view = render(<SettingCollaborationPanel {...props({ onPrepare: vi.fn(() => new Promise<boolean>(resolve => { finish = resolve })) })} />)
+  await ready()
+  fireEvent.change(screen.getByRole('textbox'), { target: { value: '等待保存。' } })
+  fireEvent.click(screen.getByRole('button', { name: '发送给设定 Agent' }))
+  view.unmount()
+  await act(async () => { finish(true) })
+  expect(client.sendSettingCollectionCollaborationMessage).not.toHaveBeenCalled()
+})
+
+it.each(['missing-attempts', 'missing-assistant', 'wrong-user-content', 'wrong-user-id', 'wrong-assistant-attempt', 'third-message', 'not-completed'])('retains the request when completion evidence is %s', async flaw => {
+  vi.mocked(client.sendSettingCollectionCollaborationMessage).mockImplementation(async (_id, payload) => {
+    const result = complete(payload)
+    if (flaw === 'missing-attempts') result.attempts = []
+    if (flaw === 'missing-assistant') result.messages.pop()
+    if (flaw === 'wrong-user-content') result.messages[0].content = '另一条请求'
+    if (flaw === 'wrong-user-id') result.attempts[0].user_message_id = 'another-user'
+    if (flaw === 'wrong-assistant-attempt') result.messages[1].attempt_id = 'another-attempt'
+    if (flaw === 'third-message') result.messages.push({ ...result.messages[1], id: 'third-message' })
+    if (flaw === 'not-completed') result.attempts[0].status = 'dispatched'
+    return result
+  })
+  const sent = vi.fn()
+  render(<SettingCollaborationPanel {...props({ onSent: sent, feedback: '旧评论' })} />)
+  await ready()
+  fireEvent.change(screen.getByRole('textbox'), { target: { value: '准确的输入。' } })
+  await act(async () => { fireEvent.click(screen.getByRole('button', { name: '发送给设定 Agent' })) })
+  expect(screen.getByRole('textbox')).toHaveValue('准确的输入。')
+  expect(JSON.parse(sessionStorage.getItem(storageKey)!).pending).not.toBeNull()
+  expect(sent).not.toHaveBeenCalled()
+})
+
+it('fences an in-flight first send before its late response and preserves a newer exchange', async () => {
+  let release!: (value: client.SettingCollaboration) => void
+  vi.mocked(client.sendSettingCollectionCollaborationMessage).mockImplementationOnce(() => new Promise(resolve => { release = resolve })).mockImplementationOnce(async (_id, payload) => complete(payload))
+  const initial = props()
+  render(<SettingCollaborationPanel {...initial} />)
+  await ready()
+  const input = screen.getByRole('textbox')
+  fireEvent.change(input, { target: { value: '迟到的请求。' } })
+  await act(async () => { fireEvent.click(screen.getByRole('button', { name: '发送给设定 Agent' })) })
+  const original = vi.mocked(client.sendSettingCollectionCollaborationMessage).mock.calls[0][1]
+  vi.mocked(client.finishSettingCollectionCollaborationAttempt).mockResolvedValue({ ...conversation(), attempts: [attemptFor(original, 'finished')] })
+  expect(screen.getByRole('button', { name: '结束等待' })).toBeEnabled()
+  await act(async () => { fireEvent.click(screen.getByRole('button', { name: '结束等待' })) })
+  fireEvent.change(input, { target: { value: '新的请求。' } })
+  await act(async () => { fireEvent.click(screen.getByRole('button', { name: '发送给设定 Agent' })) })
+  fireEvent.change(input, { target: { value: '后续输入。' } })
+  input.focus()
+  await act(async () => { release(complete(original)) })
+  expect(input).toHaveValue('后续输入。')
+  expect(input).toHaveFocus()
+  expect(screen.queryByText('迟到的请求。', { selector: 'p' })).not.toBeInTheDocument()
+  expect(screen.getByText('新的请求。', { selector: 'p' })).toBeInTheDocument()
+  expect(initial.onPrepare).toHaveBeenCalledTimes(2)
+})
+
+it('preserves a blocked new draft while recovering an older server request', async () => {
+  const oldPayload = { client_message_id: 'older-request', content: '原请求。' }
+  vi.mocked(client.sendSettingCollectionCollaborationMessage).mockRejectedValue(new ApiError(409, 'setting_agent_attempt_pending', '上一条请求尚未结束。'))
+  render(<SettingCollaborationPanel {...props()} />)
+  await ready()
+  fireEvent.change(screen.getByRole('textbox'), { target: { value: '新的输入。' } })
+  vi.mocked(client.getSettingCollectionCollaboration).mockResolvedValue({ ...conversation(), attempts: [attemptFor(oldPayload)] })
+  await act(async () => { fireEvent.click(screen.getByRole('button', { name: '发送给设定 Agent' })) })
+  vi.mocked(client.getSettingCollectionCollaborationAttempt).mockResolvedValue(attemptFor(oldPayload, 'completed'))
+  vi.mocked(client.getSettingCollectionCollaboration).mockResolvedValue(complete(oldPayload))
+  await act(async () => { fireEvent.click(screen.getByRole('button', { name: '检查结果' })) })
+  expect(screen.getByRole('textbox')).toHaveValue('新的输入。')
+  expect(JSON.parse(sessionStorage.getItem(storageKey)!).pending).toBeNull()
+})
+
+it.each([
+  ['prepared', '仅在本地的新稿。'], ['prepared', '服务器中的原请求。'], ['prepared', ''],
+  ['dispatched', '仅在本地的新稿。'], ['dispatched', '服务器中的原请求。'], ['dispatched', ''],
+] as const)('preserves local draft "%s / %s" when restoring a server request and refreshing', async (status, localDraft) => {
+  const payload = { client_message_id: 'server-request', content: '服务器中的原请求。' }
+  sessionStorage.setItem(storageKey, JSON.stringify({ draft: localDraft, revision: 9, pending: null, acceptance: null, scrollTop: 0 }))
+  vi.mocked(client.getSettingCollectionCollaboration).mockResolvedValue({ ...conversation(), attempts: [attemptFor(payload, status)] })
+  const initial = props(), first = render(<SettingCollaborationPanel {...initial} />)
+  await screen.findByRole('button', { name: '检查结果' })
+  expect(screen.getByRole('textbox')).toHaveValue(localDraft)
+  expect(JSON.parse(sessionStorage.getItem(storageKey)!).pending.revision).toBeUndefined()
+  first.unmount()
+  vi.mocked(client.getSettingCollectionCollaboration).mockResolvedValue(complete(payload))
+  render(<SettingCollaborationPanel {...initial} />)
+  await screen.findByRole('button', { name: '比较建议' })
+  expect(screen.getByRole('textbox')).toHaveValue(localDraft)
+  expect(JSON.parse(sessionStorage.getItem(storageKey)!).pending).toBeNull()
+  expect(initial.onPrepare).not.toHaveBeenCalled()
+})
+
+it('preserves same-text input across a blocked new send, server recovery, refresh, and old completion', async () => {
+  const original = { client_message_id: 'older-server-request', content: '作者重新输入了同样的话。' }
+  vi.mocked(client.sendSettingCollectionCollaborationMessage).mockRejectedValue(new ApiError(409, 'setting_agent_attempt_pending', '上一条请求尚未结束。'))
+  const initial = props(), view = render(<SettingCollaborationPanel {...initial} />)
+  await ready()
+  fireEvent.change(screen.getByRole('textbox'), { target: { value: original.content } })
+  vi.mocked(client.getSettingCollectionCollaboration).mockResolvedValue({ ...conversation(), attempts: [attemptFor(original)] })
+  await act(async () => { fireEvent.click(screen.getByRole('button', { name: '发送给设定 Agent' })) })
+  expect(JSON.parse(sessionStorage.getItem(storageKey)!).pending.revision).toBeUndefined()
+  view.unmount()
+  vi.mocked(client.getSettingCollectionCollaboration).mockResolvedValue(complete(original))
+  render(<SettingCollaborationPanel {...initial} />)
+  await screen.findByRole('button', { name: '比较建议' })
+  expect(screen.getByRole('textbox')).toHaveValue(original.content)
+  expect(JSON.parse(sessionStorage.getItem(storageKey)!).pending).toBeNull()
+  expect(client.sendSettingCollectionCollaborationMessage).toHaveBeenCalledTimes(1)
+})
+
+it('does not bind text entered during the initial GET to an older server attempt', async () => {
+  const payload = { client_message_id: 'older-request', content: '与旧请求相同的新稿。' }
+  let release!: (value: client.SettingCollaboration) => void
+  vi.mocked(client.getSettingCollectionCollaboration).mockImplementationOnce(() => new Promise(resolve => { release = resolve }))
+  render(<SettingCollaborationPanel {...props()} />)
+  const input = screen.getByRole('textbox')
+  fireEvent.change(input, { target: { value: payload.content } })
+  await act(async () => { release({ ...conversation(), attempts: [attemptFor(payload)] }) })
+  expect(JSON.parse(sessionStorage.getItem(storageKey)!).pending.revision).toBeUndefined()
+  vi.mocked(client.getSettingCollectionCollaborationAttempt).mockResolvedValue(attemptFor(payload, 'completed'))
+  vi.mocked(client.getSettingCollectionCollaboration).mockResolvedValue(complete(payload))
+  await act(async () => { fireEvent.click(screen.getByRole('button', { name: '检查结果' })) })
+  expect(input).toHaveValue(payload.content)
+  expect(JSON.parse(sessionStorage.getItem(storageKey)!).pending).toBeNull()
+})
 
 it('keeps one collection conversation and composer when entries or categories change', async () => {
   const initial = props(), view = render(<SettingCollaborationPanel {...initial} />)
@@ -30,12 +627,12 @@ it('keeps one collection conversation and composer when entries or categories ch
   expect(screen.getByRole('textbox')).toBe(input)
   expect(input).toHaveValue('把地理与守灯人的故事联系起来。')
   expect(screen.queryByRole('heading', { name: '新的角色名' })).not.toBeInTheDocument()
-  expect(client.getOrCreateSettingCollectionCollaboration).toHaveBeenCalledExactlyOnceWith('world-one')
+  expect(client.getSettingCollectionCollaboration).toHaveBeenCalledExactlyOnceWith('world-one')
 })
 
 it('can begin with an empty collection and flushes writing only on an explicit generation request', async () => {
   const prepare = vi.fn().mockResolvedValue(true)
-  vi.mocked(client.sendSettingCollectionCollaborationMessage).mockImplementation(async (_collection, payload) => conversation([userMessage(payload.client_message_id, payload.content), newSuggestion()]))
+  vi.mocked(client.sendSettingCollectionCollaborationMessage).mockImplementation(async (_collection, payload) => complete(payload, newSuggestion()))
   render(<SettingCollaborationPanel {...props({ notes: [], onPrepare: prepare })} />)
   await ready()
   expect(prepare).not.toHaveBeenCalled()
@@ -65,21 +662,23 @@ it('persists one collection request before flushing and preserves text typed whi
   const payload = vi.mocked(client.sendSettingCollectionCollaborationMessage).mock.calls[0][1]
   expect(payload).toEqual({ client_message_id: cached.pending.id, content: '补充灯塔的细节。' })
   fireEvent.change(input, { target: { value: '我接着写下一条想法。' } })
-  await act(async () => { finishSend(conversation([userMessage(payload.client_message_id, payload.content), suggestion()])) })
+  await act(async () => { finishSend(complete(payload)) })
   expect(input).toHaveValue('我接着写下一条想法。')
   expect(JSON.parse(sessionStorage.getItem(storageKey)!).pending).toBeNull()
 })
 
-it('retries an uncertain request with its collection message identity after other entries change', async () => {
-  vi.mocked(client.sendSettingCollectionCollaborationMessage).mockRejectedValueOnce(new ApiError(0, 'offline', '连接失败，可以重试。')).mockImplementationOnce(async (_collection, payload) => conversation([userMessage(payload.client_message_id, payload.content)]))
+it('checks an uncertain request without resending after other entries change', async () => {
+  vi.mocked(client.sendSettingCollectionCollaborationMessage).mockRejectedValueOnce(new ApiError(0, 'offline', '连接失败，可以检查结果。'))
   const initial = props(), view = render(<SettingCollaborationPanel {...initial} />)
   await ready()
   fireEvent.change(screen.getByRole('textbox'), { target: { value: '请补充。' } })
   await act(async () => { fireEvent.click(screen.getByRole('button', { name: '发送给设定 Agent' })) })
   const first = vi.mocked(client.sendSettingCollectionCollaborationMessage).mock.calls[0][1]
   view.rerender(<SettingCollaborationPanel {...initial} notes={[{ ...other, body: '我后来写的角色正文', versionId: 'later' }]} />)
-  await act(async () => { fireEvent.click(screen.getByRole('button', { name: '重试上一条' })) })
-  expect(vi.mocked(client.sendSettingCollectionCollaborationMessage).mock.calls[1][1]).toEqual(first)
+  vi.mocked(client.getSettingCollectionCollaboration).mockResolvedValue(complete(first))
+  await act(async () => { fireEvent.click(screen.getByRole('button', { name: '检查结果' })) })
+  expect(client.sendSettingCollectionCollaborationMessage).toHaveBeenCalledTimes(1)
+  expect(JSON.parse(sessionStorage.getItem(storageKey)!).pending).toBeNull()
   expect(initial.onPrepare).toHaveBeenCalledTimes(1)
 })
 
@@ -91,7 +690,7 @@ it('reconciles a committed message after a lost response and reload without gene
   await act(async () => { fireEvent.click(screen.getByRole('button', { name: '发送给设定 Agent' })) })
   const sent = vi.mocked(client.sendSettingCollectionCollaborationMessage).mock.calls[0][1]
   view.unmount()
-  vi.mocked(client.getOrCreateSettingCollectionCollaboration).mockResolvedValue(conversation([userMessage(sent.client_message_id, sent.content), suggestion()]))
+  vi.mocked(client.getSettingCollectionCollaboration).mockResolvedValue(complete(sent))
   render(<SettingCollaborationPanel {...initial} />)
   await screen.findByRole('button', { name: '比较建议' })
   expect(screen.getByRole('textbox')).toHaveValue('')
@@ -101,7 +700,7 @@ it('reconciles a committed message after a lost response and reload without gene
 
 it('adopts a proposal for its actual target even when that entry is not the first note', async () => {
   const message = { ...suggestion(), proposal: { ...proposal, target_document_id: 'doc-two', base_version_id: 'version-two', title: other.title, category: other.category, proposed_content: '守灯人守望整个海湾。' }, base_content: other.body, base_title: other.title }
-  vi.mocked(client.getOrCreateSettingCollectionCollaboration).mockResolvedValue(conversation([message]))
+  vi.mocked(client.getSettingCollectionCollaboration).mockResolvedValue(conversation([message]))
   const result = accepted(message, 'doc-two'), apply = vi.fn(() => true)
   vi.mocked(client.acceptSettingCollectionCollaborationProposal).mockResolvedValue(result)
   render(<SettingCollaborationPanel {...props({ onApply: apply })} />)
@@ -115,7 +714,7 @@ it('adopts a proposal for its actual target even when that entry is not the firs
 
 it('creates a proposed entry only after comparison and explicit adoption', async () => {
   const message = newSuggestion(), result = accepted(message, 'new-document'), apply = vi.fn(() => true)
-  vi.mocked(client.getOrCreateSettingCollectionCollaboration).mockResolvedValue(conversation([message]))
+  vi.mocked(client.getSettingCollectionCollaboration).mockResolvedValue(conversation([message]))
   vi.mocked(client.acceptSettingCollectionCollaborationProposal).mockResolvedValue(result)
   render(<SettingCollaborationPanel {...props({ notes: [], onApply: apply })} />)
   expect(await screen.findByRole('button', { name: '采纳建议' })).toBeDisabled()
@@ -128,7 +727,7 @@ it('creates a proposed entry only after comparison and explicit adoption', async
 })
 
 it('refuses to adopt if flushing reveals newer text in the actual target', async () => {
-  vi.mocked(client.getOrCreateSettingCollectionCollaboration).mockResolvedValue(conversation([suggestion()]))
+  vi.mocked(client.getSettingCollectionCollaboration).mockResolvedValue(conversation([suggestion()]))
   let finish!: (value: boolean) => void
   const initial = props({ onPrepare: vi.fn(() => new Promise<boolean>(resolve => { finish = resolve })) })
   const view = render(<SettingCollaborationPanel {...initial} />)
@@ -142,7 +741,7 @@ it('refuses to adopt if flushing reveals newer text in the actual target', async
 })
 
 it('disables stale proposals for a deleted target while retaining their suggested text', async () => {
-  vi.mocked(client.getOrCreateSettingCollectionCollaboration).mockResolvedValue(conversation([suggestion()]))
+  vi.mocked(client.getSettingCollectionCollaboration).mockResolvedValue(conversation([suggestion()]))
   render(<SettingCollaborationPanel {...props({ notes: [other] })} />)
   fireEvent.click(await screen.findByRole('button', { name: '比较建议' }))
   expect(screen.getByText(proposal.proposed_content)).toBeInTheDocument()
@@ -153,7 +752,7 @@ it('disables stale proposals for a deleted target while retaining their suggeste
 
 it('retains newer author text when adoption commits while writing continues', async () => {
   let finish!: (value: client.SettingCollaborationAcceptance) => void
-  vi.mocked(client.getOrCreateSettingCollectionCollaboration).mockResolvedValue(conversation([suggestion()]))
+  vi.mocked(client.getSettingCollectionCollaboration).mockResolvedValue(conversation([suggestion()]))
   vi.mocked(client.acceptSettingCollectionCollaborationProposal).mockImplementation(() => new Promise(resolve => { finish = resolve }))
   const initial = props({ onApply: vi.fn(() => false) }), view = render(<SettingCollaborationPanel {...initial} />)
   fireEvent.click(await screen.findByRole('button', { name: '比较建议' }))
@@ -166,13 +765,13 @@ it('retains newer author text when adoption commits while writing continues', as
 
 it('checks an uncertain new-entry adoption after reload without creating another proposal', async () => {
   const message = newSuggestion(), result = accepted(message, 'new-document')
-  vi.mocked(client.getOrCreateSettingCollectionCollaboration).mockResolvedValue(conversation([message]))
+  vi.mocked(client.getSettingCollectionCollaboration).mockResolvedValue(conversation([message]))
   vi.mocked(client.acceptSettingCollectionCollaborationProposal).mockRejectedValueOnce(new ApiError(0, 'offline', '采纳响应丢失。')).mockResolvedValueOnce(result)
   const initial = props({ notes: [] }), view = render(<SettingCollaborationPanel {...initial} />)
   fireEvent.click(await screen.findByRole('button', { name: '比较建议' }))
   await act(async () => { fireEvent.click(screen.getByRole('button', { name: '采纳建议' })) })
   view.unmount()
-  vi.mocked(client.getOrCreateSettingCollectionCollaboration).mockResolvedValue(result.conversation)
+  vi.mocked(client.getSettingCollectionCollaboration).mockResolvedValue(result.conversation)
   render(<SettingCollaborationPanel {...initial} />)
   const retry = await screen.findByRole('button', { name: '检查采纳结果' })
   await act(async () => { fireEvent.click(retry) })
@@ -183,7 +782,7 @@ it('checks an uncertain new-entry adoption after reload without creating another
 })
 
 it('retains adoption recovery and never merges a response naming another target document', async () => {
-  vi.mocked(client.getOrCreateSettingCollectionCollaboration).mockResolvedValue(conversation([suggestion()]))
+  vi.mocked(client.getSettingCollectionCollaboration).mockResolvedValue(conversation([suggestion()]))
   vi.mocked(client.acceptSettingCollectionCollaborationProposal).mockResolvedValueOnce({ ...accepted(), document: { ...accepted().document, id: 'wrong-document' } }).mockResolvedValueOnce(accepted())
   const initial = props()
   render(<SettingCollaborationPanel {...initial} />)
@@ -206,11 +805,11 @@ it('keeps failed collection preparation retryable and preserves the composer', a
   expect(client.sendSettingCollectionCollaborationMessage).not.toHaveBeenCalled()
   expect(screen.getByRole('textbox')).toHaveValue('再聊一个新地点。')
   expect(screen.getByRole('alert')).toHaveTextContent('设定集草稿未能保存')
-  expect(screen.getByRole('button', { name: '重试上一条' })).toBeEnabled()
+  expect(screen.getByRole('button', { name: '继续发送' })).toBeEnabled()
 })
 
 it('discards a collection suggestion without writing any document', async () => {
-  vi.mocked(client.getOrCreateSettingCollectionCollaboration).mockResolvedValue(conversation([suggestion()]))
+  vi.mocked(client.getSettingCollectionCollaboration).mockResolvedValue(conversation([suggestion()]))
   vi.mocked(client.discardSettingCollectionCollaborationProposal).mockResolvedValue(conversation([{ ...suggestion(), proposal_status: 'rejected' }]))
   const initial = props()
   render(<SettingCollaborationPanel {...initial} />)
@@ -222,7 +821,7 @@ it('discards a collection suggestion without writing any document', async () => 
 })
 
 it('sends author comments without a separate typed message and acknowledges their exact snapshot', async () => {
-  vi.mocked(client.sendSettingCollectionCollaborationMessage).mockImplementation(async (_collection, payload) => conversation([userMessage(payload.client_message_id, payload.content)]))
+  vi.mocked(client.sendSettingCollectionCollaborationMessage).mockImplementation(async (_collection, payload) => complete(payload))
   const sent = vi.fn()
   render(<SettingCollaborationPanel {...props({ feedback: '原文：港口\n意见：增加来往船只', onSent: sent })} />)
   await ready()
@@ -232,7 +831,7 @@ it('sends author comments without a separate typed message and acknowledges thei
 })
 
 it('allows archived collection history while disabling generation and adoption', async () => {
-  vi.mocked(client.getOrCreateSettingCollectionCollaboration).mockResolvedValue(conversation([suggestion()]))
+  vi.mocked(client.getSettingCollectionCollaboration).mockResolvedValue(conversation([suggestion()]))
   render(<SettingCollaborationPanel {...props({ readOnly: true })} />)
   fireEvent.click(await screen.findByRole('button', { name: '比较建议' }))
   expect(screen.getByRole('textbox')).toBeDisabled()
@@ -243,7 +842,7 @@ it('allows archived collection history while disabling generation and adoption',
 it('preserves its collection draft through failed initialization and closes with motion', async () => {
   vi.stubGlobal('matchMedia', vi.fn(() => ({ matches: false })))
   vi.useFakeTimers()
-  vi.mocked(client.getOrCreateSettingCollectionCollaboration).mockRejectedValue(new ApiError(503, 'missing_config', '设定 Agent 暂不可用。'))
+  vi.mocked(client.getSettingCollectionCollaboration).mockRejectedValue(new ApiError(503, 'missing_config', '设定 Agent 暂不可用。'))
   const close = vi.fn()
   render(<SettingCollaborationPanel {...props({ onClose: close })} />)
   await act(async () => { await Promise.resolve() })
@@ -254,5 +853,5 @@ it('preserves its collection draft through failed initialization and closes with
   expect(close).not.toHaveBeenCalled()
   await act(async () => { vi.advanceTimersByTime(400) })
   expect(close).toHaveBeenCalledTimes(1)
-  expect(JSON.parse(sessionStorage.getItem(storageKey)!).draft).toBe('下次继续讨论。')
+  expect(JSON.parse(sessionStorage.getItem(legacyStorageKey)!).draft).toBe('下次继续讨论。')
 })

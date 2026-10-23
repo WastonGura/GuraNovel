@@ -32,7 +32,7 @@ async def test_collection_scope_upgrade_preserves_both_existing_histories_and_re
             await connection.execute(text("INSERT INTO setting_collaboration_messages(id,conversation_id,role,content) VALUES (:id,:conv,'assistant','Keep per-note authoring history exactly')"), {"id": old_message, "conv": old_conversation})
             await connection.execute(text("INSERT INTO studio_assistant_conversations(id,setting_collection_id) VALUES (:id,:collection)"), {"id": gura, "collection": collection})
             await connection.execute(text("INSERT INTO studio_assistant_messages(id,conversation_id,role,content) VALUES (:id,:conv,'assistant','Keep global Gura history exactly')"), {"id": gura_message, "conv": gura})
-        migrate("upgrade", "head")
+        migrate("upgrade", "0015_setting_collection_collab")
         async with engine.begin() as connection:
             assert await connection.scalar(text("SELECT content FROM setting_collaboration_messages WHERE id=:id"), {"id": old_message}) == "Keep per-note authoring history exactly"
             assert await connection.scalar(text("SELECT content FROM studio_assistant_messages WHERE id=:id"), {"id": gura_message}) == "Keep global Gura history exactly"
@@ -40,6 +40,11 @@ async def test_collection_scope_upgrade_preserves_both_existing_histories_and_re
             with pytest.raises(IntegrityError):
                 async with connection.begin_nested():
                     await connection.execute(text("INSERT INTO setting_collaborations(id,setting_collection_id,document_id,agent_role) VALUES (:id,:collection,NULL,'lore_agent')"), {"id": uuid4(), "collection": collection})
+        # Verify 0015's singleton constraint at 0015, before 0021 intentionally
+        # replaces it with a stable default plus explicit additional sessions.
+        migrate("upgrade", "head")
+        async with engine.begin() as connection:
+            assert await connection.scalar(text("SELECT is_default FROM setting_collaborations WHERE id=:id"), {"id": whole_conversation}) is True
             head_before_refused_downgrade = await connection.scalar(text("SELECT version_num FROM alembic_version"))
         refused = migrate("downgrade", "0014_setting_collaboration", check=False)
         assert refused.returncode != 0

@@ -46,9 +46,9 @@ async function workspace(page: Page) {
     }
     const read = pathname.match(new RegExp(`^/api/v1/documents/${documentId}/versions/([^/]+)/content$`))
     if (read) return json({ document_id: documentId, version_id: read[1], content: read[1] === current.id ? body : '灯塔只在退潮时亮起。' })
-    if (pathname === `/api/v1/setting-collections/${collectionId}/collaboration`) return json({
-      id: 'f3071111-1111-4111-8111-111111111111', setting_collection_id: collectionId, document_id: null,
-      agent_role: 'lore_agent', messages: [], created_at: stamp, updated_at: stamp,
+    if (pathname === `/api/v1/setting-collections/${collectionId}/collaboration` || pathname === `/api/v1/setting-collections/${collectionId}/collaboration/conversations/f3071111-1111-4111-8111-111111111111`) return json({
+      id: 'f3071111-1111-4111-8111-111111111111', title: '新对话', is_default: true, client_request_id: null, setting_collection_id: collectionId, document_id: null,
+      agent_role: 'lore_agent', messages: [], attempts: [], created_at: stamp, updated_at: stamp,
     })
     if (pathname === '/api/v1/projects' || pathname === '/api/v1/setting-collections') return json([])
     state.unexpected.push(`${request.method()} ${pathname}`)

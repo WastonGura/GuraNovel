@@ -1,6 +1,26 @@
 .setting-collaboration-panel { animation: setting-collaboration-in 280ms cubic-bezier(.2,.75,.25,1) both; display: flex; flex: 1 1 auto; flex-direction: column; height: 100%; min-height: 0; min-width: 0; padding: 12px var(--setting-content-right, 35px) 24px 0; position: relative; width: 100%; }
 .setting-collaboration-panel.is-closing { animation: setting-collaboration-out 200ms ease both; pointer-events: none; }
-.setting-collaboration-panel > header { align-items: center; display: flex; flex: 0 0 auto; justify-content: flex-end; margin-bottom: 24px; }
+.setting-collaboration-panel > header { align-items: center; display: flex; flex: 0 0 auto; gap: 16px; justify-content: flex-end; margin-bottom: 24px; }
+.setting-collaboration-toolbar { align-items: center; display: flex; gap: 4px; }
+.setting-collaboration-toolbar .setting-icon-button { color: #888; height: 32px; min-height: 32px; padding: 6px; width: 32px; }
+.setting-collaboration-toolbar .setting-icon-button[aria-pressed="true"] { color: #242424; }
+.setting-collaboration-session { display: flex; flex: 1 1 auto; flex-direction: column; min-height: 0; }
+.setting-collaboration-session[hidden] { display: none; }
+.setting-collaboration-history.has-scrolled, .setting-collaboration-session-list.has-scrolled { mask-image: linear-gradient(transparent, #000 22px); }
+.setting-collaboration-sessions { animation: setting-session-enter 160ms ease both; display: flex; flex: 1 1 auto; flex-direction: column; min-height: 0; }
+.setting-collaboration-sessions > h3 { color: #444; flex: 0 0 auto; font-size: 16px; font-weight: 400; margin: 0 0 20px; }
+.setting-collaboration-session-list { flex: 1 1 auto; min-height: 0; overflow: auto; overscroll-behavior: contain; scrollbar-width: none; }
+.setting-collaboration-session-list::-webkit-scrollbar { display: none; }
+.setting-collaboration-session-list > p, .setting-collaboration-session-list > div { color: #888; font-size: 13px; line-height: 1.8; }
+.studio .setting-collaboration-session-item { background: transparent; border-bottom: 1px solid #efefef; border-radius: 8px; display: grid; gap: 8px 20px; grid-template-columns: minmax(0, 1fr) auto; padding: 18px 10px; text-align: left; transition: background-color 160ms ease; width: 100%; }
+.studio .studio-setting .setting-collaboration-session-item:is(:hover, :focus-visible):not(:disabled) { background: #eee; }
+.studio .studio-setting .setting-collaboration-session-item:is(:hover, :focus-visible) .setting-collaboration-session-title { color: #171717; }
+.studio .studio-setting .setting-collaboration-session-item:focus-visible { outline: 1px solid #999; outline-offset: -1px; }
+.setting-collaboration-session-title { color: #444; font-size: 15px; line-height: 1.7; overflow-wrap: anywhere; }
+.setting-collaboration-session-title small { color: #999; font-size: 10px; margin-left: 12px; white-space: nowrap; }
+.setting-collaboration-session-item time { align-self: start; color: #aaa; font-size: 11px; line-height: 2.3; white-space: nowrap; }
+.setting-collaboration-session-preview { color: #999; font-size: 13px; grid-column: 1 / -1; line-height: 1.8; overflow-wrap: anywhere; white-space: pre-wrap; }
+.setting-collaboration-session-list .setting-collaboration-more, .setting-collaboration-session-list > div button { background: transparent; color: #777; font-size: 12px; min-height: 32px; padding: 6px 0; }
 .setting-collaboration-panel > header > button { background: transparent; color: #888; flex: 0 0 auto; font-size: 13px; min-height: 32px; padding: 4px 0; }
 .studio .setting-collaboration-panel > header > button:hover { background: transparent; color: #171717; text-decoration: underline; text-underline-offset: 5px; }
 .setting-collaboration-history { flex: 1; min-height: 0; overflow: auto; overscroll-behavior: contain; padding: 8px 0 24px; scrollbar-width: none; }
@@ -8,9 +28,9 @@
 .setting-collaboration-empty { color: #999; font-size: 14px; line-height: 1.9; margin: 0; padding: 16px 0 32px; }
 .studio .setting-collaboration-empty h3 { color: #282828; font-size: clamp(24px, 2.4vw, 34px); font-weight: 400; line-height: 1.6; margin: 0 0 12px; }
 .setting-collaboration-empty p { margin: 0; }
-.setting-collaboration-panel.is-empty > header { position: absolute; right: var(--setting-content-right, 35px); top: 12px; }
+.setting-collaboration-panel.is-empty:not(.is-history) > header { position: absolute; right: var(--setting-content-right, 35px); top: 12px; }
 .setting-collaboration-panel.is-empty .setting-collaboration-history, .setting-collaboration-panel.is-empty .setting-collaboration-empty { padding-top: 0; }
-.setting-collaboration-panel.is-empty .setting-collaboration-empty h3 { margin-right: 100px; }
+.setting-collaboration-panel.is-empty .setting-collaboration-empty h3 { margin-right: 180px; }
 .setting-collaboration-message { font-size: 16px; line-height: 1.95; margin-bottom: 30px; overflow-wrap: anywhere; }
 .setting-collaboration-message > small { color: #999; display: block; font-size: 11px; line-height: 1.5; margin-bottom: 8px; }
 .setting-collaboration-message > p { margin: 0; white-space: pre-wrap; }
@@ -38,6 +58,7 @@
 .setting-collaboration-composer textarea:focus { outline: none; }
 .setting-collaboration-composer footer { align-items: center; display: flex; justify-content: space-between; margin-top: 8px; }
 .setting-collaboration-composer footer > span { color: #999; font-size: 11px; }
+.setting-collaboration-composer footer > div { display: flex; flex-wrap: wrap; gap: 4px 18px; }
 .studio .setting-collaboration-send { align-items: center; background: #242424; border-radius: 50%; display: flex; height: 32px; justify-content: center; min-height: 32px; padding: 0; width: 32px; }
 .studio .setting-collaboration-send:disabled { background: #d2d2d2; opacity: 1; }
 .studio .studio-setting .setting-collaboration-send:hover:not(:disabled) { background: #111; }
@@ -48,9 +69,12 @@
 .setting-collaboration-panel button:focus-visible { outline: 1px solid #777; outline-offset: 3px; }
 @keyframes setting-collaboration-in { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
 @keyframes setting-collaboration-out { from { opacity: 1; transform: translateY(0); } to { opacity: 0; transform: translateY(6px); } }
+@keyframes setting-session-enter { from { opacity: 0; } to { opacity: 1; } }
 @media (max-width: 700px) {
   .setting-collaboration-panel { padding-bottom: 16px; }
   .setting-collaboration-panel > header { margin-bottom: 16px; }
+  .setting-collaboration-panel.is-empty:not(.is-history) > header { margin-bottom: 16px; position: static; }
+  .setting-collaboration-panel.is-empty .setting-collaboration-empty h3 { margin-right: 0; }
   .setting-collaboration-empty { font-size: 13px; padding-bottom: 28px; }
   .setting-collaboration-message { font-size: 15px; }
   .setting-collaboration-message.is-user { max-width: 90%; padding: 12px 16px; }
@@ -59,4 +83,4 @@
   .setting-collaboration-composer { border-radius: 18px; padding: 14px 16px 12px; }
   .studio .setting-collaboration-composer textarea { font-size: 15px; }
 }
-@media (prefers-reduced-motion: reduce) { .setting-collaboration-panel, .setting-collaboration-panel.is-closing { animation: none; } .setting-collaboration-composer { transition: none; } }
+@media (prefers-reduced-motion: reduce) { .setting-collaboration-panel, .setting-collaboration-panel.is-closing, .setting-collaboration-sessions { animation: none; } .setting-collaboration-composer, .setting-collaboration-session-item { transition: none; } }

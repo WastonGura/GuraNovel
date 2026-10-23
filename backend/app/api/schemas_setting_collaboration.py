@@ -66,6 +66,7 @@ class SettingCollaborationMessageResponse(BaseModel):
     role: Literal["user", "assistant"]
     content: str
     client_message_id: str | None
+    attempt_id: UUID | None = None
     proposal: SettingChangeProposal | None
     proposal_status: Literal["pending", "accepted", "rejected"] | None
     base_content: str | None
@@ -74,15 +75,62 @@ class SettingCollaborationMessageResponse(BaseModel):
     created_at: datetime
 
 
+class SettingCollaborationAttemptResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: UUID
+    client_message_id: str
+    content: str
+    request: dict
+    status: Literal["prepared", "dispatched", "result_saved", "completed", "finished"]
+    error_code: str | None
+    provenance: dict | None
+    has_result: bool
+    user_message_id: UUID | None
+    assistant_message_id: UUID | None
+    created_at: datetime
+    updated_at: datetime
+
+
 class SettingCollaborationResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
     id: UUID
     setting_collection_id: UUID
     document_id: UUID | None
     agent_role: Literal["worldbuilding_agent", "lore_agent"]
+    title: str
+    is_default: bool
+    client_request_id: UUID | None
     messages: list[SettingCollaborationMessageResponse]
+    attempts: list[SettingCollaborationAttemptResponse] = Field(default_factory=list)
     created_at: datetime
     updated_at: datetime
+
+
+class SettingCollaborationCreateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    client_request_id: UUID
+
+    @field_validator("client_request_id")
+    @classmethod
+    def nonzero_identity(cls, value: UUID) -> UUID:
+        if value.int == 0:
+            raise ValueError("A nonzero request identity is required")
+        return value
+
+
+class SettingCollaborationSummary(BaseModel):
+    id: UUID
+    title: str
+    created_at: datetime
+    updated_at: datetime
+    message_count: int
+    preview: str
+    is_default: bool
+
+
+class SettingCollaborationHistoryResponse(BaseModel):
+    items: list[SettingCollaborationSummary]
+    next_offset: int | None
 
 
 class SettingCollaborationAcceptanceResponse(BaseModel):

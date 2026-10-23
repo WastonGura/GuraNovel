@@ -69,9 +69,9 @@ async function workspace(page: Page, options: { versions?: number; points?: numb
       return state.associationFailure ? route.abort('connectionfailed') : json(projects.slice(0, state.associationCount))
     }
     if (path === `/api/v1/setting-collections/${collectionId}/documents`) return json([document()])
-    if (path === `/api/v1/setting-collections/${collectionId}/collaboration`) return json({
-      id: 'f3111111-1111-4111-8111-111111111111', setting_collection_id: collectionId,
-      document_id: null, agent_role: 'lore_agent', messages: [], created_at: stamp, updated_at: stamp,
+    if (path === `/api/v1/setting-collections/${collectionId}/collaboration` || path === `/api/v1/setting-collections/${collectionId}/collaboration/conversations/f3111111-1111-4111-8111-111111111111`) return json({
+      id: 'f3111111-1111-4111-8111-111111111111', title: '新对话', is_default: true, client_request_id: null, setting_collection_id: collectionId,
+      document_id: null, agent_role: 'lore_agent', messages: [], attempts: [], created_at: stamp, updated_at: stamp,
     })
     if (path === `/api/v1/documents/${docId}`) return json(document())
     if (path === `/api/v1/documents/${docId}/versions`) return json(state.snapshots.map(snapshot => snapshot.version))

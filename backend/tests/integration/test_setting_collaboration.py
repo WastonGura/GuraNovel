@@ -63,7 +63,8 @@ def payload(document, **overrides):
 def suggestion(monkeypatch, captured):
     from app.agents.setting_collaboration import SettingCollaborationReply, SettingSuggestedEdit
 
-    async def generate(content, context, history):
+    async def generate(content, context, history, *, before_dispatch):
+        await before_dispatch({"model_identifier": "synthetic-contract-model"})
         captured.append((content, context, history))
         return SettingCollaborationReply(reply="可给潮汐增加代价，先比较再采纳。", suggestion=SettingSuggestedEdit(
             proposed_content=context["body"] + " Each reversal costs a memory.", reason="The cost supports the central conflict.",
@@ -133,7 +134,8 @@ async def test_author_typing_during_model_response_preserves_both_and_blocks_sta
     from app.agents.setting_collaboration import SettingCollaborationReply, SettingSuggestedEdit
     started, resume = asyncio.Event(), asyncio.Event()
 
-    async def generate(*args):
+    async def generate(*args, before_dispatch):
+        await before_dispatch({"model_identifier": "synthetic-contract-model"})
         started.set()
         await resume.wait()
         return SettingCollaborationReply(reply="A suggestion", suggestion=SettingSuggestedEdit(proposed_content="Agent version", reason="Try this")), {}
@@ -188,7 +190,8 @@ async def test_scope_permissions_archive_and_failed_model_retries(client, async_
     assert (await client.get(wrong)).status_code == 404
     from app.llm.errors import ProviderUnavailableError
 
-    async def fail(*args):
+    async def fail(*args, before_dispatch):
+        await before_dispatch({"model_identifier": "synthetic-contract-model"})
         raise ProviderUnavailableError()
 
     monkeypatch.setattr("app.agents.setting_collaboration.generate_setting_collaboration", fail)
@@ -197,10 +200,15 @@ async def test_scope_permissions_archive_and_failed_model_retries(client, async_
     assert (await client.get(path)).json()["messages"] == []
     captured = []
     suggestion(monkeypatch, captured)
+    assert (await client.post(path + "/messages", json=request)).json()["attempts"][0]["status"] == "dispatched"
+    assert captured == []
+    assert (await client.post(path + "/attempts/finish", json=request)).status_code == 200
+    request = {**request, "client_message_id": str(uuid4())}
     first, second = await asyncio.gather(client.post(path + "/messages", json=request), client.post(path + "/messages", json=request))
     assert first.status_code == second.status_code == 200
     assert len(captured) == 1
-    proposal = first.json()["messages"][1]["proposal"]
+    completed = next(response for response in (first, second) if response.json()["messages"])
+    proposal = completed.json()["messages"][1]["proposal"]
     collection.status = "archived"
     await async_session.commit()
     assert (await client.get(path)).status_code == 200

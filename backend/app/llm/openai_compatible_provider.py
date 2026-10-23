@@ -55,6 +55,7 @@ class OpenAICompatibleStructuredOutputTransport:
         "__client",
         "__owns_client",
         "__supports_json_schema",
+        "__allow_schema_fallback",
     )
 
     def __init__(
@@ -64,12 +65,15 @@ class OpenAICompatibleStructuredOutputTransport:
         api_key: str,
         timeout_seconds: float = 30.0,
         client: httpx.AsyncClient | None = None,
+        allow_schema_fallback: bool = True,
+        prefer_json_schema: bool = True,
     ) -> None:
         self.__base_url = base_url.rstrip("/")
         self.__api_key = api_key
         self.__owns_client = client is None
         self.__client = client
-        self.__supports_json_schema: bool | None = None
+        self.__supports_json_schema: bool | None = None if prefer_json_schema else False
+        self.__allow_schema_fallback = allow_schema_fallback
         if self.__client is None:
             self.__client = httpx.AsyncClient(
                 base_url=f"{self.__base_url}/",
@@ -140,7 +144,7 @@ class OpenAICompatibleStructuredOutputTransport:
                 ) as response:
                     if response.status_code == 429:
                         transport_error = ProviderRateLimitedError()
-                    elif response.status_code == 400 and use_json_schema and attempt == 0:
+                    elif response.status_code == 400 and use_json_schema and attempt == 0 and self.__allow_schema_fallback:
                         retry_fallback = True
                     elif not response.is_success:
                         transport_error = ProviderUnavailableError()
